@@ -1,0 +1,18 @@
+# Core data science stack
+numpy>=1.21.0
+pandas>=1.3.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+jupyter>=1.0.0
+
+# Database access
+psycopg2-binary>=2.9.0
+
+# Machine learning (for later phases)
+# scikit-learn>=1.0.0
+# xgboost>=1.5.0
+# Gaussian processes and other ML libraries to be added
+
+# Visualization and utilities
+scipy>=1.7.0
+astropy>=4.3.0
