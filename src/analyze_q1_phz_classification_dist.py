@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""
+Analyze PHZ morphological classification distribution vs magnitude (Direct WSDB Query - Optimized).
+
+This script:
+1. Queries Q1-Gaia-PHZ crossmatch directly from WSDB by magnitude bins (SINGLE QUERY)
+2. Analyzes STAR, GALAXY, and QSO+GLOBULAR_CLUSTER+OTHER classifications vs magnitude
+3. Creates a stacked area chart showing 3 combined categories (STAR, GALAXY, QSO+GC+OTHER) summing to 100%
+4. Creates 3 individual plots showing breakdown: STAR alone, GALAXY alone, and QSO+GLOBULAR+OTHER separately
+5. Uses p_phz_classification from the PHZ pipeline (ESA DPDD)
+
+PHZ_CLASSIFICATION Values (per ESA DPDD):
+"Classification flag: I1 if the source is accepted as star, I2 if it is accepted as
+a galaxy I4 if it is accepted as a QSO I8 if the source is accepted as a globular Cluster"
+
+Dominant class encoding:
+- 1 (I1): Source accepted as STAR
+- 2 (I2): Source accepted as GALAXY
+- 4 (I4): Source accepted as QSO
+- 8 (I8): Source accepted as GLOBULAR CLUSTER
+- -1, 0, 3, 5, 6, 7: Multi-class, outliers, or unclassified (OTHER)
+
+Visualization grouping:
+- Top stacked chart shows 3 combined categories: STAR, GALAXY, QSO+GLOBULAR_CLUSTER+OTHER
+- Bottom-left plot: STAR (I1) fraction only
+- Bottom-middle plot: GALAXY (I2) fraction only
+- Bottom-right plot: QSO (I4), GLOBULAR_CLUSTER (I8), and OTHER shown separately
+
+Magnitude: MER detection flux (FLUX_DETECTION_TOTAL from IE detection mosaic, ZP=23.9 AB)
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+from pathlib import Path
+import os
+
+# Configuration
+PROJECT_DIR = Path(__file__).parent.parent
+OUTPUT_DIR = PROJECT_DIR / 'output'
+
+# WSDB Configuration
+WSDB_HOST = 'wsdb.ast.cam.ac.uk'
+WSDB_DB = 'wsdb'
+
+# Ensure output directory exists
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def calculate_binomial_uncertainty(successes, trials):
+    """
+    Calculate binomial uncertainty on a fraction.
+
+    This represents the statistical uncertainty due to the finite number of
+    sources in the bin. It's the standard error of a binomial proportion.
+
+    uncertainty = sqrt(p * (1 - p) / n)
+    where p = fraction and n = number of trials
+    """
+    if trials == 0:
+        return 0, 0, 0
+
+    proportion = successes / trials
+
+    # Binomial uncertainty (1-sigma)
+    uncertainty = np.sqrt(proportion * (1 - proportion) / trials)
+
+    lower = max(0, proportion - uncertainty)
+    upper = min(1, proportion + uncertainty)
+
+    return proportion, lower, upper
+
+
+def query_phz_classification_by_magnitude(username):
+    """
+    Query PHZ classification data by magnitude bins directly from WSDB (OPTIMIZED).
+
+    Uses a single query with window functions to bin and classify all data at once,
+    then processes results in Python. Much faster than looping over 45 queries.
+
+    Args:
+        username: WSDB username
+
+    Returns:
+        tuple of (bin_centers, star_fraction, galaxy_extended_fraction,
+                  qso_other_fraction, galaxy_fraction, globular_fraction,
+                  qso_fraction, other_fraction, and their uncertainties, counts)
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        print("ERROR: psycopg2 not installed!")
+        return None
+
+    print(f"\n{'='*70}")
+    print(f"PHZ Classification Distribution Analysis (Optimized WSDB Query)")
+    print(f"{'='*70}")
+
+    # Connect to WSDB
+    print(f"\nConnecting to WSDB...")
+    try:
+        conn = psycopg2.connect(
+            host=WSDB_HOST,
+            database=WSDB_DB,
+            user=username
+        )
+    except Exception as e:
+        print(f"ERROR connecting to WSDB: {e}")
+        return None
+
+    table_name = f"{username}.crossmatch_q1_mer_phz"
+
+    # Define magnitude bins (0.5 magnitude bins)
+    mag_bins = np.arange(6, 28, 0.5)
+
+    print(f"\nQuerying all magnitude bins from {table_name} (SINGLE QUERY)...")
+    print(f"Processing {len(mag_bins)-1} bins from mag {mag_bins[0]} to {mag_bins[-1]}")
+    print(f"Magnitude column: MER detection flux (FLUX_DETECTION_TOTAL, ZP=23.9 AB)")
+    print(f"Classification column: p_phz_classification (PHZ pipeline)\n")
+
+    cursor = conn.cursor()
+
+    # Single optimized query: bin all data at once with FLOOR
+    # Magnitude computed from MER detection flux: mag = -2.5 * log10(flux) + 23.9
+    query = f"""
+        SELECT
+            FLOOR((-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9 - {mag_bins[0]}) / 0.5) as bin_index,
+            {mag_bins[0]} + (FLOOR((-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9 - {mag_bins[0]}) / 0.5) * 0.5) + 0.25 as bin_center,
+            CASE
+                WHEN p_phz_classification = 1 THEN 'STAR'
+                WHEN p_phz_classification = 2 THEN 'GALAXY'
+                WHEN p_phz_classification = 4 THEN 'QSO'
+                WHEN p_phz_classification = 8 THEN 'GLOBULAR'
+                ELSE 'OTHER'
+            END as phz_class,
+            COUNT(*) as count
+        FROM {table_name}
+        WHERE m_flux_detection_total > 0
+          AND (-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9) >= {mag_bins[0]}
+          AND (-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9) < {mag_bins[-1]}
+          AND m_flux_detection_total IS NOT NULL
+          AND p_phz_classification IS NOT NULL
+        GROUP BY bin_index, bin_center, phz_class
+        ORDER BY bin_index, phz_class
+    """
+
+    try:
+        cursor.execute(query)
+        results = cursor.fetchall()
+        print(f"Query completed. Processing {len(results)} classification rows...\n")
+
+        # Parse results into a dictionary keyed by (bin_index, phz_class)
+        data_dict = {}
+        for row in results:
+            bin_idx, bin_center, phz_class, count = row
+            key = (int(bin_idx), phz_class)
+            data_dict[key] = count
+
+        # Storage for all fractions and uncertainties
+        star_fraction = []
+        star_fraction_lower = []
+        star_fraction_upper = []
+
+        galaxy_fraction = []
+        galaxy_fraction_lower = []
+        galaxy_fraction_upper = []
+
+        globular_fraction = []
+        globular_fraction_lower = []
+        globular_fraction_upper = []
+
+        galaxy_extended_fraction = []
+        galaxy_extended_fraction_lower = []
+        galaxy_extended_fraction_upper = []
+
+        qso_fraction = []
+        qso_fraction_lower = []
+        qso_fraction_upper = []
+
+        other_fraction = []
+        other_fraction_lower = []
+        other_fraction_upper = []
+
+        qso_other_fraction = []
+        qso_other_fraction_lower = []
+        qso_other_fraction_upper = []
+
+        bin_centers = []
+        counts = []
+
+        # Process bins
+        for i in range(len(mag_bins) - 1):
+            mag_min = mag_bins[i]
+            mag_max = mag_bins[i + 1]
+            bin_center = (mag_min + mag_max) / 2
+
+            # Get counts for this bin from the dictionary
+            star_count = data_dict.get((i, 'STAR'), 0)
+            galaxy_count = data_dict.get((i, 'GALAXY'), 0)
+            qso_count = data_dict.get((i, 'QSO'), 0)
+            globular_count = data_dict.get((i, 'GLOBULAR'), 0)
+            other_count = data_dict.get((i, 'OTHER'), 0)
+
+            total = star_count + galaxy_count + qso_count + globular_count + other_count
+            galaxy_extended_count = galaxy_count + globular_count
+            qso_other_count = qso_count + other_count
+
+            if total > 0:
+                # Calculate fractions with uncertainties for STAR
+                frac_star, frac_star_lower, frac_star_upper = calculate_binomial_uncertainty(
+                    star_count, total
+                )
+                star_fraction.append(frac_star)
+                star_fraction_lower.append(frac_star_lower)
+                star_fraction_upper.append(frac_star_upper)
+
+                # Calculate fractions with uncertainties for GALAXY
+                frac_gal, frac_gal_lower, frac_gal_upper = calculate_binomial_uncertainty(
+                    galaxy_count, total
+                )
+                galaxy_fraction.append(frac_gal)
+                galaxy_fraction_lower.append(frac_gal_lower)
+                galaxy_fraction_upper.append(frac_gal_upper)
+
+                # Calculate fractions with uncertainties for GLOBULAR
+                frac_glob, frac_glob_lower, frac_glob_upper = calculate_binomial_uncertainty(
+                    globular_count, total
+                )
+                globular_fraction.append(frac_glob)
+                globular_fraction_lower.append(frac_glob_lower)
+                globular_fraction_upper.append(frac_glob_upper)
+
+                # Calculate fractions with uncertainties for GALAXY_EXTENDED (GAL + GLOB)
+                frac_gal_ext, frac_gal_ext_lower, frac_gal_ext_upper = calculate_binomial_uncertainty(
+                    galaxy_extended_count, total
+                )
+                galaxy_extended_fraction.append(frac_gal_ext)
+                galaxy_extended_fraction_lower.append(frac_gal_ext_lower)
+                galaxy_extended_fraction_upper.append(frac_gal_ext_upper)
+
+                # Calculate fractions with uncertainties for QSO
+                frac_qso, frac_qso_lower, frac_qso_upper = calculate_binomial_uncertainty(
+                    qso_count, total
+                )
+                qso_fraction.append(frac_qso)
+                qso_fraction_lower.append(frac_qso_lower)
+                qso_fraction_upper.append(frac_qso_upper)
+
+                # Calculate fractions with uncertainties for OTHER
+                frac_other, frac_other_lower, frac_other_upper = calculate_binomial_uncertainty(
+                    other_count, total
+                )
+                other_fraction.append(frac_other)
+                other_fraction_lower.append(frac_other_lower)
+                other_fraction_upper.append(frac_other_upper)
+
+                # Calculate fractions with uncertainties for QSO_OTHER (QSO + OTHER)
+                frac_qso_other, frac_qso_other_lower, frac_qso_other_upper = calculate_binomial_uncertainty(
+                    qso_other_count, total
+                )
+                qso_other_fraction.append(frac_qso_other)
+                qso_other_fraction_lower.append(frac_qso_other_lower)
+                qso_other_fraction_upper.append(frac_qso_other_upper)
+
+                bin_centers.append(bin_center)
+                counts.append(total)
+
+                # Verify fractions sum to ~100%
+                total_frac = frac_star + frac_gal_ext + frac_qso_other
+                print(f"Magnitude {mag_min:5.1f}-{mag_max:5.1f}: "
+                      f"{total:8,d} sources | "
+                      f"STAR={frac_star:.1%} | "
+                      f"GALAXY+GC={frac_gal_ext:.1%} (GAL={frac_gal:.1%} GC={frac_glob:.1%}) | "
+                      f"QSO+OTHER={frac_qso_other:.1%} (QSO={frac_qso:.1%} OTH={frac_other:.1%}) | "
+                      f"SUM={total_frac:.1%}")
+
+    except Exception as e:
+        print(f"ERROR executing optimized query: {e}")
+        import traceback
+        traceback.print_exc()
+        cursor.close()
+        conn.close()
+        return None
+
+    cursor.close()
+    conn.close()
+
+    # Convert to numpy arrays
+    bin_centers_arr = np.array(bin_centers)
+    star_frac_arr = np.array(star_fraction)
+    galaxy_frac_arr = np.array(galaxy_fraction)
+    globular_frac_arr = np.array(globular_fraction)
+    galaxy_extended_frac_arr = np.array(galaxy_extended_fraction)
+    qso_frac_arr = np.array(qso_fraction)
+    other_frac_arr = np.array(other_fraction)
+    qso_other_frac_arr = np.array(qso_other_fraction)
+
+    return (bin_centers_arr, star_frac_arr, galaxy_extended_frac_arr, qso_other_frac_arr,
+            galaxy_frac_arr, globular_frac_arr, qso_frac_arr, other_frac_arr,
+            star_fraction_lower, star_fraction_upper,
+            galaxy_fraction_lower, galaxy_fraction_upper,
+            globular_fraction_lower, globular_fraction_upper,
+            qso_fraction_lower, qso_fraction_upper,
+            other_fraction_lower, other_fraction_upper,
+            qso_other_fraction_lower, qso_other_fraction_upper,
+            counts)
+
+
+def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_arr,
+                        qso_other_frac_arr, galaxy_frac_arr, globular_frac_arr,
+                        qso_frac_arr, other_frac_arr,
+                        star_fraction_lower, star_fraction_upper,
+                        galaxy_fraction_lower, galaxy_fraction_upper,
+                        globular_fraction_lower, globular_fraction_upper,
+                        qso_fraction_lower, qso_fraction_upper,
+                        other_fraction_lower, other_fraction_upper,
+                        qso_other_fraction_lower, qso_other_fraction_upper):
+    """Create visualization of PHZ classification distribution."""
+
+    print(f"\nCreating visualization...")
+
+    # Create figure with better layout management
+    fig = plt.figure(figsize=(18, 9))
+    fig.suptitle('PHZ Classification Distribution vs Magnitude for All PHZ Sources',
+                 fontsize=15, fontweight='bold', y=1)
+
+    # Use GridSpec for more control
+    from matplotlib.gridspec import GridSpec
+    gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3, top=0.93)
+
+    # ===== Top Row: Stacked Area Chart (spans all 3 columns) =====
+    ax_stacked = fig.add_subplot(gs[0, :])
+
+    # Calculate combined QSO+GC+OTHER for stacked chart
+    qso_gc_other_combined = qso_frac_arr + globular_frac_arr + other_frac_arr
+
+    ax_stacked.fill_between(bin_centers_arr, 0, star_frac_arr*100,
+                            label='STAR (I1)', color='darkblue', alpha=0.6)
+    ax_stacked.fill_between(bin_centers_arr, star_frac_arr*100,
+                            (star_frac_arr + galaxy_frac_arr)*100,
+                            label='GALAXY (I2)', color='darkgreen', alpha=0.6)
+    ax_stacked.fill_between(bin_centers_arr,
+                            (star_frac_arr + galaxy_frac_arr)*100,
+                            (star_frac_arr + galaxy_frac_arr + qso_gc_other_combined)*100,
+                            label='QSO+GLOBULAR_CLUSTER+OTHER', color='darkred', alpha=0.6)
+
+    ax_stacked.axhline(y=100, color='black', linestyle='-', linewidth=1, alpha=0.3)
+    ax_stacked.axhline(y=50, color='black', linestyle='--', linewidth=1, alpha=0.2)
+    ax_stacked.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=11, fontweight='bold')
+    ax_stacked.set_ylabel('Fraction (%)', fontsize=11, fontweight='bold')
+    ax_stacked.set_title('Combined Classification Distribution', fontsize=12, fontweight='bold')
+    ax_stacked.set_ylim(0, 105)
+    ax_stacked.set_xlim(bin_centers_arr.min() - 0.1, bin_centers_arr.max() + 0.1)
+    ax_stacked.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
+    ax_stacked.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+    ax_stacked.grid(True, alpha=0.3, which='both')
+    ax_stacked.legend(loc='upper left', fontsize=10, ncol=3)
+    ax_stacked.tick_params(axis='x', rotation=45, labelsize=9)
+
+    # ===== Bottom Row: 3 Individual Line Plots =====
+
+    # STAR Classification
+    ax1 = fig.add_subplot(gs[1, 0])
+    ax1.errorbar(bin_centers_arr, star_frac_arr*100,
+                 yerr=[[(star_frac_arr[i] - star_fraction_lower[i])*100 for i in range(len(star_frac_arr))],
+                       [(star_fraction_upper[i] - star_frac_arr[i])*100 for i in range(len(star_frac_arr))]],
+                 fmt='o-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
+                 color='darkblue', ecolor='darkblue', alpha=0.7, label='STAR (I1)')
+    ax1.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax1.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
+    ax1.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
+    ax1.set_title('STAR (I1)', fontsize=11, fontweight='bold')
+    ax1.set_ylim(-5, 105)
+    ax1.set_xlim(17, 28)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='best', fontsize=9)
+    ax1.tick_params(axis='x', rotation=45, labelsize=9)
+
+    # GALAXY Classification
+    ax2 = fig.add_subplot(gs[1, 1])
+    ax2.errorbar(bin_centers_arr, galaxy_frac_arr*100,
+                 yerr=[[(galaxy_frac_arr[i] - galaxy_fraction_lower[i])*100 for i in range(len(galaxy_frac_arr))],
+                       [(galaxy_fraction_upper[i] - galaxy_frac_arr[i])*100 for i in range(len(galaxy_frac_arr))]],
+                 fmt='s-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
+                 color='darkgreen', ecolor='darkgreen', alpha=0.7, label='GALAXY (I2)')
+    ax2.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax2.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
+    ax2.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
+    ax2.set_title('GALAXY (I2)', fontsize=11, fontweight='bold')
+    ax2.set_ylim(-5, 105)
+    ax2.set_xlim(17, 28)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc='best', fontsize=9)
+    ax2.tick_params(axis='x', rotation=45, labelsize=9)
+
+    # QSO + GLOBULAR_CLUSTER + OTHER Classification
+    ax3 = fig.add_subplot(gs[1, 2])
+    ax3.errorbar(bin_centers_arr, qso_frac_arr*100,
+                 yerr=[[(qso_frac_arr[i] - qso_fraction_lower[i])*100 for i in range(len(qso_frac_arr))],
+                       [(qso_fraction_upper[i] - qso_frac_arr[i])*100 for i in range(len(qso_frac_arr))]],
+                 fmt='^-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
+                 color='darkorange', ecolor='darkorange', alpha=0.7, label='QSO (I4)')
+    ax3.errorbar(bin_centers_arr, globular_frac_arr*100,
+                 yerr=[[(globular_frac_arr[i] - globular_fraction_lower[i])*100 for i in range(len(globular_frac_arr))],
+                       [(globular_fraction_upper[i] - globular_frac_arr[i])*100 for i in range(len(globular_frac_arr))]],
+                 fmt='D-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
+                 color='violet', ecolor='violet', alpha=0.7, label='GLOBULAR_CLUSTER (I8)')
+    ax3.errorbar(bin_centers_arr, other_frac_arr*100,
+                 yerr=[[(other_frac_arr[i] - other_fraction_lower[i])*100 for i in range(len(other_frac_arr))],
+                       [(other_fraction_upper[i] - other_frac_arr[i])*100 for i in range(len(other_frac_arr))]],
+                 fmt='s-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
+                 color='red', ecolor='red', alpha=0.7, label='OTHER (Multi/Outlier)')
+    ax3.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax3.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
+    ax3.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
+    ax3.set_title('QSO + GLOBULAR_CLUSTER + OTHER', fontsize=11, fontweight='bold')
+    ax3.set_ylim(-5, 105)
+    ax3.set_xlim(17, 28)
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(loc='best', fontsize=8)
+    ax3.tick_params(axis='x', rotation=45, labelsize=9)
+
+    plt.savefig(OUTPUT_DIR / 'q1_phz_classification_dist.png', dpi=300, bbox_inches='tight')
+    print(f"✓ Plot saved to: {OUTPUT_DIR / 'q1_phz_classification_dist.png'}")
+    plt.close()
+
+
+def main():
+    """Main execution."""
+    print("="*70)
+    print("PHZ Classification Distribution Analysis (Full Dataset via WSDB)")
+    print("="*70)
+
+    # Get username from environment
+    username = os.getenv('PGUSER')
+    if not username:
+        print("\nERROR: PGUSER environment variable not set!")
+        print("Set it with: export PGUSER=your_username")
+        return
+
+    print(f"\nLogged in as: {username}")
+    print(f"WSDB Host: {WSDB_HOST}")
+    print(f"Database: {WSDB_DB}")
+
+    # Query data by magnitude bins
+    print("\n" + "="*70)
+    print("Step 1: Query Classification by Magnitude Bins")
+    print("="*70)
+
+    result = query_phz_classification_by_magnitude(username)
+    if result is None:
+        print("Failed to query data from WSDB")
+        return
+
+    (bin_centers_arr, star_frac_arr, galaxy_extended_frac_arr, qso_other_frac_arr,
+     galaxy_frac_arr, globular_frac_arr, qso_frac_arr, other_frac_arr,
+     star_fraction_lower, star_fraction_upper,
+     galaxy_fraction_lower, galaxy_fraction_upper,
+     globular_fraction_lower, globular_fraction_upper,
+     qso_fraction_lower, qso_fraction_upper,
+     other_fraction_lower, other_fraction_upper,
+     qso_other_fraction_lower, qso_other_fraction_upper,
+     counts) = result
+
+    # Create visualization
+    print("\n" + "="*70)
+    print("Step 2: Create Visualization")
+    print("="*70)
+
+    create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_arr,
+                        qso_other_frac_arr, galaxy_frac_arr, globular_frac_arr,
+                        qso_frac_arr, other_frac_arr,
+                        star_fraction_lower, star_fraction_upper,
+                        galaxy_fraction_lower, galaxy_fraction_upper,
+                        globular_fraction_lower, globular_fraction_upper,
+                        qso_fraction_lower, qso_fraction_upper,
+                        other_fraction_lower, other_fraction_upper,
+                        qso_other_fraction_lower, qso_other_fraction_upper)
+
+    print("\n" + "="*70)
+    print("Analysis Complete!")
+    print("="*70)
+    print("\nVisualization Guide:")
+    print("✓ Stacked Area Chart (top): Shows 3 combined categories summing to 100%")
+    print("                            (STAR, GALAXY, QSO+GLOBULAR_CLUSTER+OTHER)")
+    print("✓ STAR Plot (bottom-left): STAR (I1) fraction only")
+    print("✓ GALAXY Plot (bottom-middle): GALAXY (I2) fraction only")
+    print("✓ Right Plot (bottom-right): QSO (I4), GLOBULAR_CLUSTER (I8), and OTHER shown separately")
+    print("\nInterpretation Guide:")
+    print("✓ GOOD: STAR fraction high at bright mags, decreases at fainter mags")
+    print("✓ GOOD: GALAXY+GC fraction low at bright mags, increases at fainter mags")
+    print("✓ GOOD: QSO+OTHER fraction relatively constant and low")
+    print("✓ GOOD: Fractions sum to 100% in each magnitude bin")
+    print("✗ BAD: Combined fractions flat across all magnitudes (classifier not working)")
+
+
+if __name__ == '__main__':
+    main()
