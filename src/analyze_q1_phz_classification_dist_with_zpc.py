@@ -112,8 +112,9 @@ def query_phz_classification_by_magnitude(username):
 
     table_name = f"{username}.crossmatch_q1_mer_phz"
 
-    # Define magnitude bins (0.5 magnitude bins)
-    mag_bins = np.arange(6, 28, 0.5)
+    # Define magnitude bins
+    BIN_WIDTH = 0.5
+    mag_bins = np.arange(6, 28, BIN_WIDTH)
 
     print(f"\nQuerying all magnitude bins from {table_name} (SINGLE QUERY)...")
     print(f"Processing {len(mag_bins)-1} bins from mag {mag_bins[0]} to {mag_bins[-1]}")
@@ -126,8 +127,8 @@ def query_phz_classification_by_magnitude(username):
     # mag = -2.5 * log10(ZPC * flux) + ZP_ref
     query = f"""
         SELECT
-            FLOOR((-2.5 * LOG({ZPC_IE} * m_flux_detection_total) / LN(10) + {ZP_REF} - {mag_bins[0]}) / 0.5) as bin_index,
-            {mag_bins[0]} + (FLOOR((-2.5 * LOG({ZPC_IE} * m_flux_detection_total) / LN(10) + {ZP_REF} - {mag_bins[0]}) / 0.5) * 0.5) + 0.25 as bin_center,
+            FLOOR((-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF} - {mag_bins[0]}) / {BIN_WIDTH}) as bin_index,
+            {mag_bins[0]} + (FLOOR((-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF} - {mag_bins[0]}) / {BIN_WIDTH}) * {BIN_WIDTH}) + {BIN_WIDTH/2} as bin_center,
             CASE
                 WHEN p_phz_classification = 1 THEN 'STAR'
                 WHEN p_phz_classification = 2 THEN 'GALAXY'
@@ -139,8 +140,8 @@ def query_phz_classification_by_magnitude(username):
         FROM {table_name}
         WHERE m_vis_det = 1
           AND m_flux_detection_total > 0
-          AND (-2.5 * LOG({ZPC_IE} * m_flux_detection_total) / LN(10) + {ZP_REF}) >= {mag_bins[0]}
-          AND (-2.5 * LOG({ZPC_IE} * m_flux_detection_total) / LN(10) + {ZP_REF}) < {mag_bins[-1]}
+          AND (-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF}) >= {mag_bins[0]}
+          AND (-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF}) < {mag_bins[-1]}
           AND m_flux_detection_total IS NOT NULL
           AND p_phz_classification IS NOT NULL
         GROUP BY bin_index, bin_center, phz_class
@@ -355,8 +356,8 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
     ax_stacked.set_title('Combined Classification Distribution', fontsize=12, fontweight='bold')
     ax_stacked.set_ylim(0, 105)
     ax_stacked.set_xlim(bin_centers_arr.min() - 0.1, bin_centers_arr.max() + 0.1)
-    ax_stacked.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
-    ax_stacked.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+    ax_stacked.xaxis.set_major_locator(ticker.MultipleLocator(1))
+    ax_stacked.xaxis.set_minor_locator(ticker.MultipleLocator(0.5))
     ax_stacked.grid(True, alpha=0.3, which='both')
     ax_stacked.legend(loc='upper left', fontsize=10, ncol=3)
     ax_stacked.tick_params(axis='x', rotation=45, labelsize=9)
@@ -371,11 +372,12 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
                  fmt='o-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='darkblue', ecolor='darkblue', alpha=0.7, label='STAR (I1)')
     ax1.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax1.set_xlabel(f'Magnitude (ZPC={ZPC_IE})', fontsize=10, fontweight='bold')
+    ax1.set_xlabel(f'Magnitude', fontsize=10, fontweight='bold')
     ax1.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax1.set_title('STAR (I1)', fontsize=11, fontweight='bold')
     ax1.set_ylim(-5, 105)
-    ax1.set_xlim(17, 28)
+    ax1.set_xlim(9, 28)
+    ax1.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='best', fontsize=9)
     ax1.tick_params(axis='x', rotation=45, labelsize=9)
@@ -388,11 +390,12 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
                  fmt='s-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='darkgreen', ecolor='darkgreen', alpha=0.7, label='GALAXY (I2)')
     ax2.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax2.set_xlabel(f'Magnitude (ZPC={ZPC_IE})', fontsize=10, fontweight='bold')
+    ax2.set_xlabel(f'Magnitude', fontsize=10, fontweight='bold')
     ax2.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax2.set_title('GALAXY (I2)', fontsize=11, fontweight='bold')
     ax2.set_ylim(-5, 105)
-    ax2.set_xlim(17, 28)
+    ax2.set_xlim(9, 28)
+    ax2.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='best', fontsize=9)
     ax2.tick_params(axis='x', rotation=45, labelsize=9)
@@ -415,11 +418,12 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
                  fmt='s-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='red', ecolor='red', alpha=0.7, label='OTHER (Multi/Outlier)')
     ax3.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax3.set_xlabel(f'Magnitude (ZPC={ZPC_IE})', fontsize=10, fontweight='bold')
+    ax3.set_xlabel(f'Magnitude', fontsize=10, fontweight='bold')
     ax3.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax3.set_title('QSO + GLOBULAR_CLUSTER + OTHER', fontsize=11, fontweight='bold')
     ax3.set_ylim(-5, 105)
-    ax3.set_xlim(17, 28)
+    ax3.set_xlim(9, 28)
+    ax3.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax3.grid(True, alpha=0.3)
     ax3.legend(loc='best', fontsize=8)
     ax3.tick_params(axis='x', rotation=45, labelsize=9)

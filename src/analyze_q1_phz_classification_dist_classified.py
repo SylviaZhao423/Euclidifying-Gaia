@@ -28,7 +28,17 @@ Visualization grouping:
 - Bottom-middle plot: GALAXY (I2) fraction only
 - Bottom-right plot: QSO (I4) and GLOBULAR_CLUSTER (I8) shown separately
 
-Magnitude: MER detection flux (FLUX_DETECTION_TOTAL from IE detection mosaic, ZP=23.9 AB)
+Magnitude: ZPC-corrected MER detection flux (FLUX_DETECTION_TOTAL from IE detection mosaic)
+Filters for sources with VIS_DET = 1 (successful VIS band detection)
+
+Zero-Point Multiplicative Corrections (ZPC):
+- IE (I_E): ZPC = 1.05
+- YE (Y_E): ZPC = 0.95
+- JE (J_E): ZPC = 0.97
+- HE (H_E): ZPC = 0.95
+
+Using IE-band (I_E) with ZPC=1.05 for magnitude calculation
+Formula: m_AB = -2.5 × log10(1.05 × FLUX_DETECTION_TOTAL) + 23.9
 """
 
 import pandas as pd
@@ -45,6 +55,10 @@ OUTPUT_DIR = PROJECT_DIR / 'output'
 # WSDB Configuration
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB = 'wsdb'
+
+# Zero-Point Multiplicative Correction for IE-band
+ZPC_IE = 1.05
+ZP_REF = 23.9  # Reference zero-point
 
 # Ensure output directory exists
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -76,12 +90,14 @@ def calculate_binomial_uncertainty(successes, trials):
 
 def query_phz_classification_by_magnitude_classified(username):
     """
-    Query PHZ classification data by magnitude bins directly from WSDB (CLASSIFIED ONLY).
+    Query PHZ classification data by magnitude bins directly from WSDB (CLASSIFIED ONLY, with ZPC).
 
     Uses a single query with window functions to bin and classify all data at once,
     then processes results in Python. Much faster than looping over 45 queries.
 
     Only includes p_phz_classification IN (1, 2, 4, 8) - excludes OTHER.
+    Filters for sources with VIS_DET = 1 (successful VIS band detection).
+    Uses ZPC-corrected magnitudes.
 
     Args:
         username: WSDB username
@@ -113,26 +129,30 @@ def query_phz_classification_by_magnitude_classified(username):
         print(f"ERROR connecting to WSDB: {e}")
         return None
 
-    table_name = f"{username}.crossmatch_q1_mer_phz_gaia"
+    table_name = f"{username}.crossmatch_q1_mer_phz"
 
-    # Define magnitude bins (0.5 magnitude bins)
-    mag_bins = np.arange(6, 28, 0.5)
+    # Define magnitude bins
+    BIN_WIDTH = 0.5
+    mag_bins = np.arange(6, 28, BIN_WIDTH)
 
     print(f"\nQuerying all magnitude bins from {table_name} (SINGLE QUERY)...")
     print(f"Processing {len(mag_bins)-1} bins from mag {mag_bins[0]} to {mag_bins[-1]}")
-    print(f"Magnitude column: MER detection flux (FLUX_DETECTION_TOTAL, ZP=23.9 AB)")
+    print(f"Magnitude formula: m_AB = -2.5 × log10({ZPC_IE} × FLUX_DETECTION_TOTAL) + {ZP_REF}")
     print(f"Classification column: p_phz_classification (PHZ pipeline)")
-    print(f"RESTRICTION: Only classified objects (p_phz_classification IN 1, 2, 4, 8)\n")
+    print(f"RESTRICTIONS:")
+    print(f"  - Only classified objects (p_phz_classification IN 1, 2, 4, 8)")
+    print(f"  - Only sources with VIS_DET = 1 (successful VIS band detection)\n")
 
     cursor = conn.cursor()
 
     # Single optimized query: bin all data at once with FLOOR
-    # Magnitude computed from MER detection flux: mag = -2.5 * log10(flux) + 23.9
+    # Magnitude computed from ZPC-corrected MER detection flux: mag = -2.5 * log10(ZPC * flux) + ZP_ref
     # ONLY includes p_phz_classification IN (1, 2, 4, 8)
+    # ONLY includes m_vis_det = 1 (successful VIS band detection)
     query = f"""
         SELECT
-            FLOOR((-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9 - {mag_bins[0]}) / 0.5) as bin_index,
-            {mag_bins[0]} + (FLOOR((-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9 - {mag_bins[0]}) / 0.5) * 0.5) + 0.25 as bin_center,
+            FLOOR((-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF} - {mag_bins[0]}) / {BIN_WIDTH}) as bin_index,
+            {mag_bins[0]} + (FLOOR((-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF} - {mag_bins[0]}) / {BIN_WIDTH}) * {BIN_WIDTH}) + {BIN_WIDTH/2} as bin_center,
             CASE
                 WHEN p_phz_classification = 1 THEN 'STAR'
                 WHEN p_phz_classification = 2 THEN 'GALAXY'
@@ -141,9 +161,10 @@ def query_phz_classification_by_magnitude_classified(username):
             END as phz_class,
             COUNT(*) as count
         FROM {table_name}
-        WHERE m_flux_detection_total > 0
-          AND (-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9) >= {mag_bins[0]}
-          AND (-2.5 * LOG(m_flux_detection_total) / LN(10) + 23.9) < {mag_bins[-1]}
+        WHERE m_vis_det = 1
+          AND m_flux_detection_total > 0
+          AND (-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF}) >= {mag_bins[0]}
+          AND (-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF}) < {mag_bins[-1]}
           AND m_flux_detection_total IS NOT NULL
           AND p_phz_classification IS NOT NULL
           AND p_phz_classification IN (1, 2, 4, 8)
@@ -324,8 +345,8 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_frac_arr, qso_gc
     ax_stacked.set_title('Combined Classification Distribution (Classified Only, Summing to 100%)', fontsize=12, fontweight='bold')
     ax_stacked.set_ylim(0, 105)
     ax_stacked.set_xlim(bin_centers_arr.min() - 0.1, bin_centers_arr.max() + 0.1)
-    ax_stacked.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
-    ax_stacked.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+    ax_stacked.xaxis.set_major_locator(ticker.MultipleLocator(1))
+    ax_stacked.xaxis.set_minor_locator(ticker.MultipleLocator(0.5))
     ax_stacked.grid(True, alpha=0.3, which='both')
     ax_stacked.legend(loc='upper left', fontsize=10, ncol=3)
     ax_stacked.tick_params(axis='x', rotation=45, labelsize=9)
@@ -340,11 +361,12 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_frac_arr, qso_gc
                  fmt='o-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='darkblue', ecolor='darkblue', alpha=0.7, label='STAR (I1)')
     ax1.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax1.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
+    ax1.set_xlabel('Magnitude', fontsize=10, fontweight='bold')
     ax1.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax1.set_title('STAR (I1)', fontsize=11, fontweight='bold')
     ax1.set_ylim(-5, 105)
-    ax1.set_xlim(17, 28)
+    ax1.set_xlim(10, 28)
+    ax1.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='best', fontsize=9)
     ax1.tick_params(axis='x', rotation=45, labelsize=9)
@@ -357,11 +379,12 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_frac_arr, qso_gc
                  fmt='s-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='darkgreen', ecolor='darkgreen', alpha=0.7, label='GALAXY (I2)')
     ax2.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax2.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
+    ax2.set_xlabel('Magnitude', fontsize=10, fontweight='bold')
     ax2.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax2.set_title('GALAXY (I2)', fontsize=11, fontweight='bold')
     ax2.set_ylim(-5, 105)
-    ax2.set_xlim(17, 28)
+    ax2.set_xlim(9, 28)
+    ax2.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='best', fontsize=9)
     ax2.tick_params(axis='x', rotation=45, labelsize=9)
@@ -379,11 +402,12 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_frac_arr, qso_gc
                  fmt='D-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='violet', ecolor='violet', alpha=0.7, label='GLOBULAR_CLUSTER (I8)')
     ax3.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax3.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
+    ax3.set_xlabel('Magnitude', fontsize=10, fontweight='bold')
     ax3.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax3.set_title('QSO + GLOBULAR_CLUSTER', fontsize=11, fontweight='bold')
     ax3.set_ylim(-5, 105)
-    ax3.set_xlim(17, 28)
+    ax3.set_xlim(9, 28)
+    ax3.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax3.grid(True, alpha=0.3)
     ax3.legend(loc='best', fontsize=8)
     ax3.tick_params(axis='x', rotation=45, labelsize=9)
