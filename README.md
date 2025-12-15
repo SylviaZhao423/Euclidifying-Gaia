@@ -195,15 +195,15 @@ pip install -r requirements.txt
 ### Lent Term 2026
 
 - 🔄 Feature importance analysis for optimal Gaia parameter selection
-- 📋 XGBoost classifier training using validated Euclid labels
-- 📋 Morphological sub-classification using UMAP/clustering
-- 📋 Physical characterization from Euclid imaging
+- ⏳ XGBoost classifier training using validated Euclid labels
+- ⏳ Morphological sub-classification using UMAP/clustering
+- ⏳ Physical characterization from Euclid imaging
 
 ### Easter Term 2026
-- 📋 Full Gaia DR3 catalogue application
-- 📋 Population analysis and validation
-- 📋 Physical characterization of extended sources
-- 📋 Final report and presentation
+- ⏳ Full Gaia DR3 catalogue application
+- ⏳ Population analysis and validation
+- ⏳ Physical characterization of extended sources
+- ⏳ Final report and presentation
 
 ---
 
