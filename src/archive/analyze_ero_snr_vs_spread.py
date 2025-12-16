@@ -3,10 +3,7 @@
 Analyze relationship between SNR and spread_model classifier.
 
 This script validates the spread_model implementation by comparing it with
-Signal-to-Noise Ratio (SNR), as suggested by supervisor Diana Harrison:
-"Another potential check is to make a 2D histogram of snr versus spread model
-(like on https://sextractor.readthedocs.io/en/latest/Model.html#spread-model-def)
-of the sources you classify as extended just to double check your implementation."
+Signal-to-Noise Ratio (SNR).
 
 Key insight: Sources classified as extended (spread_model > threshold) should
 show different SNR distributions than point-like sources, and SNR should
