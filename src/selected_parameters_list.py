@@ -1,17 +1,15 @@
 # Selected Gaia DR3 parameters for XGBoost classifier
-# Total: 53 parameters
+# 47 columns: 45 original Gaia columns + 2 derived columns (pre-computed in WSDB)
 
-SELECTED_GAIA_PARAMETERS = [
-    'ra_error',
-    'dec_error',
-    'parallax',
-    'parallax_error',
-    'parallax_over_error',
-    'pm',
-    'pmra',
-    'pmra_error',
-    'pmdec',
-    'pmdec_error',
+# =============================================================================
+# Original Gaia DR3 columns (45 parameters)
+# =============================================================================
+GAIA_ORIGINAL_COLUMNS = [
+    # Astrometry errors
+    # 'ra_error',
+    # 'dec_error',
+    'parallax_over_error',  # parallax significance (parallax / parallax_error)
+    # Astrometric quality
     'astrometric_n_obs_al',
     'astrometric_n_obs_ac',
     'astrometric_n_good_obs_al',
@@ -25,34 +23,53 @@ SELECTED_GAIA_PARAMETERS = [
     'visibility_periods_used',
     'astrometric_sigma5d_max',
     'matched_transits',
+    # Image parameters
     'ipd_gof_harmonic_amplitude',
     'ipd_gof_harmonic_phase',
     'ipd_frac_multi_peak',
     'ipd_frac_odd_win',
     'ruwe',
     'duplicated_source',
+    # G-band photometry
     'phot_g_n_obs',
     'phot_g_mean_flux',
     'phot_g_mean_flux_error',
     'phot_g_mean_flux_over_error',
     'phot_g_mean_mag',
+    # BP-band photometry
     'phot_bp_n_obs',
     'phot_bp_mean_flux',
     'phot_bp_mean_flux_error',
     'phot_bp_mean_flux_over_error',
     'phot_bp_mean_mag',
+    # RP-band photometry
     'phot_rp_n_obs',
     'phot_rp_mean_flux',
     'phot_rp_mean_flux_error',
     'phot_rp_mean_flux_over_error',
     'phot_rp_mean_mag',
-    'phot_bp_rp_excess_factor',
+    # BP/RP quality
     'phot_bp_n_contaminated_transits',
     'phot_bp_n_blended_transits',
     'phot_rp_n_contaminated_transits',
     'phot_rp_n_blended_transits',
     'phot_proc_mode',
+    # Colors
     'bp_rp',
     'bp_g',
     'g_rp',
 ]
+
+# =============================================================================
+# Derived columns (pre-computed in WSDB via add_derived_columns.py)
+# =============================================================================
+DERIVED_COLUMNS = [
+    'corrected_bp_rp_excess',  # C* from Riello et al. 2021, Table 2
+    'pm_significance',         # pm / sqrt(pmra_error^2 + pmdec_error^2)
+]
+
+# =============================================================================
+# Combined list for training (all 47 features)
+# =============================================================================
+GAIA_QUERY_COLUMNS = GAIA_ORIGINAL_COLUMNS + DERIVED_COLUMNS
+SELECTED_GAIA_PARAMETERS = GAIA_QUERY_COLUMNS

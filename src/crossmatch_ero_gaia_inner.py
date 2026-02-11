@@ -116,7 +116,7 @@ def crossmatch_ero_gaia_sql(ero_columns, gaia_columns, username, radius_arcsec=1
             {ero_cols_str},
             {gaia_cols_str}
         FROM euclid_ero.merge_cat as m
-        LEFT JOIN LATERAL (
+        INNER JOIN LATERAL (
             SELECT {', '.join([col.split(' AS ')[0] for col in gaia_cols_str.split(', ')])}
             FROM gaia_dr3.gaia_source as g
             WHERE q3c_join(m.v_alpha_j2000, m.v_delta_j2000,

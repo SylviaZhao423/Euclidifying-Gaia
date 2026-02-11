@@ -36,7 +36,7 @@ import seaborn as sns
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
-from selected_parameters_list import SELECTED_GAIA_PARAMETERS as SELECTED_GAIA_FEATURES
+from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 # Configuration
 PROJECT_DIR = Path(__file__).parent.parent
@@ -54,6 +54,9 @@ CLASS_MAPPING = {
 }
 CLASS_NAMES = list(CLASS_MAPPING.keys())
 
+# Magnitude cut: only train on sources fainter than this Gaia G magnitude
+MAG_CUT = 18.0
+
 
 def query_training_data(username, limit=None, test_mode=False, data_source='q1'):
     """
@@ -69,6 +72,8 @@ def query_training_data(username, limit=None, test_mode=False, data_source='q1')
         Use smaller sample for quick testing
     data_source : str
         'q1' for Q1 PHZ classifications or 'ero' for ERO morphological classifications
+    mag_cut : float
+        Minimum Gaia G magnitude cut
 
     Returns:
     --------
@@ -88,40 +93,41 @@ def query_training_data(username, limit=None, test_mode=False, data_source='q1')
             user=username
         )
 
+        # Build column list with g_ prefix, aliased back to standard names
+        gaia_cols = ', '.join([f'g_{col} AS {col}' for col in SELECTED_GAIA_PARAMETERS])
+
         if data_source == 'q1':
-            # Query Q1 crossmatch table with PHZ classifications
+            # Query Q1 crossmatch table directly (no JOIN needed)
             # p_phz_classification: 1=STAR, 2=GALAXY
             # Magnitude cut at >= 18: PHZ unreliable at bright end (see Project Report page 9)
             query = f"""
                 SELECT
-                    g.{', g.'.join(SELECTED_GAIA_FEATURES)},
+                    {gaia_cols},
                     CASE
-                        WHEN e.p_phz_classification = 1 THEN 'STAR'
-                        WHEN e.p_phz_classification = 2 THEN 'GALAXY'
+                        WHEN p_phz_classification = 1 THEN 'STAR'
+                        WHEN p_phz_classification = 2 THEN 'GALAXY'
                     END as label
-                FROM gaia_dr3.gaia_source AS g
-                INNER JOIN siwei_zhao_2025.crossmatch_q1_mer_phz_gaia AS e
-                    ON g.source_id = e.g_source_id
-                WHERE e.p_phz_classification IN (1, 2)
-                    AND (-2.5 * LOG(g.phot_g_mean_flux) + 25.69) >= 18
+                FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+                WHERE p_phz_classification IN (1, 2)
+                    AND g_phot_g_mean_mag >= {MAG_CUT}
+                ORDER BY g_source_id
             """
         elif data_source == 'ero':
-            # Query ERO crossmatch table with morphological classifications
+            # Query ERO crossmatch table directly (no JOIN needed)
             # Use class_star (validated classifier): >=0.65=STAR, <0.65=GALAXY
             # Threshold consistent with all other analysis scripts in project
             # Magnitude cut at >= 18: consistent with Q1 for fair comparison
             query = f"""
                 SELECT
-                    g.{', g.'.join(SELECTED_GAIA_FEATURES)},
+                    {gaia_cols},
                     CASE
-                        WHEN e.e_v_class_star >= 0.65 THEN 'STAR'
-                        WHEN e.e_v_class_star < 0.65 THEN 'GALAXY'
+                        WHEN e_v_class_star >= 0.65 THEN 'STAR'
+                        WHEN e_v_class_star < 0.65 THEN 'GALAXY'
                     END as label
-                FROM gaia_dr3.gaia_source AS g
-                INNER JOIN siwei_zhao_2025.crossmatch_ero_gaia_0_3 AS e
-                    ON g.source_id = e.g_source_id
-                WHERE e.e_v_class_star IS NOT NULL
-                    AND (-2.5 * LOG(g.phot_g_mean_flux) + 25.69) >= 18
+                FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
+                WHERE e_v_class_star IS NOT NULL
+                    AND g_phot_g_mean_mag >= {MAG_CUT}
+                ORDER BY g_source_id
             """
         else:
             raise ValueError(f"Unknown data_source: {data_source}. Use 'q1' or 'ero'")
@@ -170,12 +176,15 @@ def prepare_data(df):
     X, y, feature_names
     """
     # Replace 'NOT_AVAILABLE' strings with NaN (Gaia DR3 encoding)
-    df_features = df[SELECTED_GAIA_FEATURES].copy()
-    df_features = df_features.replace('NOT_AVAILABLE', np.nan)
+    df = df.copy()
+    df[SELECTED_GAIA_PARAMETERS] = df[SELECTED_GAIA_PARAMETERS].replace('NOT_AVAILABLE', np.nan)
 
-    # Convert all columns to numeric (handling any remaining non-numeric values)
-    for col in SELECTED_GAIA_FEATURES:
-        df_features[col] = pd.to_numeric(df_features[col], errors='coerce')
+    # Convert all columns to numeric
+    for col in SELECTED_GAIA_PARAMETERS:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Select features
+    df_features = df[SELECTED_GAIA_PARAMETERS]
 
     # Separate features and labels
     X = df_features.values
@@ -190,7 +199,7 @@ def prepare_data(df):
             print(f"  {feat}: {count:,} ({percent:.2f}%)")
         print("\n  XGBoost will handle missing values internally")
 
-    return X, y, SELECTED_GAIA_FEATURES
+    return X, y, SELECTED_GAIA_PARAMETERS
 
 
 def train_xgboost(X_train, y_train, X_val, y_val):
@@ -238,7 +247,7 @@ def train_xgboost(X_train, y_train, X_val, y_val):
     return model
 
 
-def evaluate_model(model, X_test, y_test, feature_names, data_source):
+def evaluate_model(model, X_test, y_test, feature_names, data_source, df=None):
     """
     Evaluate trained model and generate plots.
     """
@@ -267,6 +276,10 @@ def evaluate_model(model, X_test, y_test, feature_names, data_source):
 
     # ROC curves (one-vs-rest for each class)
     plot_roc_curves(y_test, y_pred_proba, CLASS_NAMES, data_source)
+
+    # Feature distributions (star vs galaxy histograms)
+    if df is not None:
+        plot_feature_distributions(df, model, feature_names, data_source)
 
     print(f"\n  ✓ Evaluation complete")
     print(f"    Results saved to: {OUTPUT_DIR}")
@@ -322,6 +335,54 @@ def plot_feature_importance(model, feature_names, data_source, top_n=None):
     print(f"  ✓ Feature importance CSV saved (all {len(feature_names)} features ranked)")
 
 
+def plot_feature_distributions(df, model, feature_names, data_source, top_n=12):
+    """Plot star vs galaxy distributions for top features by importance."""
+    importance = model.feature_importances_
+    indices = np.argsort(importance)[::-1][:top_n]
+    top_features = [feature_names[i] for i in indices]
+
+    # Clean features
+    df_clean = df[list(top_features) + ['label']].copy()
+    df_clean[top_features] = df_clean[top_features].replace('NOT_AVAILABLE', np.nan)
+    for col in top_features:
+        df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+
+    # Grid plot
+    n_cols = 3
+    n_rows = (top_n + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+    axes = axes.flatten()
+
+    for idx, feature in enumerate(top_features):
+        ax = axes[idx]
+        feat_data = df_clean[[feature, 'label']].dropna()
+        if len(feat_data) == 0:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center')
+            ax.set_title(feature)
+            continue
+
+        stars = feat_data[feat_data['label'] == 'STAR'][feature].astype(float)
+        galaxies = feat_data[feat_data['label'] == 'GALAXY'][feature].astype(float)
+
+        ax.hist(stars, bins=30, alpha=0.6, label='STAR', color='steelblue', density=True)
+        ax.hist(galaxies, bins=30, alpha=0.6, label='GALAXY', color='coral', density=True)
+        ax.set_xlabel(feature, fontsize=9)
+        ax.set_ylabel('Density', fontsize=9)
+        ax.set_title(feature, fontsize=10, fontweight='bold')
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3, axis='y')
+
+    for idx in range(len(top_features), len(axes)):
+        axes[idx].axis('off')
+
+    plt.suptitle(f'Top {top_n} Feature Distributions: Stars vs Galaxies ({data_source.upper()})',
+                 fontsize=14, fontweight='bold', y=1.00)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / f'{data_source}_top_features_grid.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Feature distribution grid saved (top {top_n} features)")
+
+
 def plot_roc_curves(y_true, y_pred_proba, class_names, data_source):
     """Plot ROC curve for binary classification."""
     # For binary classification, use probabilities of positive class (GALAXY)
@@ -356,9 +417,8 @@ def main():
                         help='Use small sample for quick testing (10k sources)')
     parser.add_argument('--save-model', type=str, default='xgb_classifier.json',
                         help='Filename to save trained model')
-    parser.add_argument('--data-source', type=str, default='q1', choices=['q1', 'ero'],
-                        help='Data source: q1 (PHZ classifications, ~262k) or ero (class_star, ~millions)')
-
+    parser.add_argument('--data-source', type=str, default=None, choices=['q1', 'ero'],
+                        help='Data source: q1, ero, or omit for both')
     args = parser.parse_args()
 
     # Get username
@@ -368,27 +428,40 @@ def main():
         print("Set it with: export PGUSER=your_username")
         return 1
 
-    # Set up output directory based on data source
+    # Run for both data sources if not specified
+    sources = [args.data_source] if args.data_source else ['q1', 'ero']
+
+    for data_source in sources:
+        result = train_single(username, data_source, args.test_mode, args.save_model)
+        if result != 0:
+            return result
+
+    return 0
+
+
+def train_single(username, data_source, test_mode, save_model):
+    """Train and evaluate a single model for the given data source."""
     global OUTPUT_DIR
-    OUTPUT_DIR = OUTPUT_BASE_DIR / f'xgboost_{args.data_source}'
+    OUTPUT_DIR = OUTPUT_BASE_DIR / f'xgboost_{data_source}'
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 80)
     print("XGBoost Binary Classifier Training: STAR vs GALAXY")
     print("=" * 80)
     print(f"\nConfiguration:")
-    print(f"  Features: {len(SELECTED_GAIA_FEATURES)}")
+    print(f"  Features: {len(SELECTED_GAIA_PARAMETERS)}")
     print(f"  Classes: {', '.join(CLASS_NAMES)}")
-    print(f"  Data source: {args.data_source.upper()}")
-    if args.data_source == 'q1':
-        print(f"    Ground truth: Euclid Q1 PHZ classifications (Gaia G >= 18)")
+    print(f"  Data source: {data_source.upper()}")
+    print(f"  Magnitude cut: G >= {MAG_CUT}")
+    if data_source == 'q1':
+        print(f"    Ground truth: Euclid Q1 PHZ classifications")
     else:
-        print(f"    Ground truth: Euclid ERO class_star (>=0.65=STAR, <0.65=GALAXY, Gaia G >= 18)")
-    print(f"  Test mode: {args.test_mode}")
+        print(f"    Ground truth: Euclid ERO class_star (>=0.65=STAR, <0.65=GALAXY)")
+    print(f"  Test mode: {test_mode}")
     print(f"  Output directory: {OUTPUT_DIR}")
 
     # Query data
-    df = query_training_data(username, test_mode=args.test_mode, data_source=args.data_source)
+    df = query_training_data(username, test_mode=test_mode, data_source=data_source)
     if df is None:
         return 1
 
@@ -412,18 +485,16 @@ def main():
     model = train_xgboost(X_train, y_train, X_val, y_val)
 
     # Evaluate
-    evaluate_model(model, X_test, y_test, feature_names, args.data_source)
+    evaluate_model(model, X_test, y_test, feature_names, data_source, df=df)
 
     # Save model
-    # Add data source prefix if using default filename
-    if args.save_model == 'xgb_classifier.json':
-        model_filename = f'xgb_classifier_{args.data_source}.json'
+    if save_model == 'xgb_classifier.json':
+        model_filename = f'xgb_classifier_{data_source}.json'
     else:
-        model_filename = args.save_model
+        model_filename = save_model
 
     model_path = OUTPUT_DIR / model_filename
     try:
-        # Try using the booster's save_model method directly
         model.get_booster().save_model(str(model_path))
         print(f"\n  ✓ Model saved to: {model_path}")
     except Exception as e:

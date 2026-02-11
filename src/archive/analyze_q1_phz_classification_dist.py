@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """
-Analyze PHZ morphological classification distribution vs magnitude (with ZPC).
+Analyze PHZ morphological classification distribution vs magnitude (Direct WSDB Query - Optimized).
 
 This script:
 1. Queries Q1-Gaia-PHZ crossmatch directly from WSDB by magnitude bins (SINGLE QUERY)
-2. Filters for sources with VIS_DET = 1 (successful VIS band detection)
-3. Uses ZPC-corrected magnitudes: m_AB = -2.5 × log10(ZPC × FLUX) + 23.9
-4. Analyzes STAR, GALAXY, and QSO+GLOBULAR_CLUSTER+OTHER classifications vs magnitude
-5. Creates a stacked area chart showing 3 combined categories (STAR, GALAXY, QSO+GC+OTHER)
-6. Creates 3 individual plots showing breakdown: STAR, GALAXY, QSO+GLOBULAR+OTHER
+2. Analyzes STAR, GALAXY, and QSO+GLOBULAR_CLUSTER+OTHER classifications vs magnitude
+3. Creates a stacked area chart showing 3 combined categories (STAR, GALAXY, QSO+GC+OTHER) summing to 100%
+4. Creates 3 individual plots showing breakdown: STAR alone, GALAXY alone, and QSO+GLOBULAR+OTHER separately
+5. Uses p_phz_classification from the PHZ pipeline (ESA DPDD)
 
 PHZ_CLASSIFICATION Values (per ESA DPDD):
+"Classification flag: I1 if the source is accepted as star, I2 if it is accepted as
+a galaxy I4 if it is accepted as a QSO I8 if the source is accepted as a globular Cluster"
+
+Dominant class encoding:
 - 1 (I1): Source accepted as STAR
 - 2 (I2): Source accepted as GALAXY
 - 4 (I4): Source accepted as QSO
 - 8 (I8): Source accepted as GLOBULAR CLUSTER
 - -1, 0, 3, 5, 6, 7: Multi-class, outliers, or unclassified (OTHER)
 
-Zero-Point Multiplicative Corrections (ZPC):
-- IE (I_E): ZPC = 1.05
-- YE (Y_E): ZPC = 0.95
-- JE (J_E): ZPC = 0.97
-- HE (H_E): ZPC = 0.95
+Visualization grouping:
+- Top stacked chart shows 3 combined categories: STAR, GALAXY, QSO+GLOBULAR_CLUSTER+OTHER
+- Bottom-left plot: STAR (I1) fraction only
+- Bottom-middle plot: GALAXY (I2) fraction only
+- Bottom-right plot: QSO (I4), GLOBULAR_CLUSTER (I8), and OTHER shown separately
 
-Using IE-band (I_E) with ZPC=1.05 for magnitude calculation
-Formula: m_AB = -2.5 × log10(1.05 × FLUX_DETECTION_TOTAL) + 23.9
+Magnitude: MER detection flux (FLUX_DETECTION_TOTAL from IE detection mosaic, ZP=23.9 AB)
 """
 
 import pandas as pd
@@ -41,10 +43,6 @@ OUTPUT_DIR = PROJECT_DIR / 'output'
 # WSDB Configuration
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB = 'wsdb'
-
-# Zero-Point Multiplicative Correction for IE-band
-ZPC_IE = 1.05
-ZP_REF = 23.9  # Reference zero-point
 
 # Ensure output directory exists
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -76,9 +74,10 @@ def calculate_binomial_uncertainty(successes, trials):
 
 def query_phz_classification_by_magnitude(username):
     """
-    Query PHZ classification data by magnitude bins with ZPC corrections.
+    Query PHZ classification data by magnitude bins directly from WSDB (OPTIMIZED).
 
-    Uses a single query with ZPC-corrected magnitude calculation.
+    Uses a single query with window functions to bin and classify all data at once,
+    then processes results in Python. Much faster than looping over 45 queries.
 
     Args:
         username: WSDB username
@@ -95,7 +94,7 @@ def query_phz_classification_by_magnitude(username):
         return None
 
     print(f"\n{'='*70}")
-    print(f"PHZ Classification Distribution Analysis (with ZPC-corrected Magnitude)")
+    print(f"PHZ Classification Distribution Analysis (Optimized WSDB Query)")
     print(f"{'='*70}")
 
     # Connect to WSDB
@@ -112,23 +111,22 @@ def query_phz_classification_by_magnitude(username):
 
     table_name = f"{username}.crossmatch_q1_mer_phz"
 
-    # Define magnitude bins
-    BIN_WIDTH = 0.5
-    mag_bins = np.arange(6, 28, BIN_WIDTH)
+    # Define magnitude bins (0.5 magnitude bins)
+    mag_bins = np.arange(6, 28, 0.5)
 
     print(f"\nQuerying all magnitude bins from {table_name} (SINGLE QUERY)...")
     print(f"Processing {len(mag_bins)-1} bins from mag {mag_bins[0]} to {mag_bins[-1]}")
-    print(f"Magnitude formula: m_AB = -2.5 × log10({ZPC_IE} × FLUX_DETECTION_TOTAL) + {ZP_REF}")
+    print(f"Magnitude column: MER detection flux (FLUX_DETECTION_TOTAL, ZP=23.9 AB)")
     print(f"Classification column: p_phz_classification (PHZ pipeline)\n")
 
     cursor = conn.cursor()
 
-    # Single optimized query with ZPC-corrected magnitude
-    # mag = -2.5 * log10(ZPC * flux) + ZP_ref
+    # Single optimized query: bin all data at once with FLOOR
+    # Magnitude computed from MER detection flux: mag = -2.5 * log10(flux) + 23.9
     query = f"""
         SELECT
-            FLOOR((-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF} - {mag_bins[0]}) / {BIN_WIDTH}) as bin_index,
-            {mag_bins[0]} + (FLOOR((-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF} - {mag_bins[0]}) / {BIN_WIDTH}) * {BIN_WIDTH}) + {BIN_WIDTH/2} as bin_center,
+            FLOOR((-2.5 * LOG10(m_flux_detection_total) + 23.9 - {mag_bins[0]}) / 0.5) as bin_index,
+            {mag_bins[0]} + (FLOOR((-2.5 * LOG10(m_flux_detection_total) + 23.9 - {mag_bins[0]}) / 0.5) * 0.5) + 0.25 as bin_center,
             CASE
                 WHEN p_phz_classification = 1 THEN 'STAR'
                 WHEN p_phz_classification = 2 THEN 'GALAXY'
@@ -138,10 +136,9 @@ def query_phz_classification_by_magnitude(username):
             END as phz_class,
             COUNT(*) as count
         FROM {table_name}
-        WHERE m_vis_det = 1
-          AND m_flux_detection_total > 0
-          AND (-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF}) >= {mag_bins[0]}
-          AND (-2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF}) < {mag_bins[-1]}
+        WHERE m_flux_detection_total > 0
+          AND (-2.5 * LOG10(m_flux_detection_total) + 23.9) >= {mag_bins[0]}
+          AND (-2.5 * LOG10(m_flux_detection_total) + 23.9) < {mag_bins[-1]}
           AND m_flux_detection_total IS NOT NULL
           AND p_phz_classification IS NOT NULL
         GROUP BY bin_index, bin_center, phz_class
@@ -279,7 +276,7 @@ def query_phz_classification_by_magnitude(username):
                       f"SUM={total_frac:.1%}")
 
     except Exception as e:
-        print(f"ERROR executing query: {e}")
+        print(f"ERROR executing optimized query: {e}")
         import traceback
         traceback.print_exc()
         cursor.close()
@@ -319,13 +316,13 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
                         qso_fraction_lower, qso_fraction_upper,
                         other_fraction_lower, other_fraction_upper,
                         qso_other_fraction_lower, qso_other_fraction_upper):
-    """Create visualization of PHZ classification distribution with ZPC magnitudes."""
+    """Create visualization of PHZ classification distribution."""
 
     print(f"\nCreating visualization...")
 
     # Create figure with better layout management
     fig = plt.figure(figsize=(18, 9))
-    fig.suptitle('PHZ Classification Distribution vs Magnitude (ZPC-corrected, IE-band)',
+    fig.suptitle('PHZ Classification Distribution vs Magnitude for All PHZ Sources',
                  fontsize=15, fontweight='bold', y=1)
 
     # Use GridSpec for more control
@@ -350,8 +347,7 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
 
     ax_stacked.axhline(y=100, color='black', linestyle='-', linewidth=1, alpha=0.3)
     ax_stacked.axhline(y=50, color='black', linestyle='--', linewidth=1, alpha=0.2)
-    ax_stacked.set_xlabel(f'Magnitude (ZPC={ZPC_IE} × FLUX_DETECTION_TOTAL, ZP={ZP_REF} AB)',
-                         fontsize=11, fontweight='bold')
+    ax_stacked.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=11, fontweight='bold')
     ax_stacked.set_ylabel('Fraction (%)', fontsize=11, fontweight='bold')
     ax_stacked.set_title('Combined Classification Distribution', fontsize=12, fontweight='bold')
     ax_stacked.set_ylim(0, 105)
@@ -372,7 +368,7 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
                  fmt='o-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='darkblue', ecolor='darkblue', alpha=0.7, label='STAR (I1)')
     ax1.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax1.set_xlabel(f'Magnitude', fontsize=10, fontweight='bold')
+    ax1.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
     ax1.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax1.set_title('STAR (I1)', fontsize=11, fontweight='bold')
     ax1.set_ylim(-5, 105)
@@ -390,7 +386,7 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
                  fmt='s-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='darkgreen', ecolor='darkgreen', alpha=0.7, label='GALAXY (I2)')
     ax2.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax2.set_xlabel(f'Magnitude', fontsize=10, fontweight='bold')
+    ax2.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
     ax2.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax2.set_title('GALAXY (I2)', fontsize=11, fontweight='bold')
     ax2.set_ylim(-5, 105)
@@ -418,7 +414,7 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
                  fmt='s-', linewidth=1.5, markersize=3, capsize=4, capthick=1,
                  color='red', ecolor='red', alpha=0.7, label='OTHER (Multi/Outlier)')
     ax3.axhline(y=50, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-    ax3.set_xlabel(f'Magnitude', fontsize=10, fontweight='bold')
+    ax3.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=10, fontweight='bold')
     ax3.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax3.set_title('QSO + GLOBULAR_CLUSTER + OTHER', fontsize=11, fontweight='bold')
     ax3.set_ylim(-5, 105)
@@ -428,15 +424,15 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_extended_frac_ar
     ax3.legend(loc='best', fontsize=8)
     ax3.tick_params(axis='x', rotation=45, labelsize=9)
 
-    plt.savefig(OUTPUT_DIR / 'q1_phz_classification_dist_with_zpc.png', dpi=300, bbox_inches='tight')
-    print(f"✓ Plot saved to: {OUTPUT_DIR / 'q1_phz_classification_dist_with_zpc.png'}")
+    plt.savefig(OUTPUT_DIR / 'q1_phz_classification_dist.png', dpi=300, bbox_inches='tight')
+    print(f"✓ Plot saved to: {OUTPUT_DIR / 'q1_phz_classification_dist.png'}")
     plt.close()
 
 
 def main():
     """Main execution."""
     print("="*70)
-    print("PHZ Classification Distribution Analysis (ZPC-corrected Magnitude)")
+    print("PHZ Classification Distribution Analysis (Full Dataset via WSDB)")
     print("="*70)
 
     # Get username from environment
@@ -452,7 +448,7 @@ def main():
 
     # Query data by magnitude bins
     print("\n" + "="*70)
-    print("Step 1: Query Classification by Magnitude Bins (with ZPC)")
+    print("Step 1: Query Classification by Magnitude Bins")
     print("="*70)
 
     result = query_phz_classification_by_magnitude(username)
@@ -488,15 +484,18 @@ def main():
     print("\n" + "="*70)
     print("Analysis Complete!")
     print("="*70)
-    print("\nMagnitude Calibration (IE-band):")
-    print(f"  Formula: m_AB = -2.5 × log10({ZPC_IE} × FLUX_DETECTION_TOTAL) + {ZP_REF}")
-    print(f"  ZPC Correction: {ZPC_IE}")
     print("\nVisualization Guide:")
     print("✓ Stacked Area Chart (top): Shows 3 combined categories summing to 100%")
     print("                            (STAR, GALAXY, QSO+GLOBULAR_CLUSTER+OTHER)")
     print("✓ STAR Plot (bottom-left): STAR (I1) fraction only")
     print("✓ GALAXY Plot (bottom-middle): GALAXY (I2) fraction only")
     print("✓ Right Plot (bottom-right): QSO (I4), GLOBULAR_CLUSTER (I8), and OTHER shown separately")
+    print("\nInterpretation Guide:")
+    print("✓ GOOD: STAR fraction high at bright mags, decreases at fainter mags")
+    print("✓ GOOD: GALAXY+GC fraction low at bright mags, increases at fainter mags")
+    print("✓ GOOD: QSO+OTHER fraction relatively constant and low")
+    print("✓ GOOD: Fractions sum to 100% in each magnitude bin")
+    print("✗ BAD: Combined fractions flat across all magnitudes (classifier not working)")
 
 
 if __name__ == '__main__':

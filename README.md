@@ -190,13 +190,13 @@ pip install -r requirements.txt
 ### Michaelmas Term 2025
 - ✅ Establish cross-matching methodology
 - ✅ Validate Euclid morphological classifiers
-- 🔄 Photometric systematics characterization
+- ✅ Photometric systematics characterization
 
 ### Lent Term 2026
 
 - 🔄 Feature importance analysis for optimal Gaia parameter selection
-- ⏳ XGBoost classifier training using validated Euclid labels
-- ⏳ Morphological sub-classification using UMAP/clustering
+- 🔄 XGBoost classifier training using validated Euclid labels
+- 🔄 Morphological sub-classification using UMAP/clustering
 - ⏳ Physical characterization from Euclid imaging
 
 ### Easter Term 2026

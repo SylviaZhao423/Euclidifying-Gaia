@@ -340,7 +340,8 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_frac_arr, qso_gc
 
     ax_stacked.axhline(y=100, color='black', linestyle='-', linewidth=1, alpha=0.3)
     ax_stacked.axhline(y=50, color='black', linestyle='--', linewidth=1, alpha=0.2)
-    ax_stacked.set_xlabel('Magnitude (FLUX_DETECTION_TOTAL, ZP=23.9 AB)', fontsize=11, fontweight='bold')
+    ax_stacked.set_xlabel(f'Magnitude (ZPC={ZPC_IE} × FLUX_DETECTION_TOTAL, ZP={ZP_REF} AB)',
+                         fontsize=11, fontweight='bold')
     ax_stacked.set_ylabel('Fraction (%)', fontsize=11, fontweight='bold')
     ax_stacked.set_title('Combined Classification Distribution (Classified Only, Summing to 100%)', fontsize=12, fontweight='bold')
     ax_stacked.set_ylim(0, 105)
@@ -365,7 +366,7 @@ def create_visualization(bin_centers_arr, star_frac_arr, galaxy_frac_arr, qso_gc
     ax1.set_ylabel('Fraction (%)', fontsize=10, fontweight='bold')
     ax1.set_title('STAR (I1)', fontsize=11, fontweight='bold')
     ax1.set_ylim(-5, 105)
-    ax1.set_xlim(10, 28)
+    ax1.set_xlim(9, 28)
     ax1.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='best', fontsize=9)
@@ -481,6 +482,9 @@ def main():
     print("✓ GOOD: QSO+GLOBULAR fraction relatively constant and low")
     print("✓ GOOD: Fractions sum to 100% in each magnitude bin (only classified sources)")
     print("✗ BAD: Combined fractions flat across all magnitudes (classifier not working)")
+    print(f"\nMagnitude Calibration (IE-band):")
+    print(f"  Formula: m_AB = -2.5 × log10({ZPC_IE} × FLUX_DETECTION_TOTAL) + {ZP_REF}")
+    print(f"  ZPC Correction: {ZPC_IE}")
 
 
 if __name__ == '__main__':
