@@ -53,9 +53,16 @@ DERIVED_COLUMNS = [
     {
         'name': 'g_pm_significance',
         'type': 'real',
-        'expression': 'g_pm / SQRT(g_pmra_error * g_pmra_error + g_pmdec_error * g_pmdec_error)',
-        'dependencies': ['g_pm', 'g_pmra_error', 'g_pmdec_error'],
-        'description': 'Proper motion significance: pm / sqrt(pmra_error^2 + pmdec_error^2)',
+        'expression': 'SQRT((g_pmra * g_pmra * g_pmdec_error * g_pmdec_error - 2.0 * g_pmra_pmdec_corr * g_pmra_error * g_pmdec_error * g_pmra * g_pmdec + g_pmdec * g_pmdec * g_pmra_error * g_pmra_error) / (g_pmra_error * g_pmra_error * g_pmdec_error * g_pmdec_error * (1.0 - g_pmra_pmdec_corr * g_pmra_pmdec_corr)))',
+        'dependencies': ['g_pmra', 'g_pmdec', 'g_pmra_error', 'g_pmdec_error', 'g_pmra_pmdec_corr'],
+        'description': 'Proper motion significance: sqrt(chi2) with full covariance (pmra_pmdec_corr)',
+    },
+    {
+        'name': 'g_position_error',
+        'type': 'real',
+        'expression': 'SQRT(g_ra_error * g_ra_error * g_dec_error * g_dec_error * (1.0 - g_ra_dec_corr * g_ra_dec_corr))',
+        'dependencies': ['g_ra_error', 'g_dec_error', 'g_ra_dec_corr'],
+        'description': 'Positional uncertainty from error ellipse area: sqrt(det(C)) with ra_dec_corr',
     },
 ]
 
@@ -115,21 +122,14 @@ def process_table(conn, table):
         if description:
             print(f"    ({description})")
 
-        # Check if column exists
-        if column_exists(cursor, table, col_name):
-            print(f"    ✓ Column already exists")
-
-            # Check if already populated
-            if column_is_populated(cursor, table, col_name):
-                print(f"    ✓ Column already populated - skipping")
-                continue
-            else:
-                print(f"    → Column exists but empty - populating...")
-        else:
+        # Add column if it doesn't exist
+        if not column_exists(cursor, table, col_name):
             print(f"    → Adding column...")
             add_column(cursor, table, col_name, col_type)
             conn.commit()
             print(f"    ✓ Column added")
+        else:
+            print(f"    ✓ Column already exists — will recalculate")
 
         # Populate the column
         print(f"    → Computing values...")

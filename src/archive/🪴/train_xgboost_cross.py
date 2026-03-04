@@ -37,8 +37,11 @@ WSDB_DB = 'wsdb'
 CLASS_MAPPING = {'STAR': 0, 'GALAXY': 1}
 CLASS_NAMES = ['STAR', 'GALAXY']
 
+# Magnitude cut: only use sources fainter than this Gaia G magnitude
+MAG_CUT = 18.0
 
-def query_full_dataset(username, data_source, mag_cut=18.0):
+
+def query_full_dataset(username, data_source):
     """Query full dataset, then extract the same test split as train_xgboost_classifier.py."""
     try:
         import psycopg2
@@ -66,7 +69,7 @@ def query_full_dataset(username, data_source, mag_cut=18.0):
                     END as label
                 FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
                 WHERE p_phz_classification IN (1, 2)
-                    AND g_phot_g_mean_mag >= {mag_cut}
+                    AND g_phot_g_mean_mag >= {MAG_CUT}
                 ORDER BY g_source_id
             """
         else:  # ero
@@ -79,7 +82,7 @@ def query_full_dataset(username, data_source, mag_cut=18.0):
                     END as label
                 FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
                 WHERE e_v_class_star IS NOT NULL
-                    AND g_phot_g_mean_mag >= {mag_cut}
+                    AND g_phot_g_mean_mag >= {MAG_CUT}
                 ORDER BY g_source_id
             """
 
@@ -235,10 +238,46 @@ def plot_feature_importance_comparison(q1_model, ero_model, feature_names, outpu
     return importance_df
 
 
+def plot_metrics_summary(results, output_dir):
+    """Plot grouped bar chart of Galaxy Precision & Recall across all 4 combinations."""
+    labels = [f"{r['model']}→{r['test_data']}" for r in results]
+    precision = [r['galaxy_precision'] for r in results]
+    recall = [r['galaxy_recall'] for r in results]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    x = np.arange(len(labels))
+    width = 0.3
+
+    bars_p = ax.bar(x - width/2, precision, width, label='Galaxy Precision',
+                    color='steelblue', edgecolor='white', linewidth=0.5)
+    bars_r = ax.bar(x + width/2, recall, width, label='Galaxy Recall',
+                    color='coral', edgecolor='white', linewidth=0.5)
+
+    # Add value labels
+    for bar, val in zip(bars_p, precision):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f'{val:.2f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+    for bar, val in zip(bars_r, recall):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                f'{val:.2f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=12)
+    ax.set_ylim(0, 1.15)
+    ax.set_ylabel('Score', fontsize=12)
+    ax.set_title('Cross-Dataset Validation: Galaxy Precision & Recall',
+                 fontsize=13, fontweight='bold')
+    ax.legend(fontsize=11, loc='upper right')
+    ax.grid(alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    plt.savefig(output_dir / 'cross_metrics_summary.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Metrics summary plot saved")
+
 
 def main():
-    mag_cut = 18.0
-
     username = os.getenv('PGUSER')
     if not username:
         print("ERROR: PGUSER environment variable not set!")
@@ -246,7 +285,7 @@ def main():
 
     print("="*80)
     print("Cross-Dataset Validation")
-    print(f"Magnitude cut: G >= {mag_cut}")
+    print(f"Magnitude cut: G >= {MAG_CUT}")
     print("="*80)
 
     # Load models
@@ -265,8 +304,8 @@ def main():
     # Query full datasets and extract same test splits as train_xgboost_classifier.py
     print("\nQuerying datasets and extracting test splits...")
     print("  (Using same train_test_split as training script for consistent baselines)")
-    q1_data = query_full_dataset(username, 'q1', mag_cut)
-    ero_data = query_full_dataset(username, 'ero', mag_cut)
+    q1_data = query_full_dataset(username, 'q1')
+    ero_data = query_full_dataset(username, 'ero')
 
     if q1_data is None or ero_data is None:
         return 1
@@ -300,8 +339,9 @@ def main():
         print(f"{label:<15} {r['accuracy']:>10.3f} {r['galaxy_recall']:>11.3f} "
               f"{r['galaxy_precision']:>11.3f} {r['roc_auc']:>10.3f}")
 
-    # Plot feature importance comparison
-    print("\nGenerating feature importance comparison...")
+    # Plot results
+    print("\nGenerating plots...")
+    plot_metrics_summary(results, OUTPUT_DIR)
     plot_feature_importance_comparison(q1_model, ero_model, SELECTED_GAIA_PARAMETERS, OUTPUT_DIR)
 
     # Save combined report

@@ -44,8 +44,11 @@ WSDB_DB = 'wsdb'
 CLASS_MAPPING = {'STAR': 0, 'GALAXY': 1}
 CLASS_NAMES = ['STAR', 'GALAXY']
 
+# Magnitude cut: only use sources fainter than this Gaia G magnitude
+MAG_CUT = 18.0
 
-def query_full_dataset(username, data_source, mag_cut=18.0):
+
+def query_full_dataset(username, data_source):
     """Query full dataset including random_index for later subsampling."""
     import psycopg2
 
@@ -69,7 +72,7 @@ def query_full_dataset(username, data_source, mag_cut=18.0):
                 END as label
             FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
             WHERE p_phz_classification IN (1, 2)
-                AND g_phot_g_mean_mag >= {mag_cut}
+                AND g_phot_g_mean_mag >= {MAG_CUT}
             ORDER BY g_source_id
         """
     else:  # ero
@@ -83,7 +86,7 @@ def query_full_dataset(username, data_source, mag_cut=18.0):
                 END as label
             FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
             WHERE e_v_class_star IS NOT NULL
-                AND g_phot_g_mean_mag >= {mag_cut}
+                AND g_phot_g_mean_mag >= {MAG_CUT}
             ORDER BY g_source_id
         """
 
@@ -245,8 +248,6 @@ def plot_results(all_results, output_dir):
 
 
 def main():
-    mag_cut = 18.0  # hardcoded magnitude cut
-
     username = os.getenv('PGUSER')
     if not username:
         print("ERROR: PGUSER environment variable not set!")
@@ -254,7 +255,7 @@ def main():
 
     print("=" * 70)
     print("Ratio-Matched Training Experiment")
-    print(f"Magnitude cut: G >= {mag_cut}")
+    print(f"Magnitude cut: G >= {MAG_CUT}")
     print("=" * 70)
     print("\nApproach: fixed test set per dataset, only modify training ratios")
     print("Uses Gaia random_index for deterministic subsampling\n")
@@ -263,7 +264,7 @@ def main():
 
     # ==================== LOAD BOTH DATASETS ====================
     print("[Step 1] Loading Q1 data...")
-    X_q1, y_q1, ri_q1 = query_full_dataset(username, 'q1', mag_cut)
+    X_q1, y_q1, ri_q1 = query_full_dataset(username, 'q1')
 
     X_q1_temp, X_q1_test, y_q1_temp, y_q1_test, ri_q1_temp, _ = train_test_split(
         X_q1, y_q1, ri_q1, test_size=0.15, random_state=42, stratify=y_q1
@@ -279,7 +280,7 @@ def main():
     print(f"  Q1 test:  {len(X_q1_test):,} (fixed for both Q1 experiments)")
 
     print("\n[Step 2] Loading ERO data...")
-    X_ero, y_ero, ri_ero = query_full_dataset(username, 'ero', mag_cut)
+    X_ero, y_ero, ri_ero = query_full_dataset(username, 'ero')
 
     X_ero_temp, X_ero_test, y_ero_temp, y_ero_test, ri_ero_temp, _ = train_test_split(
         X_ero, y_ero, ri_ero, test_size=0.15, random_state=42, stratify=y_ero
@@ -380,7 +381,7 @@ def main():
 
         f.write("CLASS IMBALANCE ANALYSIS: Q1 vs ERO\n")
         f.write("=" * 70 + "\n")
-        f.write(f"(Gaia G >= {mag_cut} mag filter applied)\n\n")
+        f.write(f"(Gaia G >= {MAG_CUT} mag filter applied)\n\n")
         f.write("Q1 Dataset:\n")
         f.write("-" * 40 + "\n")
         f.write(f"  Total sources:       {n_q1_total:>10,}\n")

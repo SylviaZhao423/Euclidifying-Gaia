@@ -1,17 +1,17 @@
 # Selected Gaia DR3 parameters for XGBoost classifier
-# 47 columns: 45 original Gaia columns + 2 derived columns (pre-computed in WSDB)
+# See GAIA_QUERY_COLUMNS at the bottom for the combined list.
 
 # =============================================================================
-# Original Gaia DR3 columns (45 parameters)
+# Original Gaia DR3 columns
 # =============================================================================
 GAIA_ORIGINAL_COLUMNS = [
-    # Astrometry errors
+    ### Astrometry errors =====================================================
     # 'ra_error',
     # 'dec_error',
-    'parallax_over_error',  # parallax significance (parallax / parallax_error)
-    # Astrometric quality
+    'parallax_over_error',
+    ### Astrometric quality ===================================================
     'astrometric_n_obs_al',
-    'astrometric_n_obs_ac',
+    # 'astrometric_n_obs_ac',
     'astrometric_n_good_obs_al',
     'astrometric_n_bad_obs_al',
     'astrometric_gof_al',
@@ -20,42 +20,42 @@ GAIA_ORIGINAL_COLUMNS = [
     'astrometric_excess_noise_sig',
     'astrometric_params_solved',
     'astrometric_matched_transits',
-    'visibility_periods_used',
-    'astrometric_sigma5d_max',
+    # 'visibility_periods_used',
+    # 'astrometric_sigma5d_max',
     'matched_transits',
-    # Image parameters
+    ### Image parameters =======================================================
     'ipd_gof_harmonic_amplitude',
     'ipd_gof_harmonic_phase',
-    'ipd_frac_multi_peak',
-    'ipd_frac_odd_win',
+    # 'ipd_frac_multi_peak',
+    # 'ipd_frac_odd_win',
     'ruwe',
-    'duplicated_source',
-    # G-band photometry
-    'phot_g_n_obs',
-    'phot_g_mean_flux',
-    'phot_g_mean_flux_error',
+    # 'duplicated_source',
+    ### G-band photometry ======================================================
+    # 'phot_g_n_obs',
+    # 'phot_g_mean_flux',
+    # 'phot_g_mean_flux_error',
     'phot_g_mean_flux_over_error',
     'phot_g_mean_mag',
-    # BP-band photometry
-    'phot_bp_n_obs',
-    'phot_bp_mean_flux',
-    'phot_bp_mean_flux_error',
+    ### BP-band photometry =====================================================
+    # 'phot_bp_n_obs',
+    # phot_bp_mean_flux — redundant with phot_g_mean_flux + bp_g color
+    # 'phot_bp_mean_flux_error',
     'phot_bp_mean_flux_over_error',
-    'phot_bp_mean_mag',
-    # RP-band photometry
-    'phot_rp_n_obs',
-    'phot_rp_mean_flux',
-    'phot_rp_mean_flux_error',
+    # phot_bp_mean_mag — redundant with phot_g_mean_mag + bp_g color
+    ### RP-band photometry =====================================================
+    # 'phot_rp_n_obs',
+    # phot_rp_mean_flux — redundant with phot_g_mean_flux + g_rp color
+    # 'phot_rp_mean_flux_error',
     'phot_rp_mean_flux_over_error',
-    'phot_rp_mean_mag',
-    # BP/RP quality
-    'phot_bp_n_contaminated_transits',
-    'phot_bp_n_blended_transits',
-    'phot_rp_n_contaminated_transits',
-    'phot_rp_n_blended_transits',
-    'phot_proc_mode',
-    # Colors
-    'bp_rp',
+    # phot_rp_mean_mag — redundant with phot_g_mean_mag + g_rp color
+    ### BP/RP quality (could try later)==========================================================
+    # 'phot_bp_n_contaminated_transits',
+    # 'phot_bp_n_blended_transits',
+    # 'phot_rp_n_contaminated_transits',
+    # 'phot_rp_n_blended_transits',
+    # 'phot_proc_mode',
+    ### Colors ================================================================
+    # 'bp_rp',
     'bp_g',
     'g_rp',
 ]
@@ -65,11 +65,13 @@ GAIA_ORIGINAL_COLUMNS = [
 # =============================================================================
 DERIVED_COLUMNS = [
     'corrected_bp_rp_excess',  # C* from Riello et al. 2021, Table 2
-    'pm_significance',         # pm / sqrt(pmra_error^2 + pmdec_error^2)
+    'pm_significance',         # sqrt(chi2) with pmra_pmdec_corr
+    'position_error',     # sqrt(det(C)) with ra_dec_corr
 ]
 
 # =============================================================================
-# Combined list for training (all 47 features)
+# Combined list for training
 # =============================================================================
 GAIA_QUERY_COLUMNS = GAIA_ORIGINAL_COLUMNS + DERIVED_COLUMNS
 SELECTED_GAIA_PARAMETERS = GAIA_QUERY_COLUMNS
+N_FEATURES = len(SELECTED_GAIA_PARAMETERS)

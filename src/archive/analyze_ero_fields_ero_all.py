@@ -136,171 +136,107 @@ def get_field_color(field_name):
 
 
 def plot_mag_by_field(df, output_dir):
-    """Plot v_mag_auto distribution for each ERO field in a grid of subplots."""
+    """Plot v_mag_auto distribution for each ERO field: all, stars, galaxies overlaid."""
+    from astropy.coordinates import SkyCoord
     df_assigned = df[df['field'].notna()].copy()
 
     print(f"\nSources assigned to fields: {len(df_assigned):,}")
     print(f"Sources not in any field: {df['field'].isna().sum():,}")
 
-    # Count sources per field
     field_counts = df_assigned['field'].value_counts()
     print("\nSources per field:")
     for field in ERO_FIELDS.keys():
         count = field_counts.get(field, 0)
         print(f"  {field}: {count:,}")
 
-    # Create grid of subplots (17 fields -> 6 rows x 3 cols = 18 panels)
     n_fields = len(ERO_FIELDS)
     n_cols = 3
     n_rows = (n_fields + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 3.5 * n_rows))
     axes = axes.flatten()
 
-    # Shared bins across all fields
-    mag_data = df_assigned['v_mag_auto'].dropna()
-    bins = np.linspace(mag_data.quantile(0.01), mag_data.quantile(0.99), 40)
+    bins = np.arange(14, 28.5, 0.25)
 
-    # Plot each field in its own subplot
-    field_list = list(ERO_FIELDS.keys())
-    for idx, field_name in enumerate(field_list):
+    for idx, field_name in enumerate(ERO_FIELDS.keys()):
         ax = axes[idx]
-        field_data = df_assigned[df_assigned['field'] == field_name]['v_mag_auto'].dropna()
+        fd = df_assigned[df_assigned['field'] == field_name]
+        fd_star = fd[fd['label'] == 'STAR']['v_mag_auto'].dropna()
+        fd_gal = fd[fd['label'] == 'GALAXY']['v_mag_auto'].dropna()
+        fd_all = fd['v_mag_auto'].dropna()
 
-        if len(field_data) > 0:
-            color = get_field_color(field_name)
-            ax.hist(field_data, bins=bins, alpha=0.7, color=color, density=True)
-            ax.set_title(f'{field_name} (n={len(field_data):,})', fontsize=11, fontweight='bold')
-        else:
-            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(field_name, fontsize=11, fontweight='bold')
+        ra, dec = ERO_FIELDS[field_name][:2]
+        c = SkyCoord(ra=ra, dec=dec, unit='deg')
+        gal_b = c.galactic.b.deg
 
-        ax.set_xlabel('v_mag_auto', fontsize=10)
-        ax.set_ylabel('Density', fontsize=10)
+        ax.hist(fd_all, bins=bins, alpha=0.3, color='gray', label=f'All ({len(fd_all):,})')
+        ax.hist(fd_gal, bins=bins, alpha=0.7, color='coral',
+                label=f'Galaxies ({len(fd_gal):,})', histtype='step', linewidth=1.5)
+        ax.hist(fd_star, bins=bins, alpha=0.7, color='steelblue',
+                label=f'Stars ({len(fd_star):,})', histtype='step', linewidth=1.5)
+
+        ax.set_title(f'{field_name} (|b|={abs(gal_b):.1f}°)', fontsize=10, fontweight='bold')
+        ax.set_xlabel('Euclid VIS (v_mag_auto)', fontsize=9)
+        ax.set_ylabel('Count', fontsize=9)
+        ax.set_xlim(14, 28)
+        ax.legend(fontsize=6, loc='upper left')
         ax.grid(alpha=0.3, axis='y')
 
-    # Turn off extra axes
     for idx in range(n_fields, len(axes)):
         axes[idx].axis('off')
 
-    plt.suptitle('ERO Fields: Euclid VIS Magnitude (v_mag_auto) Distribution',
-                fontsize=14, fontweight='bold', y=1.00)
+    plt.suptitle('ALL ERO Sources by Class: Euclid VIS Magnitude by Field',
+                 fontsize=14, fontweight='bold', y=1.00)
     plt.tight_layout()
-    output_path = output_dir / 'fields_e_mag_all.png'
+    output_path = output_dir / 'fields_e_mag_count.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"\nSaved: {output_path}")
 
 
-def plot_mag_by_field_by_class(df, output_dir):
-    """Plot v_mag_auto for each ERO field, separately for stars and galaxies."""
-    df_assigned = df[df['field'].notna()].copy()
-
-    # Shared bins across all fields
-    mag_data = df_assigned['v_mag_auto'].dropna()
-    bins = np.linspace(mag_data.quantile(0.01), mag_data.quantile(0.99), 40)
-
-    for class_name, color in [('STAR', 'coral'), ('GALAXY', 'steelblue')]:
-        df_class = df_assigned[df_assigned['label'] == class_name]
-
-        # Create grid of subplots (17 fields -> 6 rows x 3 cols = 18 panels)
-        n_fields = len(ERO_FIELDS)
-        n_cols = 3
-        n_rows = (n_fields + n_cols - 1) // n_cols
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows))
-        axes = axes.flatten()
-
-        # Plot each field in its own subplot
-        field_list = list(ERO_FIELDS.keys())
-        for idx, field_name in enumerate(field_list):
-            ax = axes[idx]
-            field_data = df_class[df_class['field'] == field_name]['v_mag_auto'].dropna()
-
-            if len(field_data) > 0:
-                ax.hist(field_data, bins=bins, alpha=0.7, color=color, density=True)
-                ax.set_title(f'{field_name} (n={len(field_data):,})', fontsize=11, fontweight='bold')
-            else:
-                ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-                ax.set_title(field_name, fontsize=11, fontweight='bold')
-
-            ax.set_xlabel('v_mag_auto', fontsize=10)
-            ax.set_ylabel('Density', fontsize=10)
-            ax.grid(alpha=0.3, axis='y')
-
-        # Turn off extra axes
-        for idx in range(n_fields, len(axes)):
-            axes[idx].axis('off')
-
-        plt.suptitle(f'ERO Fields: Euclid VIS Magnitude (v_mag_auto) - {class_name}s only',
-                    fontsize=14, fontweight='bold', y=1.00)
-        plt.tight_layout()
-        suffix = 'stars' if class_name == 'STAR' else 'galaxies'
-        output_path = output_dir / f'fields_e_mag_{suffix}.png'
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"Saved: {output_path}")
-
-
 
 
 def plot_class_fraction_by_field(df, output_dir):
-    """Plot star/galaxy fraction vs Euclid magnitude for each ERO field."""
+    """Plot galaxy fraction vs Euclid magnitude for each ERO field."""
+    from astropy.coordinates import SkyCoord
     df_assigned = df[df['field'].notna()].copy()
 
-    # Create grid of subplots (17 fields -> 6 rows x 3 cols = 18 panels)
     n_fields = len(ERO_FIELDS)
     n_cols = 3
     n_rows = (n_fields + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 3.5 * n_rows))
     axes = axes.flatten()
 
-    # Magnitude bins for Euclid VIS (typically goes fainter than Gaia)
-    mag_bins = np.arange(10, 28, 0.5)
-    mag_centers = (mag_bins[:-1] + mag_bins[1:]) / 2
+    bins = np.arange(10, 28, 0.5)
+    bin_centers = (bins[:-1] + bins[1:]) / 2
 
-    field_list = list(ERO_FIELDS.keys())
-    for idx, field_name in enumerate(field_list):
+    for idx, field_name in enumerate(ERO_FIELDS.keys()):
         ax = axes[idx]
-        field_data = df_assigned[df_assigned['field'] == field_name].copy()
+        fd = df_assigned[df_assigned['field'] == field_name]
+        fd_gal = fd[fd['label'] == 'GALAXY']['v_mag_auto'].dropna()
+        fd_all = fd['v_mag_auto'].dropna()
 
-        if len(field_data) == 0:
-            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(field_name, fontsize=11, fontweight='bold')
-            continue
+        ra, dec = ERO_FIELDS[field_name][:2]
+        c = SkyCoord(ra=ra, dec=dec, unit='deg')
+        gal_b = c.galactic.b.deg
+        color = get_field_color(field_name)
 
-        # Bin by magnitude and compute fractions
-        star_fracs = []
-        galaxy_fracs = []
-        valid_centers = []
+        counts_all, _ = np.histogram(fd_all, bins=bins)
+        counts_gal, _ = np.histogram(fd_gal, bins=bins)
 
-        for i, (lo, hi) in enumerate(zip(mag_bins[:-1], mag_bins[1:])):
-            bin_data = field_data[(field_data['v_mag_auto'] >= lo) &
-                                   (field_data['v_mag_auto'] < hi)]
-            if len(bin_data) >= 10:  # Require at least 10 sources
-                n_star = (bin_data['label'] == 'STAR').sum()
-                n_galaxy = (bin_data['label'] == 'GALAXY').sum()
-                total = n_star + n_galaxy
-                star_fracs.append(100 * n_star / total)
-                galaxy_fracs.append(100 * n_galaxy / total)
-                valid_centers.append(mag_centers[i])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            frac = np.where(counts_all > 0, counts_gal / counts_all, np.nan)
 
-        if len(valid_centers) > 0:
-            # Stacked area plot
-            ax.fill_between(valid_centers, 0, star_fracs, alpha=0.7,
-                           color='coral', label='STAR')
-            ax.fill_between(valid_centers, star_fracs, 100, alpha=0.7,
-                           color='steelblue', label='GALAXY')
-            ax.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
-            ax.set_ylim(0, 100)
-            ax.set_xlim(10, 27)
-            ax.set_title(f'{field_name} (n={len(field_data):,})', fontsize=11, fontweight='bold')
-            ax.legend(fontsize=8, loc='lower left')
-        else:
-            ax.text(0.5, 0.5, 'Insufficient data', ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(field_name, fontsize=11, fontweight='bold')
+        mask = counts_all >= 10
+        ax.plot(bin_centers[mask], frac[mask], 'o-', color=color, markersize=3,
+                linewidth=1.5)
 
-        ax.set_xlabel('v_mag_auto', fontsize=10)
-        ax.set_ylabel('Fraction (%)', fontsize=10)
-        ax.grid(alpha=0.3, axis='y')
+        ax.set_title(f'{field_name} (|b|={abs(gal_b):.1f}°)', fontsize=10, fontweight='bold')
+        ax.set_xlabel('Euclid VIS (v_mag_auto)', fontsize=9)
+        ax.set_ylabel('Galaxy fraction', fontsize=9)
+        ax.set_xlim(10, 27)
+        ax.set_ylim(-0.02, 1.02)
+        ax.axhline(y=0.5, color='gray', ls='--', alpha=0.4)
+        ax.grid(alpha=0.3)
 
     # Turn off extra axes
     for idx in range(n_fields, len(axes)):
@@ -337,7 +273,6 @@ def main():
 
     # Generate plots
     plot_mag_by_field(df, output_dir)
-    plot_mag_by_field_by_class(df, output_dir)
     plot_class_fraction_by_field(df, output_dir)
 
     print("\n" + "=" * 70)
