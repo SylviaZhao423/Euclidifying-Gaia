@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 # Configuration
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR = PROJECT_DIR / 'output' / 'population_comparison' / 'not_features'
+OUTPUT_DIR = PROJECT_DIR / 'output' / 'feature_distribution' / 'not_input'
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB = 'wsdb'
 
@@ -172,9 +172,9 @@ def plot_combined_comparison(q1_df, ero_df, output_dir):
     plt.suptitle(f'Population Comparison: Q1 vs ERO (All Sources, {N_PROPERTIES} parameters)',
                  fontsize=14, fontweight='bold', y=1.00)
     plt.tight_layout()
-    plt.savefig(output_dir / 'ero_vs_q1_all_sources.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'ero_vs_q1_all.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved: {output_dir / 'ero_vs_q1_all_sources.png'}")
+    print(f"  Saved: {output_dir / 'ero_vs_q1_all.png'}")
 
 
 def plot_by_class_comparison(q1_df, ero_df, output_dir):

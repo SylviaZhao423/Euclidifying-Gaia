@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'population_comparison'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'feature_distribution'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
@@ -149,7 +149,7 @@ def plot_all_sources(q1_df, ero_df, output_dir):
     _plot_grid(
         q1_df, ero_df,
         title='Training Feature Distributions: Q1 vs ERO (All Sources, G ≥ 18.5)',
-        output_path=output_dir / 'features_all_sources.png',
+        output_path=output_dir / 'ero_vs_q1_all.png',
     )
 
 
@@ -162,7 +162,7 @@ def plot_by_class(q1_df, ero_df, output_dir):
             q1_df[q1_df['label'] == class_label],
             ero_df[ero_df['label'] == class_label],
             title=f'Training Feature Distributions: Q1 vs ERO ({title_label}, G ≥ 18.5)',
-            output_path=output_dir / f'features_{fname_label}.png',
+            output_path=output_dir / f'ero_vs_q1_{fname_label}.png',
         )
 
 

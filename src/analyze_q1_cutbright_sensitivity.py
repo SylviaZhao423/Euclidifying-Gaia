@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Q1 model cut-based magnitude sensitivity analysis.
+Q1 model bright-end cut magnitude sensitivity analysis.
 
-For each Gaia G magnitude cut (G >= cut, 28 values from 15.0 to 21.75),
+For each Gaia G bright-end cut (G >= cut, 28 values from 15.0 to 21.75),
 trains a fresh XGBoost model on Q1 data (STAR/GALAXY only) and evaluates
 Galaxy Precision, F1, and Recall on the held-out 20% test set from the
 same cut.
 
-This shows how model performance changes as the training sample is
-restricted to progressively fainter magnitude limits — each point on the
-plot corresponds to a model trained exclusively on sources with G >= that
-cut value.
+This shows how model performance changes as bright sources are progressively
+removed — each point on the plot corresponds to a model trained exclusively
+on sources with G >= that cut value.
 
 Runs N_SEEDS random 80/20 stratified splits per cut (total: 28 x 10 = 280
 model trainings). Feature importance is reported at the reference cut
 G >= 18.5 (matching the combined training script).
 
 Outputs:
-  output/cut_sensitivity/q1_cut_performance.png
-  output/cut_sensitivity/q1_cut_importance.png
+  output/cutbright_sensitivity/q1_cutbright_performance.png
+  output/cutbright_sensitivity/q1_cutbright_importance.png
+  output/cutbright_sensitivity/q1_cutbright_results.json
 
 Usage:
-    PGUSER=siwei_zhao_2025 python src/analyze_q1_cut_sensitivity.py
+    PGUSER=siwei_zhao_2025 python src/analyze_q1_cutbright_sensitivity.py
 """
 
 import json
@@ -40,8 +40,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'cut_sensitivity'
-CACHE_FILE  = OUTPUT_DIR / 'q1_results.json'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'cutbright_sensitivity'
+CACHE_FILE  = OUTPUT_DIR / 'q1_cutbright_results.json'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
@@ -245,7 +245,7 @@ def run_seed(df, seed):
 # Plots
 # ---------------------------------------------------------------------------
 
-def plot_cut_sensitivity(all_metrics, classified_fracs, all_fracs, output_dir):
+def plot_cutbright_sensitivity(all_metrics, classified_fracs, all_fracs, output_dir):
     """Three-panel figure:
     Row 1: Galaxy Precision, F1, Recall vs training G cut (mean +/- 1 sigma).
     Row 2: Cumulative population fractions — classified only (STAR + GALAXY).
@@ -351,7 +351,7 @@ def plot_cut_sensitivity(all_metrics, classified_fracs, all_fracs, output_dir):
     fig.subplots_adjust(top=0.90)
     plt.tight_layout()
 
-    out = output_dir / 'q1_performance.png'
+    out = output_dir / 'q1_cutbright_performance.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -407,7 +407,7 @@ def plot_feature_importance(all_importances, output_dir):
         fontsize=12, fontweight='bold', y=0.98)
     plt.tight_layout()
 
-    out = output_dir / 'q1_importance.png'
+    out = output_dir / 'q1_cutbright_importance.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -469,7 +469,7 @@ def plot_cv_vs_cut(all_imps_by_seed, output_dir):
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
-    out = output_dir / 'q1_cv_heatmap.png'
+    out = output_dir / 'q1_cutbright_cv_heatmap.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -529,7 +529,7 @@ def plot_cv_vs_cut_lines(all_imps_by_seed, output_dir):
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
-    out = output_dir / 'q1_cv_lines.png'
+    out = output_dir / 'q1_cutbright_cv_lines.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -602,7 +602,7 @@ def plot_cv_vs_cut_rows(all_imps_by_seed, output_dir):
         fontsize=12, fontweight='bold', y=0.99)
     fig.subplots_adjust(left=0.28, top=0.97)
 
-    out = output_dir / 'q1_cv_rows.png'
+    out = output_dir / 'q1_cutbright_cv_rows.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -661,7 +661,7 @@ def plot_imp_vs_cut_heatmap(all_imps_by_seed, output_dir):
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
-    out = output_dir / 'q1_imp_heatmap.png'
+    out = output_dir / 'q1_cutbright_imp_heatmap.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -715,7 +715,7 @@ def plot_imp_vs_cut_lines(all_imps_by_seed, output_dir):
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
-    out = output_dir / 'q1_imp_lines.png'
+    out = output_dir / 'q1_cutbright_imp_lines.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -786,7 +786,7 @@ def plot_imp_vs_cut_rows(all_imps_by_seed, output_dir):
         fontsize=12, fontweight='bold', y=0.99)
     fig.subplots_adjust(left=0.28, top=0.97)
 
-    out = output_dir / 'q1_imp_rows.png'
+    out = output_dir / 'q1_cutbright_imp_rows.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -879,7 +879,7 @@ def plot_rank_vs_cut_rows(all_imps_by_seed, output_dir):
         fontsize=12, fontweight='bold', y=0.99)
     fig.subplots_adjust(left=0.28, top=0.97)
 
-    out = output_dir / 'q1_rank_rows.png'
+    out = output_dir / 'q1_cutbright_rank_rows.png'
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {out}")
@@ -1014,7 +1014,7 @@ def main():
         save_cache(all_metrics, all_imps_by_seed, classified_fracs, all_fracs)
 
     print("\n[4] Plotting cut sensitivity...")
-    plot_cut_sensitivity(all_metrics, classified_fracs, all_fracs, OUTPUT_DIR)
+    plot_cutbright_sensitivity(all_metrics, classified_fracs, all_fracs, OUTPUT_DIR)
 
     if all_importances:
         print(f"\n[5] Plotting feature importance ({len(all_importances)} models)...")
