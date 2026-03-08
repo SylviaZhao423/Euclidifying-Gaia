@@ -16,7 +16,7 @@ from pathlib import Path
 import os
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR = PROJECT_DIR / 'output'
+OUTPUT_DIR = PROJECT_DIR / 'output' / 'ero_mag_dist'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB = 'wsdb'
@@ -55,14 +55,15 @@ def query_mag_dist_by_class(username, gaia_matched_only=False, use_gaia_mag=Fals
         return None
 
     BIN_WIDTH = 0.25
-    mag_bins = np.arange(10, 28, BIN_WIDTH)
+    mag_bins = np.arange(10, 29.25, BIN_WIDTH)
 
     if gaia_matched_only:
         table_name = 'siwei_zhao_2025.crossmatch_ero_gaia_0_3'
         class_col = 'e_v_class_star'
-        extra_filter = 'AND g_phot_g_mean_mag IS NOT NULL AND e_v_class_star IS NOT NULL'
+        extra_filter = 'AND e_v_class_star IS NOT NULL'
         if use_gaia_mag:
             mag_col = 'g_phot_g_mean_mag'
+            extra_filter += ' AND g_phot_g_mean_mag IS NOT NULL'
             if gaia_mag_cut_filter is not None:
                 extra_filter += f' AND g_phot_g_mean_mag >= {gaia_mag_cut_filter}'
                 print(f"Querying GAIA-MATCHED distribution (Gaia G mag, G >= {gaia_mag_cut_filter}) from {table_name}...")

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-class_star vs magnitude and Gaia neighbour count — produces:
-  1. ero_class_star_2d.png              — 1x3: class_star vs Euclid VIS / Gaia G / Gaia G excl. 17.5–18.5
-  2. ero_class_star_neighbours_2d.png   — class_star vs Gaia G by neighbour count (4 radii × 4 bins)
-  3. ero_class_star_vs_cnt.png          — class_star vs neighbour count at each radius
+class_star vs Gaia neighbour count — produces:
+  1. ero_class_star_neighbours_2d.png   — class_star vs Gaia G by neighbour count (4 radii × 4 bins)
+  2. ero_class_star_vs_cnt.png          — class_star vs neighbour count at each radius
 
 Usage:
     PGUSER=siwei_zhao_2025 python src/analyze_ero_class_star_neighbours.py
@@ -17,8 +16,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
-PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR     = PROJECT_DIR / 'output'
+PROJECT_DIR    = Path(__file__).parent.parent
 NEIGHBOURS_DIR = PROJECT_DIR / 'output' / 'ero_neighbours'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
@@ -77,48 +75,6 @@ def assign_fields(df):
 
 # ─── Data queries ────────────────────────────────────────────────────────────
 
-def query_ero_data(username):
-    """Query ERO crossmatch (Gaia-matched) for the class_star vs magnitude plot."""
-    import psycopg2
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    query = """
-        SELECT
-            e_v_alpha_j2000 AS ra,
-            e_v_delta_j2000 AS dec,
-            g_phot_g_mean_mag AS phot_g_mean_mag,
-            e_v_mag_auto AS v_mag_auto,
-            e_v_class_star AS class_star
-        FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
-        WHERE e_v_class_star IS NOT NULL
-        ORDER BY g_source_id
-    """
-    print("  Querying ERO crossmatch data...")
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    print(f"  Retrieved {len(df):,} sources")
-    return df
-
-
-def query_all_ero(username):
-    """Query ALL ERO sources from euclid_ero.merge_cat."""
-    import psycopg2
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    query = """
-        SELECT
-            v_alpha_j2000 AS ra,
-            v_delta_j2000 AS dec,
-            v_mag_auto,
-            v_class_star AS class_star
-        FROM euclid_ero.merge_cat
-        WHERE v_class_star IS NOT NULL
-    """
-    print("  Querying all ERO sources...")
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    print(f"  Retrieved {len(df):,} sources")
-    return df
-
-
 def query_neighbours(username):
     """Query ERO crossmatch joined with Gaia neighbour counts."""
     import psycopg2
@@ -143,48 +99,6 @@ def query_neighbours(username):
 
 
 # ─── Plots ───────────────────────────────────────────────────────────────────
-
-def plot_class_star_combined(df, df_ero, output_dir):
-    """Combined 1x3 plot of class_star vs magnitude 2D histograms."""
-    ybins = np.arange(0, 1.01, 0.01)
-
-    sub_gaia      = df[(df['field'].notna()) & df['phot_g_mean_mag'].notna() & df['class_star'].notna()]
-    sub_gaia_excl = sub_gaia[~sub_gaia['v_mag_auto'].between(17.5, 18.5)]
-    sub_ero       = df_ero[(df_ero['field'].notna()) & df_ero['v_mag_auto'].notna() & df_ero['class_star'].notna()]
-
-    panels = [
-        (sub_ero['v_mag_auto'].values,          sub_ero['class_star'].values,
-         np.arange(14, 26.05, 0.05), (14, 26),
-         'Euclid VIS mag', 'class_star vs Euclid VIS (all ERO)'),
-        (sub_gaia['phot_g_mean_mag'].values,     sub_gaia['class_star'].values,
-         np.arange(14, 22.05, 0.05), (14, 22),
-         'Gaia G', 'class_star vs Gaia G (Gaia-matched)'),
-        (sub_gaia_excl['phot_g_mean_mag'].values, sub_gaia_excl['class_star'].values,
-         np.arange(14, 22.05, 0.05), (14, 22),
-         'Gaia G', 'class_star vs Gaia G (excl. ERO VIS 17.5–18.5)'),
-    ]
-
-    fig, axes = plt.subplots(1, 3, figsize=(36, 6))
-    for ax, (xvals, yvals, xbins, xlim, xlabel, title) in zip(axes, panels):
-        h, xe, ye = np.histogram2d(xvals, yvals, bins=[xbins, ybins])
-        hm = np.ma.masked_where(h == 0, h)
-        im = ax.pcolormesh(xe, ye, hm.T, cmap='GnBu', norm=LogNorm(vmin=1))
-        ax.axhline(y=0.65, color='red', ls='--', linewidth=1.5, label='cut=0.65')
-        fig.colorbar(im, ax=ax, pad=0.02).set_label('Count', fontsize=11, fontweight='bold')
-        ax.set_xlabel(xlabel, fontsize=11, fontweight='bold')
-        ax.set_ylabel('class_star', fontsize=11, fontweight='bold')
-        ax.set_title(title, fontsize=12, fontweight='bold')
-        ax.set_xlim(*xlim)
-        ax.set_ylim(0, 1)
-        ax.legend(loc='upper right', fontsize=10)
-        ax.grid(alpha=0.3)
-
-    plt.tight_layout()
-    out = output_dir / 'ero_prob_class_star_2d.png'
-    plt.savefig(out, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved: {out}")
-
 
 def plot_class_star_by_neighbours(df, output_dir):
     """4×4 grid: rows = radii, cols = neighbour count bins.
@@ -296,35 +210,23 @@ def main():
         print("ERROR: PGUSER environment variable not set!")
         return 1
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     NEIGHBOURS_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
-    print("ERO class_star vs Magnitude and Neighbour Count")
+    print("ERO class_star vs Neighbour Count")
     print("=" * 70)
 
-    print("\n[1] Querying Gaia-matched ERO data...")
-    df = query_ero_data(username)
-    df = assign_fields(df)
-
-    print("\n[2] Querying all ERO sources...")
-    df_ero = query_all_ero(username)
-    df_ero = assign_fields(df_ero)
-
-    print("\n[3] Querying neighbour counts...")
+    print("\n[1] Querying neighbour counts...")
     df_nb = query_neighbours(username)
     df_nb = assign_fields(df_nb)
 
-    print("\n[4] Generating class_star vs magnitude 2D histogram...")
-    plot_class_star_combined(df, df_ero, OUTPUT_DIR)
-
-    print("\n[5] Generating class_star vs Gaia G by neighbour count...")
+    print("\n[2] Generating class_star vs Gaia G by neighbour count...")
     plot_class_star_by_neighbours(df_nb, NEIGHBOURS_DIR)
 
-    print("\n[6] Generating class_star vs neighbour count (all radii)...")
+    print("\n[3] Generating class_star vs neighbour count (all radii)...")
     plot_class_star_vs_cnt(df_nb, NEIGHBOURS_DIR)
 
-    print(f"\nPlots saved to: {OUTPUT_DIR} and {NEIGHBOURS_DIR}")
+    print(f"\nPlots saved to: {NEIGHBOURS_DIR}")
     print("=" * 70)
     return 0
 

@@ -59,7 +59,7 @@ def query_mag_dist_by_class(username, gaia_matched_only=False, use_gaia_mag=Fals
         return None
 
     BIN_WIDTH = 0.25
-    mag_bins = np.arange(10, 28, BIN_WIDTH)
+    mag_bins = np.arange(10, 29.25, BIN_WIDTH)
 
     if gaia_matched_only:
         table_name = 'siwei_zhao_2025.crossmatch_q1_mer_phz_gaia'
@@ -90,6 +90,7 @@ def query_mag_dist_by_class(username, gaia_matched_only=False, use_gaia_mag=Fals
         mag_expr = f'-2.5 * LOG10({ZPC_IE} * {flux_col}) + {ZP_REF}'
         mag_label = 'Q1 IE mag'
         extra_filter = (f'AND {flux_col} > 0 AND {flux_col} IS NOT NULL'
+                        f' AND m_vis_det = 1'
                         f' AND {class_col} IN (1, 2, 4, 8)')
         print(f"Querying ALL Q1+PHZ magnitude distribution (classified only) from {table_name}...")
 
@@ -209,7 +210,7 @@ def create_visualization(all_data, gaia_euclid_data, gaia_gaia_data, gaia_gaia_f
 
     phz_limit = 18.5
     gaia_mag_cut = 18.5
-    x_min, x_max = 10, 28
+    x_min, x_max = 10, 29
     star_color = 'coral'
     galaxy_color = 'steelblue'
     ie_mag_label = r'Magnitude ($-2.5\log_{10}(1.05 \times \mathrm{flux}) + 23.9$)'
@@ -272,7 +273,7 @@ def create_visualization(all_data, gaia_euclid_data, gaia_gaia_data, gaia_gaia_f
     for row_idx, (bc, td, sf, sc, gf, gc, xlabel, t0, t1, t2, t3, t4, vlines) in enumerate(rows):
         def _setup(ax, xlabel=xlabel, vlines=vlines, row_idx=row_idx):
             ax.set_xlabel(xlabel, fontsize=9, fontweight='bold')
-            ax.set_xlim(x_min, x_max)
+            ax.set_xlim(10, 29)
             ax.xaxis.set_major_locator(ticker.MultipleLocator(2))
             ax.grid(True, alpha=0.3, axis='y')
             ax.tick_params(axis='x', rotation=45, labelsize=9)

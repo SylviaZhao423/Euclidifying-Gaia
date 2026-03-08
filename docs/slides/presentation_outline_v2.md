@@ -1,0 +1,119 @@
+# Euclidifying Gaia — Presentation Outline (~18 slides, 20 min)
+
+Use this document to plan changes. Add notes in the **Comments** column or edit freely.
+
+## Slide Plan
+
+
+| #   | Slide                                              | Time | Speaker Notes (what to say)                                                                                                                                                                                                                                                                                                             | Slide Notes                                                                                                                                                           | Comments | Plots / Visuals                                                                                                                                                                                                  |
+| --- | -------------------------------------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Title                                              | 0:30 | Welcome. I'm Sylvia Zhao, Part III Astrophysics. This is my project: Euclidifying Gaia — using ML to classify non-point-like objects in Gaia DR3 with Euclid imaging.                                                                                                                                                                   |                                                                                                                                                                       |          | —                                                                                                                                                                                                                |
+| 2   | Motivation: why classify extended sources in Gaia? | 1:30 | Gaia is incredible for astrometry but struggles with morphology. Many galaxies look point-like at Gaia's resolution. Euclid has sharper VIS imaging. The idea: use Euclid as a "training teacher" — cross-match catalogues, get truth labels, train a classifier on Gaia parameters alone → extend classification across the whole sky. | Add Gaia/Euclid mission context — whole-sky vs deep-field, saturation limits, why ML bridges the gap                                                                  |          | `scanning_law_fields.png`                                                                                                                                                                                        |
+| 3   | The Missions: Gaia & Euclid                        | 1:30 | Two complementary ESA missions at L2. Gaia: all-sky, shallow, limited morphology, shutdown Mar 2025. Euclid: deep but slow, only ~14% of sky covered so far. Key insight: Euclid's morphological info can be projected onto Gaia's entire sky through ML.                                                                               | Fun facts: L2 orbits, Gaia 6h spin + 63-day precession, Euclid step-and-stare ~70 min per 0.5 deg² field                                                              |          | Mission images / orbit diagrams. GIFs in `docs/slides/figs/` — check if animation feasible                                                                                                                       |
+| 4   | The Datasets: Gaia DR3, Euclid ERO & Q1            | 1:30 | ERO: 17 fields, VIS-band, class_star + spread_model, ~95%/5% star/galaxy. Q1: 4 fields, 63.1 deg², multi-band VIS+NIR, PHZ pipeline, ~75%/25% star/galaxy. Q1 has pre-computed gaia_ids → no spatial cross-matching needed.                                                                                                             | Gaia faint-end limit → star bias. Euclid saturation ~17.5 mag → galaxy bias. ERO came first (PV phase Aug–Dec 2023), then Q1 with more sophisticated pipeline.        |          | Dataset summary table (in-slide)                                                                                                                                                                                 |
+| 5   | Cross-Matching: ERO (spatial) vs Q1 (ID-based)     | 2:00 | Cross-matching differs by dataset. ERO: q3c spatial matching with 0.3" radius. Q1: pre-computed gaia_ids, direct mapping. The separation distribution should be a clean Rayleigh — but ERO shows something unexpected: a bump.                                                                                                          | ERO came before Q1. By Q1, sophisticated cross-matching pipeline was in use. Q1 separations peak at ~0.1". ERO shows a suspicious bump → leads to NGC 6397 discovery. |          | `q1_sep_dist_rayleigh.png`, `ero_0_3_sep_dist_rayleigh.png`                                                                                                                                                      |
+| 6   | NGC 6397: Proper Motion Anomaly                    | 1:30 | Bimodal separation traces to NGC 6397 (~7800 ly), large proper motions. Gaia epoch 2016, Euclid observed later → stars moved. Correcting PM: σ = 0.038" vs 0.040". Validates 0.3" matching radius.                                                                                                                                      | Circular frame for photo; rectangular for data. Need to pick which plots — probably corrected separation + one cluster analysis.                                      |          | `docs/slides/figs/Euclid_NGC_6397.jpg` (circular), `ero_0_1_0_15_arcsec_clump_analysis.png`, `ero_0_3_sep_dist_rayleigh_offset_corrected.png`, `ero_gaia_pm_cluster_analysis.png`                                |
+| 7   | Validating Euclid: ERO class_star problems         | 1:30 | spread_model deserted early (SNR-dependent). class_star also questionable: Δmag vs Gaia G shows suspicious distributions. ERO labels may have higher contamination. Ongoing: evaluating whether to desert class_star too.                                                                                                               | ero_class_star_2d.png explains unexpected bump at magnitude ~18.                                                                                                      |          | `dmag_vs_gmag_by_class_star.png`, `ero_prob_class_star_2d.png`                                                                                                                                                   |
+| 8   | Gaia Completeness & Selection Effects              | 1:30 | Gaia completeness isn't uniform — extended sources less likely detected at faint mags. M₁₀ parameter models this. Galaxy fraction bump traces to selection effect.                                                                                                                                                                      | What inspired this: galaxy fraction magnitude distribution shows a weird bump. Important for interpreting faint-end performance.                                      |          | `ero_mag_dist/combined_summary.png`, `ero_completeness/completeness_summary.png`                                                                                                                                 |
+| 9   | Validating Euclid: Q1 PHZ classification           | 1:00 | Q1 PHZ uses multi-wavelength SED fitting — more robust than class_star/spread_model. phz_star_prob gives continuous likelihood. More balanced ~75%/25% split.                                                                                                                                                                           | Concern: lack of stars in Q1 at brighter magnitudes → potentially unrepresentative training set.                                                                      |          | `q1_phz_classification_dist.png`                                                                                                                                                                                 |
+| 10  | XGBoost: Training Strategy (27 experiments)        | 1:30 | 23 Gaia-only parameters. 3 training sources × 3 test sets × 3 balancing = 27 experiments. Key: only Gaia params at inference — no Euclid needed once trained.                                                                                                                                                                           | Could make a cleaner 3×3 grid visual.                                                                                                                                 |          | Train/test matrix diagram (in-slide)                                                                                                                                                                             |
+| 11  | Results: Classification Performance                | 2:00 | Best ROC AUC: 0.876 (Q1→Q1), galaxy F1: 0.685. Galaxy recall bottleneck (~50–55%). Q1-trained outperforms ERO-trained.                                                                                                                                                                                                                  |                                                                                                                                                                       |          | Results table (in-slide), `xgboost_combined/combined_galaxy_metrics_by_test.png`                                                                                                                                 |
+| 12  | Results: Cross-Dataset Generalization              | 1:00 | Q1 test → highest metrics; combined intermediate; ERO lowest. Q1-trained → highest galaxy recall. Is this better labels or more balanced ratio?                                                                                                                                                                                         |                                                                                                                                                                       |          | Focused subset of galaxy metrics plot                                                                                                                                                                            |
+| 13  | Feature Importance                                 | 1:30 | corrected_bp_rp_excess dominant — flux leakage beyond G-band. Galaxies = extended → excess. Also: g_rp, astrometric quality. Feature distributions show physical basis.                                                                                                                                                                 |                                                                                                                                                                       |          | `xgboost_combined/combined_feature_importance.png`, `population_comparison/features_all_sources.png`                                                                                                             |
+| 14  | Sensitivity Analysis                               | 1:00 | How sensitive to magnitude cuts? Sweet spot G ≥ 18.5. Performance stable for reasonable cuts.                                                                                                                                                                                                                                           | Decide which to show — maybe one heatmap + one performance plot. Both bright-end and faint-end available.                                                             |          | `cutbright_sensitivity/q1_cutbright_cv_heatmap.png`, `cutbright_sensitivity/q1_cutbright_performance.png`, `cutfaint_sensitivity/q1_cutfaint_cv_heatmap.png`, `cutfaint_sensitivity/q1_cutfaint_performance.png` |
+| 15  | UMAP Visualization                                 | 1:00 | UMAP of 23 Gaia features by star/galaxy. Distinct clusters → confirms signal. Significant overlap → explains ~50% recall ceiling.                                                                                                                                                                                                       | Clustering of galaxies visible.                                                                                                                                       |          | `xgboost_combined/combined_umap.png`                                                                                                                                                                             |
+| 16  | Summary & Key Findings                             | 1:00 | Euclid+Gaia cross-match → useful training labels. XGBoost 23 Gaia params → ROC AUC 0.88. corrected_bp_rp_excess strongest. Galaxy recall ~50% main challenge. ERO labels concern; Q1 PHZ more robust.                                                                                                                                   |                                                                                                                                                                       |          | —                                                                                                                                                                                                                |
+| 17  | Future Work & Timeline                             | 0:30 | Deeper ERO contamination investigation, potentially Q1-only training, apply to full Gaia sky, future Euclid releases.                                                                                                                                                                                                                   | **Question for supervisors: should we include this slide?**                                                                                                           |          | Easter term plans                                                                                                                                                                                                |
+| 18  | Thank you / Questions                              | —    | Thank you. Happy to take questions.                                                                                                                                                                                                                                                                                                     |                                                                                                                                                                       |          | —                                                                                                                                                                                                                |
+
+
+---
+
+## Questions for Supervisor Meeting (Mar 9)
+
+1. How much emphasis on ERO class_star issues?
+2. Should we include Q1 PHZ validation as separate slide?
+3. Is the cross-dataset generalization story worth a dedicated slide?
+4. Any additional plots or analysis to add?
+5. Should we include Future Work & Timeline? (slide 17)
+6. **From Slack (Diana, Mar 6):** "Ideally, you want your training set to be representative of the data in general. This is why I was worried about the lack of stars in Q1, particularly at brighter magnitudes." → Should we reconsider ERO as a training source despite class_star issues, since ERO *does* give actual stars at brighter magnitudes? Tension: Q1 has better labels but unrepresentative star coverage; ERO has more stars but potentially unreliable labels.
+
+---
+
+## Available Plot Inventory
+
+All paths relative to project root (`output/`).
+
+### Cross-matching & validation
+
+
+| Plot                                             | Description                                   |
+| ------------------------------------------------ | --------------------------------------------- |
+| `q1_sep_dist_rayleigh.png`                       | Q1 separation distribution (~0.1" peak)       |
+| `ero_0_3_sep_dist_rayleigh.png`                  | ERO separation distribution (shows bump)      |
+| `ero_0_3_sep_dist_rayleigh_offset_corrected.png` | ERO separation after proper motion correction |
+| `ero_0_1_0_15_arcsec_clump_analysis.png`         | NGC 6397 clump analysis                       |
+| `ero_gaia_pm_cluster_analysis.png`               | Proper motion cluster analysis                |
+
+
+### Label reliability
+
+
+| Plot                             | Description                            |
+| -------------------------------- | -------------------------------------- |
+| `dmag_vs_gmag_by_class_star.png` | Δmag vs Gaia G split by ERO class_star |
+| `ero_prob_class_star_2d.png`     | ERO class_star 2D distribution         |
+| `q1_phz_classification_dist.png` | Q1 PHZ classification distribution     |
+| `q1_prob_phz_star_2d.png`        | Q1 PHZ star probability 2D             |
+| `q1_dmag_vs_gmag_by_phz.png`     | Δmag vs Gaia G split by Q1 PHZ label   |
+
+
+### Magnitude distributions & completeness
+
+
+| Plot                                        | Description                                                |
+| ------------------------------------------- | ---------------------------------------------------------- |
+| `ero_mag_dist/combined_summary.png`         | Galaxy fraction bump (inspired completeness investigation) |
+| `ero_completeness/completeness_summary.png` | Gaia completeness summary                                  |
+
+
+### XGBoost results
+
+
+| Plot                                                   | Description                            |
+| ------------------------------------------------------ | -------------------------------------- |
+| `xgboost_combined/combined_feature_importance.png`     | Feature importance bar charts          |
+| `xgboost_combined/combined_galaxy_metrics_by_test.png` | Galaxy metrics across 27 experiments   |
+| `xgboost_combined/combined_umap.png`                   | UMAP projections                       |
+| `population_comparison/features_all_sources.png`       | Feature distributions (star vs galaxy) |
+
+
+### Sensitivity analysis
+
+
+| Plot                                                 | Description                |
+| ---------------------------------------------------- | -------------------------- |
+| `cutbright_sensitivity/q1_cutbright_cv_heatmap.png`  | Bright-end cut CV heatmap  |
+| `cutbright_sensitivity/q1_cutbright_performance.png` | Bright-end cut performance |
+| `cutfaint_sensitivity/q1_cutfaint_cv_heatmap.png`    | Faint-end cut CV heatmap   |
+| `cutfaint_sensitivity/q1_cutfaint_performance.png`   | Faint-end cut performance  |
+
+
+### Images (circular frames)
+
+
+| Image                 | Location                                                         |
+| --------------------- | ---------------------------------------------------------------- |
+| NGC 6397 (Euclid VIS) | `docs/slides/figs/Euclid_NGC_6397.jpg`                           |
+| Euclid/Gaia GIFs      | `docs/slides/figs/IMG_7461.GIF`, `docs/slides/figs/IMG_7464.GIF` |
+
+
+---
+
+## Notes on Format Compatibility
+
+- **Use PowerPoint** for final presentation — PPTX is Microsoft's native format
+- **Canva** may crop/distort images (especially shaped frames and aspect-ratio mismatches)
+- v3 pre-processes all plot images to match target frame aspect ratios
+- NGC 6397 circular frame is pre-baked into the PNG (no renderer-dependent clip mask)
+
