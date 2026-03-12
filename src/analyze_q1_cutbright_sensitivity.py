@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Q1 model bright-end cut magnitude sensitivity analysis.
+Q1 bright-end model bright-end cut magnitude sensitivity analysis.
 
 For each Gaia G bright-end cut (G >= cut, 28 values from 15.0 to 21.75),
 trains a fresh XGBoost model on Q1 data (STAR/GALAXY only) and evaluates
@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'cutbright_sensitivity'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'q1_cut_sensitivity'
 CACHE_FILE  = OUTPUT_DIR / 'q1_cutbright_results.json'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
@@ -341,11 +341,11 @@ def plot_cutbright_sensitivity(all_metrics, classified_fracs, all_fracs, output_
     ax_bot.set_xlim(x[0] - 0.2, x[-1] + 0.2)
     ax_bot.set_xticks(tick_vals)
     ax_bot.set_xticklabels([f'G>={c:.0f}' for c in tick_vals], fontsize=10)
-    ax_bot.set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    ax_bot.set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                       fontsize=13, fontweight='bold', labelpad=13)
 
     plt.suptitle(
-        f'Q1 model — Galaxy metrics vs training magnitude cut  '
+        f'Q1 model — Galaxy metrics vs bright-end training cut  '
         f'(mean \u00b1 1\u03c3, {n_seeds} random 80/20 splits)',
         fontsize=13, fontweight='bold', y=0.99)
     fig.subplots_adjust(top=0.90)
@@ -370,9 +370,10 @@ def plot_feature_importance(all_importances, output_dir):
     std_s = std[order]
     cv_s  = cv[order]
 
-    n_feat  = len(feats)
-    cv_norm = cv_s / (cv_s.max() + 1e-9)
-    colors  = plt.cm.RdYlGn_r(cv_norm)
+    n_feat = len(feats)
+    cv_abs_max = 2.0
+    norm = plt.Normalize(vmin=0, vmax=cv_abs_max)
+    colors = plt.cm.RdYlGn_r(norm(cv_s))
 
     fig, ax = plt.subplots(figsize=(11, max(8, n_feat * 0.38)))
     ax.barh(range(n_feat), mu_s, xerr=std_s,
@@ -384,18 +385,18 @@ def plot_feature_importance(all_importances, output_dir):
     ax.set_xlabel('Feature importance  (mean \u00b1 1\u03c3 across all cuts \u00d7 seeds)', fontsize=11,
                   fontweight='bold', labelpad=10)
     ax.grid(alpha=0.3, axis='x')
-    ax.set_xlim(0, 0.45)
+    ax.set_xlim(0, 0.5)
+    ax.set_xticks(np.arange(0, 0.51, 0.1))
 
     for i, (m_v, s_v, c_v) in enumerate(zip(mu_s, std_s, cv_s)):
         ax.text(m_v + s_v + 0.0005, i, f'CV={c_v:.2f}',
                 va='center', fontsize=7.5, color='#333333')
 
-    sm = plt.cm.ScalarMappable(cmap='RdYlGn_r',
-                                norm=plt.Normalize(vmin=0, vmax=1.8))
+    sm = plt.cm.ScalarMappable(cmap='RdYlGn_r', norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, fraction=0.02, pad=0.01)
     cbar.set_label('CV = std / mean', fontsize=9)
-    cbar.set_ticks(np.arange(0, 1.8, 0.2))
+    cbar.set_ticks(np.arange(0, cv_abs_max + 0.1, 0.2))
     cbar.ax.text(0.4, 1.04, 'unstable', transform=cbar.ax.transAxes,
                  fontsize=8, va='bottom', ha='left', color='darkred')
     cbar.ax.text(0.4, -0.05, 'stable', transform=cbar.ax.transAxes,
@@ -403,7 +404,7 @@ def plot_feature_importance(all_importances, output_dir):
 
     n_models = len(all_importances)
     plt.suptitle(
-        f'Q1 model feature importance  (mean across all cuts \u00d7 seeds, {n_models} models)',
+        f'Q1 bright-end model — feature importance  (mean across all cuts \u00d7 seeds, {n_models} models)',
         fontsize=12, fontweight='bold', y=0.98)
     plt.tight_layout()
 
@@ -448,7 +449,7 @@ def plot_cv_vs_cut(all_imps_by_seed, output_dir):
     tick_idx = [i for i, c in enumerate(MAG_CUTS) if c == round(c)]
     ax.set_xticks(tick_idx)
     ax.set_xticklabels([f'G>={MAG_CUTS[i]:.0f}' for i in tick_idx], fontsize=9)
-    ax.set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    ax.set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                   fontsize=11, fontweight='bold', labelpad=8)
 
     # Y-axis: feature labels
@@ -465,7 +466,7 @@ def plot_cv_vs_cut(all_imps_by_seed, output_dir):
     cbar.set_label('CV = std / mean  (across seeds)', fontsize=9)
 
     plt.suptitle(
-        f'Q1 model \u2014 feature importance CV vs training cut  ({n_seeds} seeds)',
+        f'Q1 bright-end model \u2014 feature importance CV vs training cut  ({n_seeds} seeds)',
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
@@ -516,7 +517,7 @@ def plot_cv_vs_cut_lines(all_imps_by_seed, output_dir):
     ax.set_xticks(tick_vals)
     ax.set_xticklabels([f'G>={c:.0f}' for c in tick_vals], fontsize=10)
     ax.set_xlim(x[0] - 0.2, 21.2)
-    ax.set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    ax.set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                   fontsize=11, fontweight='bold', labelpad=8)
     ax.set_ylabel('CV = std / mean  (across seeds)', fontsize=11, fontweight='bold')
     ax.set_ylim(0, 1)
@@ -525,7 +526,7 @@ def plot_cv_vs_cut_lines(all_imps_by_seed, output_dir):
     ax.legend(fontsize=7.5, loc='upper left', ncol=2, framealpha=0.9)
 
     plt.suptitle(
-        f'Q1 model \u2014 feature importance CV vs training cut  ({n_seeds} seeds)',
+        f'Q1 bright-end model \u2014 feature importance CV vs training cut  ({n_seeds} seeds)',
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
@@ -594,11 +595,11 @@ def plot_cv_vs_cut_rows(all_imps_by_seed, output_dir):
     tick_vals = [c for c in MAG_CUTS if c == round(c)]
     axes[-1].set_xticks(tick_vals)
     axes[-1].set_xticklabels([f'G>={c:.0f}' for c in tick_vals], fontsize=9)
-    axes[-1].set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    axes[-1].set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                         fontsize=11, fontweight='bold', labelpad=8)
 
     plt.suptitle(
-        f'Q1 model \u2014 feature importance CV vs training cut  ({n_seeds} seeds)',
+        f'Q1 bright-end model \u2014 feature importance CV vs training cut  ({n_seeds} seeds)',
         fontsize=12, fontweight='bold', y=0.99)
     fig.subplots_adjust(left=0.28, top=0.97)
 
@@ -644,7 +645,7 @@ def plot_imp_vs_cut_heatmap(all_imps_by_seed, output_dir):
     tick_idx = [i for i, c in enumerate(MAG_CUTS) if c == round(c)]
     ax.set_xticks(tick_idx)
     ax.set_xticklabels([f'G>={MAG_CUTS[i]:.0f}' for i in tick_idx], fontsize=9)
-    ax.set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    ax.set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                   fontsize=11, fontweight='bold', labelpad=8)
     ax.set_yticks(range(n_feats))
     ax.set_yticklabels(feat_labels, fontsize=9)
@@ -657,7 +658,7 @@ def plot_imp_vs_cut_heatmap(all_imps_by_seed, output_dir):
     cbar.set_ticks(np.arange(0, 0.21, 0.05))
 
     plt.suptitle(
-        f'Q1 model \u2014 feature importance vs training cut  ({n_seeds} seeds)',
+        f'Q1 bright-end model \u2014 feature importance vs training cut  ({n_seeds} seeds)',
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
@@ -702,7 +703,7 @@ def plot_imp_vs_cut_lines(all_imps_by_seed, output_dir):
     ax.set_xticks(tick_vals)
     ax.set_xticklabels([f'G>={c:.0f}' for c in tick_vals], fontsize=10)
     ax.set_xlim(x[0] - 0.2, 21.2)
-    ax.set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    ax.set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                   fontsize=11, fontweight='bold', labelpad=8)
     ax.set_ylabel('Feature importance  (mean \u00b1 1\u03c3 across seeds)',
                   fontsize=11, fontweight='bold')
@@ -711,7 +712,7 @@ def plot_imp_vs_cut_lines(all_imps_by_seed, output_dir):
     ax.legend(fontsize=7.5, loc='upper left', ncol=2, framealpha=0.9)
 
     plt.suptitle(
-        f'Q1 model \u2014 feature importance vs training cut  ({n_seeds} seeds)',
+        f'Q1 bright-end model \u2014 feature importance vs training cut  ({n_seeds} seeds)',
         fontsize=12, fontweight='bold', y=0.99)
     plt.tight_layout()
 
@@ -778,11 +779,11 @@ def plot_imp_vs_cut_rows(all_imps_by_seed, output_dir):
     tick_vals = [c for c in MAG_CUTS if c == round(c)]
     axes[-1].set_xticks(tick_vals)
     axes[-1].set_xticklabels([f'G>={c:.0f}' for c in tick_vals], fontsize=9)
-    axes[-1].set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    axes[-1].set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                         fontsize=11, fontweight='bold', labelpad=8)
 
     plt.suptitle(
-        f'Q1 model \u2014 feature importance vs training cut  ({n_seeds} seeds, mean \u00b1 1\u03c3)',
+        f'Q1 bright-end model \u2014 feature importance vs training cut  ({n_seeds} seeds, mean \u00b1 1\u03c3)',
         fontsize=12, fontweight='bold', y=0.99)
     fig.subplots_adjust(left=0.28, top=0.97)
 
@@ -871,11 +872,11 @@ def plot_rank_vs_cut_rows(all_imps_by_seed, output_dir):
     tick_vals = [c for c in MAG_CUTS if c == round(c)]
     axes[-1].set_xticks(tick_vals)
     axes[-1].set_xticklabels([f'G>={c:.0f}' for c in tick_vals], fontsize=9)
-    axes[-1].set_xlabel('Gaia G training cut  (model trained on G >= x)',
+    axes[-1].set_xlabel('Gaia G bright-end training cut  (model trained on G >= x)',
                         fontsize=11, fontweight='bold', labelpad=8)
 
     plt.suptitle(
-        f'Q1 model \u2014 feature importance rank vs training cut  ({n_seeds} seeds, mean \u00b1 1\u03c3)',
+        f'Q1 bright-end model \u2014 feature importance rank vs training cut  ({n_seeds} seeds, mean \u00b1 1\u03c3)',
         fontsize=12, fontweight='bold', y=0.99)
     fig.subplots_adjust(left=0.28, top=0.97)
 
@@ -962,7 +963,7 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 65)
-    print(f"Q1 model: cut-based magnitude sensitivity")
+    print(f"Q1 bright-end model: cut-based magnitude sensitivity")
     print(f"  {len(MAG_CUTS)} cuts x {len(SEEDS)} seeds = {len(MAG_CUTS) * len(SEEDS)} models")
     print("=" * 65)
 

@@ -41,7 +41,7 @@ CLASS_MAPPING = {'STAR': 0, 'GALAXY': 1}
 CLASS_NAMES = ['STAR', 'GALAXY']
 
 # Universal Gaia G magnitude cut applied to both datasets
-MAG_CUT = 18.5
+MAG_CUT = 17
 
 # XGBoost parameters (shared across all experiments)
 XGB_PARAMS = {

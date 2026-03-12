@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-spread_model vs magnitude 2D histograms — produces:
-  ero_spread_model_2d.png  — 3x2 combined plot:
-    Row 1: spread_model 2D histograms
+spread_model / spreaderr_model vs magnitude 2D histograms — produces:
+  ero_prob_spread_model_2d.png  — 3x2 combined plot:
+    Row 1: spread_model vs magnitude
       (a) spread_model vs Euclid VIS mag (all ERO, from euclid_ero.merge_cat)
       (b) spread_model vs Gaia G (Gaia-matched, from crossmatch_ero_gaia_0_3)
-    Row 2: 1D magnitude distributions classified by SM + 3×SME > 0
-    Row 3: 1D magnitude distributions classified by SM + 5/3×SME > 0
+    Row 2: spreaderr_model vs magnitude (same two panels)
+    Row 3: SM + 5/3×SME vs magnitude (threshold = 0.005)
 
 Usage:
     PGUSER=siwei_zhao_2025 python src/analyze_ero_spread_model_2d.py
@@ -26,9 +26,13 @@ OUTPUT_DIR  = PROJECT_DIR / 'output'
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
 
-SM_MIN = -0.1
-SM_MAX =  0.1
-SM_STEP = 0.001   # 200 bins across the range
+SM_MIN  = -0.1
+SM_MAX  =  0.1
+SM_STEP =  0.001   # 200 bins across the range
+
+SME_MIN  = 0.0
+SME_MAX  = 0.05
+SME_STEP = 0.0005  # 100 bins for spreaderr_model
 
 
 # ─── Data queries ────────────────────────────────────────────────────────────
@@ -78,57 +82,57 @@ def query_gaia_matched(username):
 # ─── Plot ────────────────────────────────────────────────────────────────────
 
 def plot_spread_model_combined(df_all, df_gaia, output_dir):
-    """Combined 3x2 plot of 2D histograms: SM, SM+3×SME, SM+5/3×SME vs magnitude."""
-    ybins = np.arange(SM_MIN, SM_MAX + SM_STEP, SM_STEP)
+    """Combined 3x2 plot of 2D histograms: SM, spreaderr_model, SM+5/3×SME vs magnitude."""
+    sm_ybins  = np.arange(SM_MIN,  SM_MAX  + SM_STEP,  SM_STEP)
+    sme_ybins = np.arange(SME_MIN, SME_MAX + SME_STEP, SME_STEP)
 
-    # Precompute derived y-values (drop rows where spread_model_err is null)
     df_all_e  = df_all.dropna(subset=['spread_model', 'spread_model_err'])
     df_gaia_e = df_gaia.dropna(subset=['spread_model', 'spread_model_err'])
 
+    xbins = np.arange(10, 28.05, 0.05)
+
     rows = [
-        # (df_vis,   y_vis,                         df_g,      y_g,                            ylabel,                                threshold)
-        (df_all,    df_all['spread_model'].values,
-         df_gaia,   df_gaia['spread_model'].values,
-         'spread_model',                             0.0),
-        (df_all_e,  df_all_e['spread_model'].values  + 3   * df_all_e['spread_model_err'].values,
-         df_gaia_e, df_gaia_e['spread_model'].values + 3   * df_gaia_e['spread_model_err'].values,
-         'spread_model + 3 * spreaderr_model',       0.003),
-        (df_all_e,  df_all_e['spread_model'].values  + 5/3 * df_all_e['spread_model_err'].values,
+        # (df_vis,   y_vis,                       df_g,      y_g,                          ylabel,                               threshold, ybins)
+        (df_all,   df_all['spread_model'].values,
+         df_gaia,  df_gaia['spread_model'].values,
+         'spread_model',                           0.0,   sm_ybins),
+        (df_all_e, df_all_e['spread_model_err'].values,
+         df_gaia_e, df_gaia_e['spread_model_err'].values,
+         'spreaderr_model',                        None,  sme_ybins),
+        (df_all_e, df_all_e['spread_model'].values + 5/3 * df_all_e['spread_model_err'].values,
          df_gaia_e, df_gaia_e['spread_model'].values + 5/3 * df_gaia_e['spread_model_err'].values,
-         'spread_model + 5/3 * spreaderr_model',     0.005),
+         'spread_model + 5/3 * spreaderr_model',   0.005, sm_ybins),
     ]
 
     fig, axes = plt.subplots(3, 2, figsize=(24, 18))
 
-    for row_idx, (df_v, yvals_vis, df_g, yvals_g, ylabel, threshold) in enumerate(rows):
+    for row_idx, (df_v, yvals_vis, df_g, yvals_g, ylabel, threshold, ybins) in enumerate(rows):
         panels = [
             (df_v['vis_mag'].values, yvals_vis,
-             np.arange(14, 28.05, 0.05), (14, 28),
              'Euclid VIS (v_mag_auto)',
-             f'{ylabel} vs Euclid VIS (all ERO, n={len(df_v):,})',
-             ylabel),
+             f'{ylabel} vs Euclid VIS (all ERO, n={len(df_v):,})'),
             (df_g['gaia_g'].values, yvals_g,
-             np.arange(14, 22.05, 0.05), (14, 22),
              'Gaia G',
-             f'{ylabel} vs Gaia G (Gaia-matched, n={len(df_g):,})',
-             ylabel),
+             f'{ylabel} vs Gaia G (Gaia-matched, n={len(df_g):,})'),
         ]
-        for col_idx, (xvals, yvals, xbins, xlim, xlabel, title, yl) in enumerate(panels):
+        for col_idx, (xvals, yvals, xlabel, title) in enumerate(panels):
             ax = axes[row_idx, col_idx]
             h, xedges, yedges = np.histogram2d(xvals, yvals, bins=[xbins, ybins])
             h_masked = np.ma.masked_where(h == 0, h)
             im = ax.pcolormesh(xedges, yedges, h_masked.T,
                                cmap='GnBu', norm=LogNorm(vmin=1))
-            ax.axhline(y=threshold, color='red', ls='--', linewidth=1.5,
-                       label=f'{yl} = {threshold}')
+            if threshold is not None:
+                ax.axhline(y=threshold, color='red', ls='--', linewidth=1.5,
+                           label=f'{ylabel} = {threshold}')
             cbar = fig.colorbar(im, ax=ax, pad=0.02)
             cbar.set_label('Count', fontsize=11, fontweight='bold')
             ax.set_xlabel(xlabel, fontsize=11, fontweight='bold')
-            ax.set_ylabel(yl, fontsize=11, fontweight='bold')
+            ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
             ax.set_title(title, fontsize=12, fontweight='bold')
-            ax.set_xlim(*xlim)
-            ax.set_ylim(SM_MIN, SM_MAX)
-            ax.legend(loc='upper right', fontsize=10)
+            ax.set_xlim(10, 28)
+            ax.set_ylim(ybins[0], ybins[-1])
+            if threshold is not None:
+                ax.legend(loc='upper right', fontsize=10)
             ax.grid(alpha=0.3)
 
     plt.tight_layout()

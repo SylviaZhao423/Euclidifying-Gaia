@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'cutfaint_sensitivity'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'q1_cut_sensitivity'
 CACHE_FILE  = OUTPUT_DIR / 'q1_cutfaint_results.json'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
@@ -280,7 +280,7 @@ def plot_cut_sensitivity(all_metrics, classified_fracs, all_fracs, output_dir):
     boundary_handle = Line2D([0], [0], color='black', ls='--', linewidth=1.5, alpha=0.8,
                              label=f'G = {REF_CUT} boundary')
     ax_top.legend(handles=metric_handles + [boundary_handle],
-                  fontsize=10, loc='upper left', ncol=1)
+                  fontsize=10, loc='lower left', ncol=1)
     ax_top.set_ylabel('Metric value', fontsize=12, fontweight='bold')
     ax_top.set_ylim(-0.05, 1.05)
 
@@ -354,9 +354,10 @@ def plot_feature_importance(all_importances, output_dir):
     feats = [SELECTED_GAIA_PARAMETERS[i] for i in order]
     mu_s  = mu[order];  std_s = std[order];  cv_s = cv[order]
 
-    n_feat  = len(feats)
-    cv_norm = cv_s / (cv_s.max() + 1e-9)
-    colors  = plt.cm.RdYlGn_r(cv_norm)
+    n_feat = len(feats)
+    cv_abs_max = 2.0
+    norm = plt.Normalize(vmin=0, vmax=cv_abs_max)
+    colors = plt.cm.RdYlGn_r(norm(cv_s))
 
     fig, ax = plt.subplots(figsize=(11, max(8, n_feat * 0.38)))
     ax.barh(range(n_feat), mu_s, xerr=std_s, color=colors, alpha=0.85, capsize=4,
@@ -364,7 +365,9 @@ def plot_feature_importance(all_importances, output_dir):
     ax.set_yticks(range(n_feat))
     ax.set_yticklabels([f'#{i+1}  {f}' for i, f in enumerate(feats)], fontsize=9)
     ax.invert_yaxis()
-    ax.set_xlabel('Feature importance  (mean \u00b1 1\u03c3 across all faint-end cuts \u00d7 seeds)',
+    ax.set_xlim(0, 0.5)
+    ax.set_xticks(np.arange(0, 0.51, 0.1))
+    ax.set_xlabel('Feature importance  (mean \u00b1 1\u03c3 across all cuts \u00d7 seeds)',
                   fontsize=11, fontweight='bold', labelpad=10)
     ax.grid(alpha=0.3, axis='x')
 
@@ -372,12 +375,15 @@ def plot_feature_importance(all_importances, output_dir):
         ax.text(m_v + s_v + 0.0005, i, f'CV={c_v:.2f}',
                 va='center', fontsize=7.5, color='#333333')
 
-    sm = plt.cm.ScalarMappable(cmap='RdYlGn_r',
-                                norm=plt.Normalize(vmin=0, vmax=cv_s.max()))
+    sm = plt.cm.ScalarMappable(cmap='RdYlGn_r', norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, fraction=0.02, pad=0.01)
     cbar.set_label('CV = std / mean', fontsize=9)
-    cbar.set_ticks(np.arange(0, cv_s.max(), 0.2))
+    cbar.set_ticks(np.arange(0, cv_abs_max + 0.1, 0.2))
+    cbar.ax.text(0.4, 1.04, 'unstable', transform=cbar.ax.transAxes,
+                 fontsize=8, va='bottom', ha='left', color='darkred')
+    cbar.ax.text(0.4, -0.05, 'stable', transform=cbar.ax.transAxes,
+                 fontsize=8, va='top', ha='left', color='darkgreen')
 
     plt.suptitle(
         f'Q1 faint-end model — feature importance  '

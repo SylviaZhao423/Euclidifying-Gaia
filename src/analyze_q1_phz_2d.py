@@ -81,7 +81,7 @@ def query_gaia_matched(username):
 
 def plot_phz_prob_combined(df_all, df_gaia, output_dir):
     """Combined 2x2 plot of phz_star_prob and phz_gal_prob vs magnitude 2D histograms."""
-    ybins = np.arange(0, 1.01, 0.01)
+    ybins = np.arange(0, 1.01, 0.004)
 
     rows = [
         ('star_prob', 'phz_star_prob', 'prob=0.5', 0.5),
@@ -89,8 +89,8 @@ def plot_phz_prob_combined(df_all, df_gaia, output_dir):
     ]
 
     cols = [
-        (df_all,  'ie_mag', np.arange(14, 28.05, 0.05), (14, 28), 'I_E',    f'all, n={len(df_all):,}'),
-        (df_gaia, 'gaia_g', np.arange(14, 22.05, 0.05), (14, 22), 'Gaia G', f'Gaia-matched, n={len(df_gaia):,}'),
+        (df_all,  'ie_mag', np.arange(10, 28.05, 0.05), (10, 28), 'I_E',    f'all, n={len(df_all):,}'),
+        (df_gaia, 'gaia_g', np.arange(10, 28.05, 0.05), (10, 28), 'Gaia G', f'Gaia-matched, n={len(df_gaia):,}'),
     ]
 
     fig, axes = plt.subplots(2, 2, figsize=(24, 12))

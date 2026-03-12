@@ -27,47 +27,40 @@ WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
 
 ERO_FIELDS = {
-    'Horsehead':   (85.150,  -2.613,  0.58),
-    'Messier 78':  (86.690,  -0.015,  0.60),
-    'Taurus':      (64.983,  28.023,  0.61),
-    'Barnard 30':  (82.880,  12.316,  0.60),
-    'NGC 6254':    (254.303,  -4.100, 0.60),
-    'NGC 6397':    (265.174, -53.658, 0.61),
-    'NGC 6822':    (296.236, -14.788, 0.60),
-    'Holmberg II': (124.790,  70.706, 0.60),
-    'IC 10':       (  5.063,  59.288, 0.62),
-    'IC 342':      ( 56.730,  68.084, 0.59),
-    'NGC 2403':    (114.211,  65.586, 0.60),
-    'NGC 6744':    (287.430, -63.842, 0.60),
-    'Fornax':      ( 54.017, -35.267, 0.57),
-    'Dorado':      ( 64.014, -55.780, 0.60),
-    'Perseus':     ( 49.638,  41.651, 0.70),
-    'Abell 2390':  (328.397,  17.709, 0.75),
-    'Abell 2764':  (  5.713, -49.249, 0.75),
+    'Horsehead':   (85.150,  -2.613),
+    'Messier 78':  (86.690,  -0.015),
+    'Taurus':      (64.983,  28.023),
+    'Barnard 30':  (82.880,  12.316),
+    'NGC 6254':    (254.303,  -4.100),
+    'NGC 6397':    (265.174, -53.658),
+    'NGC 6822':    (296.236, -14.788),
+    'Holmberg II': (124.790,  70.706),
+    'IC 10':       (  5.063,  59.288),
+    'IC 342':      ( 56.730,  68.084),
+    'NGC 2403':    (114.211,  65.586),
+    'NGC 6744':    (287.430, -63.842),
+    'Fornax':      ( 54.017, -35.267),
+    'Dorado':      ( 64.014, -55.780),
+    'Perseus':     ( 49.638,  41.651),
+    'Abell 2390':  (328.397,  17.709),
+    'Abell 2764':  (  5.713, -49.249),
 }
+
+_FIELD_NAMES = list(ERO_FIELDS.keys())
+_FIELD_RA    = np.array([v[0] for v in ERO_FIELDS.values()])
+_FIELD_DEC   = np.array([v[1] for v in ERO_FIELDS.values()])
 
 
 def assign_fields(df):
-    """Assign each source to its nearest ERO field (within field radius)."""
-    ra  = df['ra'].values
-    dec = df['dec'].values
-    n_sources = len(df)
-
-    field_assignments = np.full(n_sources, None, dtype=object)
-    min_distances     = np.full(n_sources, np.inf)
-
-    for field_name, (field_ra, field_dec, area) in ERO_FIELDS.items():
-        radius = np.sqrt(area / np.pi)
-        ra1  = np.radians(ra);       dec1 = np.radians(dec)
-        ra2  = np.radians(field_ra); dec2 = np.radians(field_dec)
-        a    = (np.sin((dec2 - dec1) / 2)**2
-                + np.cos(dec1) * np.cos(dec2) * np.sin((ra2 - ra1) / 2)**2)
-        dist = np.degrees(2 * np.arcsin(np.sqrt(a)))
-        mask = (dist < radius) & (dist < min_distances)
-        field_assignments[mask] = field_name
-        min_distances[mask]     = dist[mask]
-
-    df['field'] = field_assignments
+    """Assign each source to its nearest ERO field centre."""
+    ra  = np.radians(df['ra'].values)
+    dec = np.radians(df['dec'].values)
+    fra = np.radians(_FIELD_RA)
+    fde = np.radians(_FIELD_DEC)
+    a = (np.sin((fde - dec[:, None]) / 2) ** 2
+         + np.cos(dec[:, None]) * np.cos(fde) * np.sin((fra - ra[:, None]) / 2) ** 2)
+    nearest = np.argmin(a, axis=1)
+    df['field'] = [_FIELD_NAMES[i] for i in nearest]
     return df
 
 
@@ -119,7 +112,8 @@ def query_all_ero(username):
 
 def plot_class_star_combined(df_gaia, df_ero, output_dir):
     """Combined 1x3 plot of class_star vs magnitude 2D histograms."""
-    ybins = np.arange(0, 1.01, 0.01)
+    show_third_panel = False
+    ybins = np.arange(0, 1.01, 0.004)
 
     sub_gaia      = df_gaia[(df_gaia['field'].notna()) & df_gaia['phot_g_mean_mag'].notna() & df_gaia['class_star'].notna()]
     sub_gaia_excl = sub_gaia[~sub_gaia['v_mag_auto'].between(17.5, 18.5)]
@@ -127,17 +121,22 @@ def plot_class_star_combined(df_gaia, df_ero, output_dir):
 
     panels = [
         (sub_ero['v_mag_auto'].values,           sub_ero['class_star'].values,
-         np.arange(14, 26.05, 0.05), (14, 26),
+         np.arange(10, 28.05, 0.05), (10, 28),
          'Euclid VIS mag', 'class_star vs Euclid VIS (all ERO)'),
         (sub_gaia['phot_g_mean_mag'].values,      sub_gaia['class_star'].values,
-         np.arange(14, 22.05, 0.05), (14, 22),
+         np.arange(10, 28.05, 0.05), (10, 28),
          'Gaia G', 'class_star vs Gaia G (Gaia-matched)'),
         (sub_gaia_excl['phot_g_mean_mag'].values, sub_gaia_excl['class_star'].values,
-         np.arange(14, 22.05, 0.05), (14, 22),
+         np.arange(10, 28.05, 0.05), (10, 28),
          'Gaia G', 'class_star vs Gaia G (excl. ERO VIS 17.5–18.5)'),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(36, 6))
+    if not show_third_panel:
+        panels = panels[:2]
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(10 * len(panels), 6))
+    if len(panels) == 1:
+        axes = [axes]
     for ax, (xvals, yvals, xbins, xlim, xlabel, title) in zip(axes, panels):
         h, xe, ye = np.histogram2d(xvals, yvals, bins=[xbins, ybins])
         hm = np.ma.masked_where(h == 0, h)
