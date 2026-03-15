@@ -4,7 +4,7 @@ UMAP visualization of Gaia feature space for Q1 and ERO datasets.
 
 Outputs:
   combined_umap.png               — 3-panel individual + combined UMAP
-  combined_umap_corner_compare.png — corner-style Q1 vs ERO comparison by class
+  combined_umap_corner_compare.png — 4-panel Q1/ERO class comparison in combined UMAP space
   combined_umap_features.png      — per-feature colour maps (stars / galaxies)
 
 Usage:
@@ -218,11 +218,12 @@ def plot_umap_comparison(X_q1, y_q1, X_ero, y_ero, output_dir, sample_size=50000
 def plot_umap_features(embedding, X_raw, categories, output_dir):
     """Grid of UMAP panels coloured by individual Gaia parameter values.
     Each feature occupies two stacked panels: upper = stars, lower = galaxies.
-    Layout: 4 feature-cols × 6 feature-cols → 8 matplotlib rows × 6 cols.
+    Layout: 4 feature rows × 4 feature cols; each feature slot has stacked
+    stars/galaxies panels.
     Output: combined_umap_features.png
     """
     n_features = len(SELECTED_GAIA_PARAMETERS)
-    ncols = 6
+    ncols = 4
     nfeature_rows = int(np.ceil(n_features / ncols))
 
     # categories: 0=Q1-STAR, 1=Q1-GALAXY, 2=ERO-STAR, 3=ERO-GALAXY
@@ -314,8 +315,120 @@ def plot_umap_features(embedding, X_raw, categories, output_dir):
     print(f"  -> combined_umap_features.png saved")
 
 
+def plot_umap_features_density(embedding, X_raw, categories, output_dir, n_bins=60):
+    """Same figure geometry as plot_umap_features (identical GridSpec, figure size,
+    column widths, outer gaps) but each feature slot is a single pcolormesh panel
+    spanning the full height of what was the stars+galaxies pair.
+    Colour = mean feature value per 2D UMAP bin, all sources combined.
+    Output: combined_umap_features_density.png
+    """
+    n_features = len(SELECTED_GAIA_PARAMETERS)
+    ncols = 4
+    nfeature_rows = int(np.ceil(n_features / ncols))
+
+    x_all, y_all = embedding[:, 0], embedding[:, 1]
+    x_edges = np.linspace(np.nanpercentile(x_all, 0.5), np.nanpercentile(x_all, 99.5), n_bins + 1)
+    y_edges = np.linspace(np.nanpercentile(y_all, 0.5), np.nanpercentile(y_all, 99.5), n_bins + 1)
+
+    # Shared bin indices and total source count — determines which bins are "populated"
+    # across ALL panels (same populated area regardless of per-feature NaN rates)
+    xi_all = np.clip(np.digitize(x_all, x_edges) - 1, 0, n_bins - 1)
+    yi_all = np.clip(np.digitize(y_all, y_edges) - 1, 0, n_bins - 1)
+    H_count_all = np.zeros((n_bins, n_bins))
+    np.add.at(H_count_all, (xi_all, yi_all), 1)
+    # 1.0 for populated bins, NaN for empty — used as gray background in each panel
+    H_bg = np.where(H_count_all > 0, 1.0, np.nan)
+
+    def _mean_in_bins(feat_vals):
+        H_sum   = np.zeros((n_bins, n_bins))
+        H_count = np.zeros((n_bins, n_bins))
+        valid = np.isfinite(feat_vals)
+        np.add.at(H_sum,   (xi_all[valid], yi_all[valid]), feat_vals[valid])
+        np.add.at(H_count, (xi_all[valid], yi_all[valid]), 1)
+        return np.where(H_count > 0, H_sum / H_count, np.nan)
+
+    # ── Identical GridSpec geometry to plot_umap_features ──────────────────────
+    per_feature_width = 3.8
+    per_panel_height  = 1.2
+    panel_h   = 1.0
+    inner_gap = 0.04
+    outer_gap = 0.32
+
+    height_ratios = []
+    for i in range(nfeature_rows):
+        height_ratios.extend([panel_h, inner_gap, panel_h])
+        if i < nfeature_rows - 1:
+            height_ratios.append(outer_gap)
+
+    panel_fraction = panel_h / sum(height_ratios)
+    fig_width  = ncols * per_feature_width
+    fig_height = per_panel_height / panel_fraction
+
+    from matplotlib.gridspec import GridSpec
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    gs  = GridSpec(len(height_ratios), ncols,
+                   figure=fig, height_ratios=height_ratios,
+                   hspace=0, wspace=0.35)
+
+    # Each feature spans rows [feat_row*4 : feat_row*4+3] (top panel + inner_gap + bottom panel)
+    def _gs_span(feat_row): return slice(feat_row * 4, feat_row * 4 + 3)
+
+    n_total = len(x_all)
+
+    for fi, feat_name in enumerate(SELECTED_GAIA_PARAMETERS):
+        feat_row = fi // ncols
+        col      = fi % ncols
+        ax = fig.add_subplot(gs[_gs_span(feat_row), col])
+
+        vals = X_raw[:, fi].astype(float)
+
+        # Gray background for all populated bins (identical across all panels)
+        cmap_bg = plt.cm.Greys.copy()
+        cmap_bg.set_bad(alpha=0)   # empty bins → transparent (white ax background)
+        ax.pcolormesh(x_edges, y_edges, H_bg.T,
+                      cmap=cmap_bg, vmin=0.5, vmax=2.0,
+                      rasterized=True)
+
+        # Feature mean values on top; NaN → transparent so gray shows through
+        H  = _mean_in_bins(vals)
+        # Compute colorscale from the actual per-bin means in UMAP space,
+        # not from the raw feature distribution, so every panel uses its
+        # full dynamic range and panels look visually comparable.
+        populated_vals = H[np.isfinite(H)]
+        if len(populated_vals) > 0:
+            lo, hi = np.nanpercentile(populated_vals, 2), np.nanpercentile(populated_vals, 98)
+        else:
+            lo, hi = 0, 1
+        cmap_feat = plt.cm.Blues.copy()
+        cmap_feat.set_bad(alpha=0)
+        sc = ax.pcolormesh(x_edges, y_edges, H.T,
+                           cmap=cmap_feat, vmin=lo, vmax=hi,
+                           rasterized=True)
+        cb = fig.colorbar(sc, ax=ax, pad=0.02, fraction=0.046)
+        cb.ax.tick_params(labelsize=7)
+
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.grid(alpha=0.2)
+        ax.set_title(feat_name, fontsize=8, fontweight='bold', pad=4)
+
+    # Hide unused slots
+    for fi in range(n_features, nfeature_rows * ncols):
+        feat_row = fi // ncols
+        col      = fi % ncols
+        fig.add_subplot(gs[_gs_span(feat_row), col]).set_visible(False)
+
+    fig.suptitle(
+        f'Combined UMAP — mean feature value per 2D bin  (G ≥ {MAG_CUT},  {n_total:,} sources,  {n_features} features)',
+        fontsize=12, fontweight='bold', y=0.93
+    )
+    out = output_dir / 'combined_umap_features_density.png'
+    plt.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  -> combined_umap_features_density.png saved")
+
+
 def plot_umap_corner_compare(embedding, categories, output_dir, max_points_per_group=15000):
-    """Two-panel corner-style comparison: Q1 vs ERO for stars and galaxies."""
+    """Four-panel row: Q1 and ERO shown separately for stars and galaxies."""
     rng = np.random.RandomState(42)
 
     def _sample_mask(cat_value):
@@ -326,90 +439,32 @@ def plot_umap_corner_compare(embedding, categories, output_dir, max_points_per_g
         mask[idx] = True
         return mask
 
-    # (title, q1 category, ero category, q1 color, ero color)
     specs = [
-        ("Stars: Q1 vs ERO", 0, 2, "coral", "orange"),
-        ("Galaxies: Q1 vs ERO", 1, 3, "steelblue", "mediumturquoise"),
+        ("Q1 Stars", 0, "coral", "o"),
+        ("ERO Stars", 2, "orange", "s"),
+        ("Q1 Galaxies", 1, "steelblue", "o"),
+        ("ERO Galaxies", 3, "mediumturquoise", "s"),
     ]
 
-    # 3-column outer grid: [stars block | spacer | galaxies block]
-    # The invisible spacer column sets wspace between blocks independently
-    # of the inner panel spacing which constrained_layout handles automatically.
-    block_gap = 0.05   # ← fraction of total width; increase to widen the gap
-    fig = plt.figure(figsize=(17, 7.5), constrained_layout=True)
-    gs_outer = fig.add_gridspec(1, 3, width_ratios=[1, block_gap, 1])
-    fig.add_subplot(gs_outer[1]).set_visible(False)   # invisible spacer column
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6), constrained_layout=True)
 
-    outer_cols = [0, 2]   # stars → col 0, galaxies → col 2
-
-    for pi, (title, q1_cat, ero_cat, q1_color, ero_color) in enumerate(specs):
-        m_q1 = _sample_mask(q1_cat)
-        m_ero = _sample_mask(ero_cat)
-        x_q1, y_q1 = embedding[m_q1, 0], embedding[m_q1, 1]
-        x_ero, y_ero = embedding[m_ero, 0], embedding[m_ero, 1]
-
-        x_all = np.concatenate([x_q1, x_ero])
-        y_all = np.concatenate([y_q1, y_ero])
-        xbins = np.linspace(np.nanpercentile(x_all, 0.5), np.nanpercentile(x_all, 99.5), 70)
-        ybins = np.linspace(np.nanpercentile(y_all, 0.5), np.nanpercentile(y_all, 99.5), 70)
-
-        gs = gs_outer[outer_cols[pi]].subgridspec(2, 2)
-        ax_tl = fig.add_subplot(gs[0, 0])
-        ax_tr = fig.add_subplot(gs[0, 1])
-        ax_bl = fig.add_subplot(gs[1, 0])
-        ax_br = fig.add_subplot(gs[1, 1])
-
-        # Diagonal marginals
-        ax_tl.hist(x_q1, bins=xbins, histtype='stepfilled', color=q1_color, alpha=0.35, edgecolor=q1_color)
-        ax_tl.hist(x_ero, bins=xbins, histtype='stepfilled', color=ero_color, alpha=0.35, edgecolor=ero_color)
-        ax_br.hist(
-            y_q1, bins=ybins, histtype='stepfilled', color=q1_color,
-            alpha=0.35, edgecolor=q1_color, orientation='horizontal'
+    for ax, (title, cat_value, color, marker) in zip(axes, specs):
+        mask = _sample_mask(cat_value)
+        ax.scatter(
+            embedding[mask, 0], embedding[mask, 1],
+            c=color, s=6, alpha=0.20, linewidths=0, marker=marker,
+            label=f'n={mask.sum():,}'
         )
-        ax_br.hist(
-            y_ero, bins=ybins, histtype='stepfilled', color=ero_color,
-            alpha=0.35, edgecolor=ero_color, orientation='horizontal'
-        )
-
-        # Lower-left: Q1 only, Upper-right: ERO only (corner-style split)
-        ax_bl.scatter(x_q1, y_q1, c=q1_color, s=6, alpha=0.20, linewidths=0)
-        ax_tr.scatter(x_ero, y_ero, c=ero_color, s=6, alpha=0.20, linewidths=0, marker='s')
-
-        # Styling
-        for ax in [ax_tl, ax_tr, ax_bl, ax_br]:
-            ax.grid(alpha=0.2)
-        ax_tl.set_title(title, fontsize=11, fontweight='bold')
-        ax_tl.set_xlabel('UMAP 1', fontsize=9)
-        ax_tl.set_ylabel('Count',  fontsize=9)
-        ax_tr.set_xlabel('UMAP 1', fontsize=9)
-        ax_tr.set_ylabel('UMAP 2', fontsize=9)
-        ax_bl.set_xlabel('UMAP 1', fontsize=9)
-        ax_bl.set_ylabel('UMAP 2', fontsize=9)
-        ax_br.set_xlabel('Count',  fontsize=9)
-        ax_br.set_ylabel('UMAP 2', fontsize=9)
-
-        # Keep ticks compact.
-        ax_tl.tick_params(labelsize=8)
-        ax_tr.tick_params(labelsize=8)
-        ax_bl.tick_params(labelsize=8)
-        ax_br.tick_params(labelsize=8)
-
-        # Dataset labels inside scatter panels.
-        _label_kw = dict(transform=ax_bl.transAxes, fontsize=10, fontweight='bold',
-                         bbox=dict(facecolor='white', alpha=0.65, edgecolor='none', pad=2))
-        ax_bl.text(0.04, 0.96, 'Q1',  ha='left', va='top',  color=q1_color,  **_label_kw)
-        ax_tr.text(0.04, 0.96, 'ERO', ha='left', va='top',  color=ero_color,
-                   transform=ax_tr.transAxes, fontsize=10, fontweight='bold',
-                   bbox=dict(facecolor='white', alpha=0.65, edgecolor='none', pad=2))
-
-        # Legend on every panel's histogram (top-left).
-        ax_tl.plot([], [], color=q1_color, lw=6, alpha=0.35, label=f'Q1 (n={m_q1.sum():,})')
-        ax_tl.plot([], [], color=ero_color, lw=6, alpha=0.35, label=f'ERO (n={m_ero.sum():,})')
-        ax_tl.legend(fontsize=8, loc='upper right')
+        ax.set_title(title, fontsize=11, fontweight='bold')
+        ax.set_xlabel('UMAP 1', fontsize=10)
+        ax.set_ylabel('UMAP 2', fontsize=10)
+        ax.tick_params(labelsize=8)
+        ax.grid(alpha=0.2)
+        ax.legend(fontsize=8, loc='upper right')
 
     fig.suptitle(
         f'Extracted views from the combined UMAP map: class-wise comparison (G >= {MAG_CUT},  {len(SELECTED_GAIA_PARAMETERS)} features)',
-        fontsize=13, fontweight='bold', y=1.05
+        fontsize=13, fontweight='bold'
     )
     out = output_dir / 'combined_umap_corner_compare.png'
     fig.savefig(out, dpi=150, bbox_inches='tight')
@@ -450,13 +505,16 @@ def main():
     embedding_comb, X_raw_comb, categories = plot_umap_comparison(
         X_q1, y_q1, X_ero, y_ero, OUTPUT_DIR)
 
-    print("\n[Step 3] Generating corner-style class comparison plot...")
+    print("\n[Step 3] Generating 4-panel class comparison plot...")
     plot_umap_corner_compare(embedding_comb, categories, OUTPUT_DIR)
 
-    print("\n[Step 4] Generating UMAP coloured by Gaia features...")
+    print("\n[Step 4] Generating UMAP coloured by Gaia features (scatter)...")
     plot_umap_features(embedding_comb, X_raw_comb, categories, OUTPUT_DIR)
 
-    print("\n  -> combined_umap.png + combined_umap_corner_compare.png + combined_umap_features.png saved")
+    print("\n[Step 5] Generating UMAP feature density (2D histogram)...")
+    plot_umap_features_density(embedding_comb, X_raw_comb, categories, OUTPUT_DIR)
+
+    print("\n  -> combined_umap.png + combined_umap_corner_compare.png + combined_umap_features.png + combined_umap_features_density.png saved")
     print("=" * 60)
     print("UMAP visualization complete!")
     print("=" * 60)

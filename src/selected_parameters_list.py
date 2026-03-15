@@ -10,22 +10,22 @@ GAIA_ORIGINAL_COLUMNS = [
     # 'dec_error',
     'parallax_over_error',
     ### Astrometric quality ===================================================
-    'astrometric_n_obs_al',
+    # 'astrometric_n_obs_al',
     # 'astrometric_n_obs_ac',
-    'astrometric_n_good_obs_al',
-    'astrometric_n_bad_obs_al',
+    # 'astrometric_n_good_obs_al',   # combined into astrometric_n_bad_good_obs_al ratio
+    # 'astrometric_n_bad_obs_al',    # combined into astrometric_n_bad_good_obs_al ratio
     'astrometric_gof_al',
     'astrometric_chi2_al',
     # 'astrometric_excess_noise',
     'astrometric_excess_noise_sig',
     # 'astrometric_params_solved',
-    'astrometric_matched_transits',
+    # 'astrometric_matched_transits',  # combined into astrometric_matched_transits_ratio
     # 'visibility_periods_used',
     # 'astrometric_sigma5d_max',
-    'matched_transits',
+    # 'matched_transits',              # combined into astrometric_matched_transits_ratio
     ### Image parameters =======================================================
     'ipd_gof_harmonic_amplitude',
-    'ipd_gof_harmonic_phase',
+    # 'ipd_gof_harmonic_phase',
     # 'ipd_frac_multi_peak',
     # 'ipd_frac_odd_win',
     'ruwe',
@@ -35,7 +35,7 @@ GAIA_ORIGINAL_COLUMNS = [
     # 'phot_g_mean_flux',
     # 'phot_g_mean_flux_error',
     'phot_g_mean_flux_over_error',
-    'phot_g_mean_mag',
+    # 'phot_g_mean_mag',
     ### BP-band photometry =====================================================
     # 'phot_bp_n_obs',
     # phot_bp_mean_flux — redundant with phot_g_mean_flux + bp_g color
@@ -64,9 +64,11 @@ GAIA_ORIGINAL_COLUMNS = [
 # Derived columns (pre-computed in WSDB via add_derived_columns.py)
 # =============================================================================
 DERIVED_COLUMNS = [
-    'corrected_bp_rp_excess',  # C* from Riello et al. 2021, Table 2
-    'pm_significance',         # sqrt(chi2) with pmra_pmdec_corr
-    'position_error',     # sqrt(det(C)) with ra_dec_corr
+    'corrected_bp_rp_excess',            # C* from Riello et al. 2021, Table 2
+    'pm_significance',                   # sqrt(chi2) with pmra_pmdec_corr
+    'position_error',                    # sqrt(det(C)) with ra_dec_corr
+    'astrometric_n_bad_good_obs_al',     # n_bad_obs_al / n_good_obs_al ratio
+    'astrometric_matched_transits_ratio', # astrometric_matched_transits / matched_transits ratio
 ]
 
 # =============================================================================

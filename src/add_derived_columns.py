@@ -64,6 +64,20 @@ DERIVED_COLUMNS = [
         'dependencies': ['g_ra_error', 'g_dec_error', 'g_ra_dec_corr'],
         'description': 'Positional uncertainty from error ellipse area: sqrt(det(C)) with ra_dec_corr',
     },
+    {
+        'name': 'g_astrometric_n_bad_good_obs_al',
+        'type': 'real',
+        'expression': 'g_astrometric_n_bad_obs_al::float / NULLIF(g_astrometric_n_good_obs_al, 0)',
+        'dependencies': ['g_astrometric_n_bad_obs_al', 'g_astrometric_n_good_obs_al'],
+        'description': 'Ratio of bad to good astrometric along-scan observations (n_bad / n_good)',
+    },
+    {
+        'name': 'g_astrometric_matched_transits_ratio',
+        'type': 'real',
+        'expression': 'g_astrometric_matched_transits::float / NULLIF(g_matched_transits, 0)',
+        'dependencies': ['g_astrometric_matched_transits', 'g_matched_transits'],
+        'description': 'Ratio of astrometric matched transits to total matched transits',
+    },
 ]
 
 
@@ -128,8 +142,9 @@ def process_table(conn, table):
             add_column(cursor, table, col_name, col_type)
             conn.commit()
             print(f"    ✓ Column added")
-        else:
-            print(f"    ✓ Column already exists — will recalculate")
+        elif column_is_populated(cursor, table, col_name):
+            print(f"    ✓ Already populated — skipping")
+            continue
 
         # Populate the column
         print(f"    → Computing values...")

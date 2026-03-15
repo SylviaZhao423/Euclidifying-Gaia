@@ -17,8 +17,8 @@ from matplotlib.colors import LogNorm
 from matplotlib.patches import Circle
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output'
+PROJECT_DIR = Path(__file__).parent.parent.parent
+OUTPUT_DIR  = PROJECT_DIR / 'docs' / 'slides' / 'figs'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
@@ -56,7 +56,7 @@ def main():
     print("Querying ERO-Gaia clump (0.1-0.15\") proper motions...")
     pmra, pmdec = query_clump_pm(username)
 
-    fig, ax = plt.subplots(figsize=(7, 7))
+    fig, ax = plt.subplots(figsize=(6, 7))
 
     h = ax.hist2d(pmra, pmdec, bins=60, cmap='Blues', norm=LogNorm(), cmin=1)
     ax.axhline(y=0, color='red', linestyle='--', linewidth=1.5, alpha=0.5)

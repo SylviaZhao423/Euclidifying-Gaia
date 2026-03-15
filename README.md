@@ -197,7 +197,7 @@ pip install -r requirements.txt
 - 🔄 Feature importance analysis for optimal Gaia parameter selection
 - 🔄 XGBoost classifier training using validated Euclid labels
 - 🔄 Morphological sub-classification using UMAP/clustering
-- ⏳ Physical characterization from Euclid imaging
+- 🔄 Physical characterization from Euclid imaging
 
 ### Easter Term 2026
 - ⏳ Full Gaia DR3 catalogue application

@@ -20,7 +20,7 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR = PROJECT_DIR / 'output' / 'ero_completeness'
+OUTPUT_DIR = PROJECT_DIR / 'output' / 'ero_completeness' / 'fields'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB = 'wsdb'
@@ -60,6 +60,9 @@ CATEGORY_COLORS = {
     'Galaxy Groups': '#9467bd',
     'Galaxy Clusters': '#ff7f0e',
 }
+
+PER_FIELD_N_COLS = 5
+PER_FIELD_N_ROWS = 4
 
 
 def get_field_color(field_name):
@@ -213,12 +216,12 @@ def plot_per_field_class_star_maps(df, output_dir):
     df_field = df[df['field'].notna() & df['class_star'].notna()].copy()
 
     n_fields = len(ERO_FIELDS)
-    n_cols = 3
-    n_rows = (n_fields + n_cols - 1) // n_cols
+    n_cols = PER_FIELD_N_COLS
+    n_rows = PER_FIELD_N_ROWS
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 4 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(30, 16))
     axes = axes.flatten()
-    cmap = plt.cm.RdYlBu
+    cmap = plt.cm.RdYlBu_r
     norm = Normalize(vmin=0, vmax=1)
 
     for idx, field_name in enumerate(ERO_FIELDS.keys()):
@@ -232,6 +235,7 @@ def plot_per_field_class_star_maps(df, output_dir):
             ax.set_title(f'{field_name}', fontsize=10)
             continue
 
+        # Draw stars first and galaxies last so blue galaxy points stay visible on top.
         fd = fd.sort_values('class_star', ascending=False)
         ax.scatter(fd['ra'], fd['dec'], c=fd['class_star'], cmap=cmap,
                    norm=norm, s=0.3, alpha=0.5, rasterized=True)
@@ -277,12 +281,12 @@ def plot_per_field_all_ero(df_ero_all, output_dir):
     df_field = df_ero_all[df_ero_all['field'].notna() & df_ero_all['class_star'].notna()].copy()
 
     n_fields = len(ERO_FIELDS)
-    n_cols = 3
-    n_rows = (n_fields + n_cols - 1) // n_cols
+    n_cols = PER_FIELD_N_COLS
+    n_rows = PER_FIELD_N_ROWS
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 4 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(30, 16))
     axes = axes.flatten()
-    cmap = plt.cm.RdYlBu
+    cmap = plt.cm.RdYlBu_r
     norm = Normalize(vmin=0, vmax=1)
 
     for idx, field_name in enumerate(ERO_FIELDS.keys()):
@@ -296,6 +300,7 @@ def plot_per_field_all_ero(df_ero_all, output_dir):
             ax.set_title(f'{field_name}', fontsize=10)
             continue
 
+        # Draw stars first and galaxies last so blue galaxy points stay visible on top.
         fd = fd.sort_values('class_star', ascending=False)
         n_gal = (fd['label'] == 'GALAXY').sum()
         n_star = (fd['label'] == 'STAR').sum()
@@ -390,12 +395,12 @@ def plot_class_star_with_sf_background(df, sf, output_dir):
     df_field = df[df['field'].notna() & df['class_star'].notna()].copy()
 
     n_fields = len(ERO_FIELDS)
-    n_cols = 3
-    n_rows = (n_fields + n_cols - 1) // n_cols
+    n_cols = PER_FIELD_N_COLS
+    n_rows = PER_FIELD_N_ROWS
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 4.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(30, 16))
     axes = axes.flatten()
-    cmap_src = plt.cm.RdYlBu
+    cmap_src = plt.cm.RdYlBu_r
     norm_src = Normalize(vmin=0, vmax=1)
     cmap_bg = LinearSegmentedColormap.from_list(
         'gray_light', [(0.65, 0.65, 0.65), (1.0, 1.0, 1.0)])
@@ -493,12 +498,12 @@ def plot_class_star_with_sg_background(df, sf, output_dir, g_eval=18.0):
     df_field = df[df['field'].notna() & df['class_star'].notna()].copy()
 
     n_fields = len(ERO_FIELDS)
-    n_cols = 3
-    n_rows = (n_fields + n_cols - 1) // n_cols
+    n_cols = PER_FIELD_N_COLS
+    n_rows = PER_FIELD_N_ROWS
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 4.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(30, 16))
     axes = axes.flatten()
-    cmap_src = plt.cm.RdYlBu
+    cmap_src = plt.cm.RdYlBu_r
     norm_src = Normalize(vmin=0, vmax=1)
     cmap_bg = LinearSegmentedColormap.from_list(
         'completeness', [(0.8, 0.2, 0.2), (1.0, 0.7, 0.3), (1.0, 1.0, 1.0)])

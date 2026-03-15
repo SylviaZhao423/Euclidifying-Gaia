@@ -15,8 +15,8 @@ import os
 from pathlib import Path
 from scipy.stats import rayleigh
 
-PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output'
+PROJECT_DIR = Path(__file__).parent.parent.parent
+OUTPUT_DIR  = PROJECT_DIR / 'docs' / 'slides' / 'figs'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
@@ -64,7 +64,7 @@ def main():
     x_limit = np.percentile(angular_seps, 99.5)
     x_fit   = np.linspace(0, x_limit, 500)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(12, 5))
 
     ax.hist(angular_seps[angular_seps <= x_limit], bins=100, density=True,
             color='steelblue', alpha=0.6, edgecolor='none',

@@ -74,10 +74,18 @@ FIELD_TO_TARGET = {
 }
 
 
+VIS_PIXEL_SCALE = 0.1   # arcsec / pixel (Euclid VIS)
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Euclid ERO VIS cutout downloader.")
-    p.add_argument("--size-arcsec", type=float, default=25.0,
-                   help="Cutout half-size in arcsec (default: 25).")
+    p.add_argument("--size-arcsec", type=float, default=None,
+                   help="Fixed cutout size in arcsec. Overrides dynamic sizing.")
+    p.add_argument("--size-min", type=float, default=5.0,
+                   help="Minimum cutout size in arcsec for dynamic mode (default: 5).")
+    p.add_argument("--size-max", type=float, default=25.0,
+                   help="Maximum cutout size in arcsec for dynamic mode (default: 25).")
+    p.add_argument("--size-scale", type=float, default=8.0,
+                   help="Multiplier on flux_radius (pixels→arcsec) for dynamic sizing (default: 8).")
     p.add_argument("--limit", type=int, default=None,
                    help="Max sources per CSV (default: all).")
     p.add_argument("--overwrite", action="store_true",
@@ -87,6 +95,31 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dpi", type=int, default=75,
                    help="PNG output resolution in DPI (default: 75). Lower = faster.")
     return p.parse_args()
+
+
+def dynamic_cutout_size(row: pd.Series, args: argparse.Namespace) -> float:
+    """Return cutout size in arcsec for this source.
+
+    If --size-arcsec is given, always use that fixed value.
+    Otherwise use flux_radius (SExtractor half-light radius, pixels) scaled by
+    --size-scale × VIS pixel scale, clamped to [--size-min, --size-max].
+    Falls back to --size-max if the column is missing or non-finite.
+    """
+    if args.size_arcsec is not None:
+        return args.size_arcsec
+    radius_px = None
+    for col in ("flux_radius", "v_flux_radius", "e_v_flux_radius"):
+        if col in row.index and pd.notna(row[col]):
+            try:
+                radius_px = float(row[col])
+                break
+            except (ValueError, TypeError):
+                pass
+    if radius_px is not None and np.isfinite(radius_px) and radius_px > 0:
+        size = radius_px * VIS_PIXEL_SCALE * args.size_scale
+    else:
+        size = args.size_max   # fallback
+    return float(np.clip(size, args.size_min, args.size_max))
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -353,13 +386,15 @@ def process_group(name: str, csv_path: Path, args: argparse.Namespace) -> None:
             status, message = "error", "FITS file missing from cache"
         elif args.overwrite or not png_path.exists():
             try:
+                size_arcsec = dynamic_cutout_size(row, args)
                 title = (f"{field}  VIS  "
                          f"RA={float(row['ra']):.4f}  Dec={float(row['dec']):+.4f}\n"
                          f"cs={row['class_star']:.3f}  "
                          f"P(gal|Q1)={row['xgb_q1_prob']:.3f}  "
-                         f"G={row['phot_g_mean_mag']:.2f}")
+                         f"G={row['phot_g_mean_mag']:.2f}  "
+                         f"[{size_arcsec:.1f}\"]")
                 make_cutout_png(fits_path, float(row["ra"]), float(row["dec"]),
-                                args.size_arcsec, png_path, title, dpi=args.dpi)
+                                size_arcsec, png_path, title, dpi=args.dpi)
             except Exception as exc:
                 status, message = "error", str(exc)
 
@@ -387,7 +422,11 @@ def main() -> int:
     print("=" * 70)
     print("Euclid ERO VIS cutout downloader")
     print("=" * 70)
-    print(f"  Cutout size : {args.size_arcsec}\"")
+    if args.size_arcsec is not None:
+        print(f"  Cutout size : {args.size_arcsec}\" (fixed)")
+    else:
+        print(f"  Cutout size : dynamic  [{args.size_min}\"–{args.size_max}\"]  "
+              f"scale={args.size_scale}× flux_radius")
     print(f"  Delete FITS : {args.delete_fits}")
 
     for name, csv_path in CSV_GROUPS.items():

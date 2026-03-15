@@ -95,9 +95,10 @@ def query_ero(username):
         SELECT
             {gaia_cols},
             e_v_class_star,
-            e_v_alpha_j2000 AS ra,
-            e_v_delta_j2000 AS dec,
-            e_v_mag_auto    AS v_mag_auto,
+            e_v_alpha_j2000  AS ra,
+            e_v_delta_j2000  AS dec,
+            e_v_mag_auto     AS v_mag_auto,
+            g_phot_g_mean_mag AS phot_g_mean_mag,
             g_corrected_bp_rp_excess AS c_star
         FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
         WHERE e_v_class_star IS NOT NULL

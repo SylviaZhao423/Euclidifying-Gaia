@@ -79,12 +79,25 @@ def build_scanning_law_map(nside=64):
 
 def plot_scanning_law_with_fields(scan_map, nside, output_path):
     """Plot Mollweide scanning law map with Q1 and ERO fields overlaid."""
-    fig = plt.figure(figsize=(16, 10))
+    fig = plt.figure()
 
     # coord='CG': data in Celestial, display in Galactic (matches gaiaunlimited docs)
     hp.mollview(scan_map, coord='CG', title='',
                 unit='Number of Gaia FoV transits', norm='log',
                 cmap='viridis', hold=True, fig=fig)
+
+    # healpy resets the figure size internally — restore it
+    fig.set_size_inches(16, 6)
+
+    # Stretch the map axes to fill the wide figure
+    # fig.axes[0] = map, fig.axes[-1] = colorbar
+    map_ax = fig.axes[0]
+    map_ax.set_position([0.02, 0.12, 0.96, 0.82])  # [left, bottom, width, height]
+    map_ax.set_aspect('auto')  # release fixed aspect so the oval stretches
+
+    # Reposition colorbar to sit below the stretched map
+    cbar_ax = fig.axes[-1]
+    cbar_ax.set_position([0.25, 0.06, 0.50, 0.03])
 
     # Manual label offsets (in deg) to avoid overlapping: (d_ra, d_dec, ha)
     ERO_OFFSETS = {
@@ -166,7 +179,7 @@ def plot_scanning_law_with_fields(scan_map, nside, output_path):
     plt.title('Gaia DR3 Scanning Law with Euclid Q1 & ERO Fields',
               fontsize=14, fontweight='bold', y=1.01)
 
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=150)
     plt.close()
     print(f"  Saved: {output_path}")
 

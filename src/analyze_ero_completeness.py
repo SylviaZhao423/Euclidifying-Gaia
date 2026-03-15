@@ -70,6 +70,9 @@ CATEGORY_COLORS = {
     'Galaxy Clusters': '#ff7f0e',
 }
 
+PER_FIELD_N_COLS = 5
+PER_FIELD_N_ROWS = 4
+
 
 def get_field_color(field_name):
     for category, fields in FIELD_CATEGORIES.items():
@@ -379,15 +382,15 @@ def get_galactic_b(ra, dec):
 def plot_selection_function_per_field(df, output_dir):
     """Per-field median S(G) vs Gaia G magnitude."""
     n_fields = len(ERO_FIELDS)
-    n_cols = 3
-    n_rows = (n_fields + n_cols - 1) // n_cols
+    n_cols = PER_FIELD_N_COLS
+    n_rows = PER_FIELD_N_ROWS
     bins = np.arange(14, 22.5, 0.25)
     bc = (bins[:-1] + bins[1:]) / 2
 
     sub = df[(df['field'].notna()) & df['phot_g_mean_mag'].notna()
              & df['completeness'].notna()].copy()
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 3.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(30, 16))
     axes = axes.flatten()
 
     for idx, field_name in enumerate(ERO_FIELDS.keys()):
@@ -437,8 +440,8 @@ def plot_selection_function_per_field(df, output_dir):
 def plot_galaxy_fraction_sg_per_field(df, output_dir):
     """Per-field galaxy fraction vs Gaia G, raw and corrected by 1/S(G)."""
     n_fields = len(ERO_FIELDS)
-    n_cols = 3
-    n_rows = (n_fields + n_cols - 1) // n_cols
+    n_cols = PER_FIELD_N_COLS
+    n_rows = PER_FIELD_N_ROWS
     bins = np.arange(14, 22.5, 0.25)
     bc = (bins[:-1] + bins[1:]) / 2
     s_thresh = 0.05
@@ -446,7 +449,7 @@ def plot_galaxy_fraction_sg_per_field(df, output_dir):
     sub = df[(df['field'].notna()) & df['phot_g_mean_mag'].notna()
              & df['completeness'].notna() & df['label'].notna()].copy()
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 3.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(30, 16))
     axes = axes.flatten()
 
     for idx, field_name in enumerate(ERO_FIELDS.keys()):

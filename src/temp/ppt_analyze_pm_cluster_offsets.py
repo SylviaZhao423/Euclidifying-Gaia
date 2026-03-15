@@ -22,9 +22,8 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
 
-PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output'
-OUTPUT_DIR.mkdir(exist_ok=True)
+PROJECT_DIR = Path(__file__).parent.parent.parent
+OUTPUT_DIR  = PROJECT_DIR / 'docs' / 'slides' / 'figs'
 
 CLUMP_PMRA   =  3.2   # mas/yr
 CLUMP_PMDEC  = -17.7  # mas/yr
