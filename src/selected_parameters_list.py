@@ -67,8 +67,8 @@ DERIVED_COLUMNS = [
     'corrected_bp_rp_excess',            # C* from Riello et al. 2021, Table 2
     'pm_significance',                   # sqrt(chi2) with pmra_pmdec_corr
     'position_error',                    # sqrt(det(C)) with ra_dec_corr
-    'astrometric_n_bad_good_obs_al',     # n_bad_obs_al / n_good_obs_al ratio
-    'astrometric_matched_transits_ratio', # astrometric_matched_transits / matched_transits ratio
+    # 'astrometric_n_bad_good_obs_al',     # n_bad_obs_al / n_good_obs_al ratio
+    # 'astrometric_matched_transits_ratio', # astrometric_matched_transits / matched_transits ratio
 ]
 
 # =============================================================================

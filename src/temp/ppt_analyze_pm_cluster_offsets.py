@@ -97,7 +97,7 @@ def main():
 
     ax.set_xlabel('RA offset: ERO - Gaia (mas)', fontsize=11, fontweight='bold')
     ax.set_ylabel('Dec offset: ERO - Gaia (mas)', fontsize=11, fontweight='bold')
-    ax.set_title(f'PM(3, -18) mas/yr ⊂ Sep(0.1, 0.15)" Clump Analysis:\n{n_sources:,} Matched Pairs Astrometric Offsets', fontsize=11, fontweight='bold', y=1)
+    # ax.set_title(f'PM(3, -18) mas/yr ⊂ Sep(0.1, 0.15)" Clump Analysis:\n{n_sources:,} Matched Pairs Astrometric Offsets', fontsize=11, fontweight='bold', y=1)
     ax.set_xlim(-200, 200)
     ax.set_ylim(-200, 200)
     ax.set_aspect('equal')

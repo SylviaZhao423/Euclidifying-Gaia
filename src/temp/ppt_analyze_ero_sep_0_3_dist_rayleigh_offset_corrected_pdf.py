@@ -128,7 +128,7 @@ def main():
     ax.set_xlabel('Angular Separation (arcsec)', fontsize=11, fontweight='bold')
     ax.set_ylabel('Probability Density', fontsize=11, fontweight='bold')
     
-    ax.set_title('ERO-Gaia Angular Separation (0.3"):\nCorrected Rayleigh Distribution Fit (NGC 6397 offset)', fontsize=11, fontweight='bold')
+    # ax.set_title('ERO-Gaia Angular Separation (0.3"):\nCorrected Rayleigh Distribution Fit (NGC 6397 offset)', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9, loc='upper right')
     ax.grid(True, alpha=0.3)
 

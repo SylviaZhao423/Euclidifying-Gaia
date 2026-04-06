@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'q1_cut_sensitivity'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'q1_model_sensitivity' / 'cutbright_sensitivity'
 CACHE_FILE  = OUTPUT_DIR / 'q1_cutbright_results.json'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
@@ -53,7 +53,7 @@ VAL_FRAC  = 0.125  # fraction of training used for XGB early-stopping (≈10% of
 # 0.25-mag cut values from G=15 to G=21.75 — 28 values
 _edges   = np.arange(15.0, 22.01, 0.25)
 MAG_CUTS = [round(e, 2) for e in _edges[:-1]]
-REF_CUT  = 18.5   # reference cut used in combined training script
+REF_CUT  = 21.0   # reference — marks the conventional faint-end cut
 
 XGB_PARAMS = {
     'objective':             'binary:logistic',
@@ -83,6 +83,7 @@ def query_q1(username):
     query = f"""
         SELECT
             {gaia_cols},
+            g_phot_g_mean_mag AS phot_g_mean_mag,
             CASE
                 WHEN p_phz_classification = 1 THEN 'STAR'
                 WHEN p_phz_classification = 2 THEN 'GALAXY'
@@ -265,7 +266,7 @@ def plot_cutbright_sensitivity(all_metrics, classified_fracs, all_fracs, output_
         gridspec_kw={'height_ratios': [3, 1.2, 1.2]}, sharex=True)
 
     def _shade(ax):
-        ax.axvspan(x[0] - 0.15, REF_CUT, color='lightyellow', alpha=0.6, zorder=0)
+        ax.axvspan(REF_CUT, x[-1] + 0.15, color='lightyellow', alpha=0.6, zorder=0)
         ax.axvline(x=REF_CUT, color='black', ls='--', linewidth=1.5, alpha=0.8)
         ax.axhline(y=0.5, color='gray', ls=':', linewidth=1)
         ax.grid(alpha=0.3, axis='y')

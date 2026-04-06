@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'q1_cut_sensitivity'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'q1_model_sensitivity' / 'cutfaint_sensitivity'
 CACHE_FILE  = OUTPUT_DIR / 'q1_cutfaint_results.json'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
@@ -59,7 +59,7 @@ VAL_FRAC  = 0.125
 # 0.25-mag steps from G=15 to G=21.75 — 28 values (same as bright-end script)
 _edges   = np.arange(15.0, 22.01, 0.25)
 MAG_CUTS = [round(e, 2) for e in _edges[:-1]]
-REF_CUT  = 18.5   # reference — marks the conventional bright-end cut
+REF_CUT  = 17.0   # reference — marks the conventional bright-end cut
 
 XGB_PARAMS = {
     'objective':             'binary:logistic',
@@ -89,6 +89,7 @@ def query_q1(username):
     query = f"""
         SELECT
             {gaia_cols},
+            g_phot_g_mean_mag AS phot_g_mean_mag,
             CASE
                 WHEN p_phz_classification = 1 THEN 'STAR'
                 WHEN p_phz_classification = 2 THEN 'GALAXY'

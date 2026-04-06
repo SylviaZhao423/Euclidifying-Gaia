@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'ero_cut_sensitivity'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'ero_model_sensitivity' / 'cutfaint_sensitivity'
 CACHE_FILE  = OUTPUT_DIR / 'ero_cutfaint_results.json'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'

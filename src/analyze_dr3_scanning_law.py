@@ -16,9 +16,12 @@ from tokenize import Whitespace
 import numpy as np
 import matplotlib.pyplot as plt
 import healpy as hp
+from matplotlib.colors import LogNorm
+import pandas as pd
 
 PROJECT_DIR = Path(__file__).parent.parent
 OUTPUT_DIR = PROJECT_DIR / 'output'
+MAX_PLOT_POINTS_PER_FIELD = 20000
 
 # Euclid field centers (J2000) from Table 1
 ERO_FIELDS = {
@@ -53,6 +56,14 @@ Q1_FIELDS = {
     'LDN 1641':     (85.75, -8.367, 0.5),
 }
 
+ALL_FIELDS = {
+    **{f"Q1:{k}": v for k, v in Q1_FIELDS.items()},
+    **{f"ERO:{k}": v for k, v in ERO_FIELDS.items()},
+}
+
+WSDB_HOST = 'wsdb.ast.cam.ac.uk'
+WSDB_DB = 'wsdb'
+
 
 def build_scanning_law_map(nside=64):
     """Build full-sky scanning law map using gaiaunlimited."""
@@ -75,6 +86,30 @@ def build_scanning_law_map(nside=64):
     result = [get_totaln(ra, dec) for ra, dec in tqdm(zip(ra_deg, dec_deg), total=npix)]
 
     return np.array(result)
+
+
+def query_gaia_in_all_fields(username):
+    """Query Gaia sources directly inside each Q1 + ERO field footprint."""
+    import psycopg2
+
+    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
+    frames = []
+    print("  Querying Gaia DR3 directly in all Q1 + ERO field footprints...")
+    for field_name, (field_ra, field_dec, area) in ALL_FIELDS.items():
+        radius = np.sqrt(area / np.pi)
+        query = f"""
+            SELECT ra, dec
+            FROM gaia_dr3.gaia_source
+            WHERE q3c_radial_query(ra, dec, {field_ra}, {field_dec}, {radius})
+        """
+        print(f"    {field_name} (r={radius:.3f}°)...", end='', flush=True)
+        df_f = pd.read_sql_query(query, conn)
+        df_f['field'] = field_name
+        print(f" {len(df_f):,} Gaia sources")
+        frames.append(df_f)
+
+    conn.close()
+    return pd.concat(frames, ignore_index=True)
 
 
 def plot_scanning_law_with_fields(scan_map, nside, output_path):
@@ -184,6 +219,88 @@ def plot_scanning_law_with_fields(scan_map, nside, output_path):
     print(f"  Saved: {output_path}")
 
 
+def plot_scanning_law_field_cutouts(scan_map, nside, df_gaia, output_path):
+    """Plot local RA/Dec cutouts of scanning law using Gaia source positions."""
+    field_names = list(ALL_FIELDS.keys())
+    n_cols = 4
+    n_rows = int(np.ceil(len(field_names) / n_cols))
+    rng = np.random.RandomState(0)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4.1 * n_rows))
+    axes = np.atleast_1d(axes).ravel()
+    fig.subplots_adjust(left=0.05, right=0.90, top=0.96, bottom=0.05,
+                        wspace=0.28, hspace=0.36)
+
+    norm = LogNorm(vmin=14, vmax=165)
+    last_sc = None
+
+    for ax, field_name in zip(axes, field_names):
+        ra0, dec0, area = ALL_FIELDS[field_name]
+        radius = np.sqrt(area / np.pi)
+
+        fd = df_gaia[df_gaia['field'] == field_name]
+        if len(fd) > MAX_PLOT_POINTS_PER_FIELD:
+            fd_plot = fd.sample(MAX_PLOT_POINTS_PER_FIELD, random_state=0)
+        else:
+            fd_plot = fd
+        theta = np.radians(90.0 - fd_plot['dec'].to_numpy())
+        phi = np.radians(np.mod(fd_plot['ra'].to_numpy(), 360.0))
+        pix = hp.ang2pix(nside, theta, phi, nest=False)
+        scans = scan_map[pix]
+
+        last_sc = ax.scatter(
+            fd_plot['ra'], fd_plot['dec'],
+            c=scans,
+            cmap="viridis", norm=norm,
+            s=3 if field_name.startswith("Q1:") else 8,
+            alpha=0.85, linewidths=0, rasterized=True
+        )
+
+        title_name = field_name.replace("Q1:", "").replace("ERO:", "")
+        center_theta = np.radians(90.0 - dec0)
+        center_phi = np.radians(np.mod(ra0, 360.0))
+        center_pix = hp.ang2pix(nside, center_theta, center_phi, nest=False)
+        center_val = scan_map[center_pix]
+        ax.set_title(
+            f"{title_name}\n"
+            f"n={len(fd):,}, scans≈{center_val:.0f}",
+            fontsize=10, fontweight="bold"
+        )
+
+        ax.set_xlim(ra0 + radius * 1.15, ra0 - radius * 1.15)
+        ax.set_ylim(dec0 - radius * 1.15, dec0 + radius * 1.15)
+        ax.set_aspect("equal")
+        ax.grid(alpha=0.2)
+        ax.tick_params(labelsize=8)
+        ax.set_xlabel("RA [deg]", fontsize=9)
+        ax.set_ylabel("Dec [deg]", fontsize=9)
+
+        prefix = field_name.split(":", 1)[0]
+        spine_color = "red" if prefix == "Q1" else "white"
+        spine_width = 2.0 if prefix == "Q1" else 1.4
+        for spine in ax.spines.values():
+            spine.set_color(spine_color)
+            spine.set_linewidth(spine_width)
+
+    for ax in axes[len(field_names):]:
+        ax.axis("off")
+
+    if last_sc is not None:
+        cax = fig.add_axes([0.92, 0.17, 0.02, 0.68])
+        cbar = fig.colorbar(last_sc, cax=cax)
+        cbar.set_label("Number of Gaia FoV transits", fontsize=12)
+        cbar.set_ticks([14, 20, 40, 80, 165])
+        cbar.set_ticklabels(["14", "20", "40", "80", "165"])
+
+    fig.suptitle(
+        "Gaia scanning law in Euclid field cutouts",
+        fontsize=16, fontweight="bold", y=0.995,
+    )
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
 def print_scan_statistics(scan_map, nside):
     """Print scan count statistics at each field position."""
     print("\n" + "=" * 60)
@@ -237,10 +354,22 @@ def main():
     # Print statistics
     print_scan_statistics(scan_map, nside)
 
+    username = os.getenv('PGUSER')
+    if not username:
+        print("ERROR: PGUSER environment variable not set.")
+        print("Set it with: export PGUSER=your_username")
+        return 1
+
+    print("\nQuerying Gaia field cutout sources...")
+    df_gaia = query_gaia_in_all_fields(username)
+
     # Plot
     print("\nGenerating plot...")
     plot_scanning_law_with_fields(scan_map, nside,
                                   OUTPUT_DIR / 'scanning_law_fields.png')
+    plot_scanning_law_field_cutouts(
+        scan_map, nside, df_gaia, OUTPUT_DIR / 'scanning_law_fields_cutouts.png'
+    )
 
     print(f"\nAll results saved to: {OUTPUT_DIR}")
     print("=" * 70)

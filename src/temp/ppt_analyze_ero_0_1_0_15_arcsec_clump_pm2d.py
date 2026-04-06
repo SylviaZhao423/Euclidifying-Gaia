@@ -85,7 +85,7 @@ def main():
     ax.set_ylim(-48, 24)
     ax.set_xlabel('PMRA (mas/yr)', fontsize=11, fontweight='bold')
     ax.set_ylabel('PMDEC (mas/yr)', fontsize=11, fontweight='bold')
-    ax.set_title('ERO-Gaia 0.1-0.15" Clump: 2D Proper Motion Distribution', fontsize=12, fontweight='bold', y=1.02)
+    # ax.set_title('ERO-Gaia 0.1-0.15" Clump: 2D Proper Motion Distribution', fontsize=12, fontweight='bold', y=1.02)
 
     plt.tight_layout()
     out = OUTPUT_DIR / 'ero_0_1_0_15_arcsec_clump_pm2d.png'

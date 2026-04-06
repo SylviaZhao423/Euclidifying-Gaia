@@ -28,7 +28,7 @@ OUTPUT_DIR  = PROJECT_DIR / 'output' / 'feature_distribution'
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
-MAG_CUT   = 18.5   # same as train_xgboost_combined.py
+MAG_CUT   = 17   # same as train_xgboost_combined.py
 
 Q1_COLOR  = '#BA68C8'   # pink  — matches existing population comparison plots
 ERO_COLOR = '#66BB6A'   # green
@@ -148,20 +148,20 @@ def _plot_grid(q1_sub, ero_sub, title, output_path):
 def plot_all_sources(q1_df, ero_df, output_dir):
     _plot_grid(
         q1_df, ero_df,
-        title='Training Feature Distributions: Q1 vs ERO (All Sources, G ≥ 18.5)',
+        title=f'Training Feature Distributions: Q1 vs ERO (All Sources, G ≥ {MAG_CUT})',
         output_path=output_dir / 'ero_vs_q1_all.png',
     )
 
 
 def plot_by_class(q1_df, ero_df, output_dir):
     for class_label, fname_label, title_label in [
-        ('GALAXY', 'galaxies', 'GALAXYs only'),
-        ('STAR',   'stars',    'STARs only'),
+        ('GALAXY', 'galaxies', 'Galaxies only'),
+        ('STAR',   'stars',    'Stars only'),
     ]:
         _plot_grid(
             q1_df[q1_df['label'] == class_label],
             ero_df[ero_df['label'] == class_label],
-            title=f'Training Feature Distributions: Q1 vs ERO ({title_label}, G ≥ 18.5)',
+            title=f'Training Feature Distributions: Q1 vs ERO ({title_label}, G ≥ {MAG_CUT})',
             output_path=output_dir / f'ero_vs_q1_{fname_label}.png',
         )
 
@@ -241,7 +241,7 @@ def plot_star_vs_galaxy(q1_df, ero_df, output_dir):
         _plot_grid_sv(
             star_sub=df[df['label'] == 'STAR'],
             gal_sub =df[df['label'] == 'GALAXY'],
-            title   =f'Feature Distributions: STAR vs GALAXY — {ds_label} (G ≥ 18.5)',
+            title   =f'Feature Distributions: STAR vs GALAXY — {ds_label} (G ≥ {MAG_CUT})',
             output_path=output_dir / f'{fname}.png',
         )
 
@@ -259,7 +259,8 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
-    print(f"Training feature distributions: Q1 vs ERO  ({len(SELECTED_GAIA_PARAMETERS)} features)")
+    print(f"Training feature distributions: Q1 vs ERO  "
+          f"(G ≥ {MAG_CUT},  {len(SELECTED_GAIA_PARAMETERS)} features)")
     print("=" * 70)
 
     print("\n[1] Querying data...")

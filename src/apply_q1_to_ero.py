@@ -93,13 +93,15 @@ def query_ero(username):
     gaia_cols = ", ".join([f"g_{c} AS {c}" for c in SELECTED_GAIA_PARAMETERS])
     query = f"""
         SELECT
+            g_source_id,
             {gaia_cols},
             e_v_class_star,
             e_v_alpha_j2000  AS ra,
             e_v_delta_j2000  AS dec,
             e_v_mag_auto     AS v_mag_auto,
             g_phot_g_mean_mag AS phot_g_mean_mag,
-            g_corrected_bp_rp_excess AS c_star
+            g_corrected_bp_rp_excess AS c_star,
+            e_v_flux_radius
         FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
         WHERE e_v_class_star IS NOT NULL
         ORDER BY g_source_id
@@ -699,11 +701,15 @@ def plot_dmag_vs_gmag_xgb_label(df_ero, all_probs, output_dir):
 
 
 def export_disagreement_csvs(df_ero, all_probs, output_dir):
-    """Export disagreement CSVs used by download_ero_euclid_cutouts.py.
+    """Export disagreement and agreement CSVs used by download_ero_euclid_cutouts.py.
 
-    - ero_disagree_euclid_galaxy_q1_low_pgal.csv  : class_star<0.65 but Q1 P(gal)<0.5
-    - ero_disagree_euclid_star_q1_high_pgal.csv   : class_star>=0.65 but Q1 P(gal)>=0.5
-    - ero_disagree_classstar_vs_q1prob.csv         : combined
+    Disagreement:
+    - disagree_ero_gal_q1_star.csv  : class_star<0.65 (ERO=galaxy) but Q1 P(gal)<0.5 (Q1=star)
+    - disagree_ero_star_q1_gal.csv  : class_star>=0.65 (ERO=star) but Q1 P(gal)>=0.5 (Q1=galaxy)
+
+    Agreement:
+    - agree_both_galaxy.csv         : class_star<0.65 and Q1 P(gal)>=0.5
+    - agree_both_star.csv           : class_star>=0.65 and Q1 P(gal)<0.5
     """
     df = df_ero.copy()
     df["xgb_q1_prob"] = np.mean(all_probs, axis=0)
@@ -711,8 +717,9 @@ def export_disagreement_csvs(df_ero, all_probs, output_dir):
     df["mag_diff"] = df.get("v_mag_auto", np.nan) - df["phot_g_mean_mag"]
 
     export_cols = [
-        "ra", "dec", "field", "e_v_class_star", "xgb_q1_prob", "xgb_q1_prob_std",
+        "g_source_id", "ra", "dec", "field", "e_v_class_star", "xgb_q1_prob", "xgb_q1_prob_std",
         "phot_g_mean_mag", "v_mag_auto", "mag_diff", "c_star",
+        "bp_g", "g_rp", "e_v_flux_radius",
     ]
     # rename class_star column to match downstream expectations
     df = df.rename(columns={"e_v_class_star": "class_star"})
@@ -720,28 +727,36 @@ def export_disagreement_csvs(df_ero, all_probs, output_dir):
 
     disagree_gal  = df[(df["class_star"] <  CLASS_STAR_THRESH) & (df["xgb_q1_prob"] <  PGAL_THRESHOLD)].copy()
     disagree_star = df[(df["class_star"] >= CLASS_STAR_THRESH) & (df["xgb_q1_prob"] >= PGAL_THRESHOLD)].copy()
-    disagree_gal["disagreement_type"]  = "euclid_galaxy_q1_low_pgal"
-    disagree_star["disagreement_type"] = "euclid_star_q1_high_pgal"
+    disagree_gal["disagreement_type"]  = "ero_gal_q1_star"
+    disagree_star["disagreement_type"] = "ero_star_q1_gal"
 
-    gal_out      = output_dir / "ero_disagree_euclid_galaxy_q1_low_pgal.csv"
-    star_out     = output_dir / "ero_disagree_euclid_star_q1_high_pgal.csv"
-    combined_out = output_dir / "ero_disagree_classstar_vs_q1prob.csv"
+    agree_both_gal  = df[(df["class_star"] <  CLASS_STAR_THRESH) & (df["xgb_q1_prob"] >= PGAL_THRESHOLD)].copy()
+    agree_both_star = df[(df["class_star"] >= CLASS_STAR_THRESH) & (df["xgb_q1_prob"] <  PGAL_THRESHOLD)].copy()
+    agree_both_gal["agreement_type"]  = "both_galaxy"
+    agree_both_star["agreement_type"] = "both_star"
+
+    disagree_gal_out  = output_dir / "disagree_ero_gal_q1_star.csv"
+    disagree_star_out = output_dir / "disagree_ero_star_q1_gal.csv"
+    agree_gal_out     = output_dir / "agree_both_galaxy.csv"
+    agree_star_out    = output_dir / "agree_both_star.csv"
 
     disagree_gal[export_cols + ["disagreement_type"]].sort_values(
         ["xgb_q1_prob", "class_star", "phot_g_mean_mag"], ascending=[True, True, True]
-    ).to_csv(gal_out, index=False)
+    ).to_csv(disagree_gal_out, index=False)
     disagree_star[export_cols + ["disagreement_type"]].sort_values(
         ["xgb_q1_prob", "class_star", "phot_g_mean_mag"], ascending=[False, False, True]
-    ).to_csv(star_out, index=False)
-    pd.concat([disagree_gal, disagree_star], ignore_index=True)[
-        export_cols + ["disagreement_type"]
-    ].sort_values(["disagreement_type", "phot_g_mean_mag", "ra", "dec"]).to_csv(
-        combined_out, index=False
-    )
+    ).to_csv(disagree_star_out, index=False)
+    agree_both_gal[export_cols + ["agreement_type"]].sort_values(
+        ["xgb_q1_prob", "class_star", "phot_g_mean_mag"], ascending=[False, True, True]
+    ).to_csv(agree_gal_out, index=False)
+    agree_both_star[export_cols + ["agreement_type"]].sort_values(
+        ["xgb_q1_prob", "class_star", "phot_g_mean_mag"], ascending=[True, False, True]
+    ).to_csv(agree_star_out, index=False)
 
-    print(f"  Saved: {gal_out}  (n={len(disagree_gal):,})")
-    print(f"  Saved: {star_out}  (n={len(disagree_star):,})")
-    print(f"  Saved: {combined_out}  (n={len(disagree_gal)+len(disagree_star):,})")
+    print(f"  Saved: {disagree_gal_out}  (n={len(disagree_gal):,})")
+    print(f"  Saved: {disagree_star_out}  (n={len(disagree_star):,})")
+    print(f"  Saved: {agree_gal_out}  (n={len(agree_both_gal):,})")
+    print(f"  Saved: {agree_star_out}  (n={len(agree_both_star):,})")
 
 
 def main():

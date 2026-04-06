@@ -38,8 +38,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'xgboost_q1'
-SEED_MODELS_DIR = OUTPUT_DIR / 'seed_models'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'xgboost_q1'   # overridden in main()
+SEED_MODELS_DIR = OUTPUT_DIR / 'seed_models'           # overridden in main()
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
@@ -47,7 +47,8 @@ WSDB_DB   = 'wsdb'
 CLASS_MAPPING = {'STAR': 0, 'GALAXY': 1}
 CLASS_NAMES   = ['STAR', 'GALAXY']
 
-MAG_CUT = 17   # Gaia G bright-end cut
+MAG_CUT       = 17   # Gaia G bright-end cut
+MAG_CUT_FAINT = 99   # Gaia G faint-end cut (99 = no cut); overridden by --faint-cut
 SEEDS   = [42, 123, 456, 789, 2025, 314, 999, 1337, 7777, 31415]
 
 XGB_PARAMS = {
@@ -69,13 +70,14 @@ XGB_PARAMS = {
 # =============================================================================
 
 def query_q1(username, test_mode=False):
-    """Query Q1 PHZ sources (STAR/GALAXY) with Gaia G >= MAG_CUT."""
+    """Query Q1 PHZ sources (STAR/GALAXY) with Gaia G >= MAG_CUT and G <= MAG_CUT_FAINT."""
     import psycopg2
     conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
     gaia_cols = ', '.join([f'g_{col} AS {col}' for col in SELECTED_GAIA_PARAMETERS])
     query = f"""
         SELECT
             g_random_index AS random_index,
+            g_phot_g_mean_mag AS phot_g_mean_mag,
             {gaia_cols},
             CASE
                 WHEN p_phz_classification = 1 THEN 'STAR'
@@ -84,12 +86,13 @@ def query_q1(username, test_mode=False):
         FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
         WHERE p_phz_classification IN (1, 2)
           AND g_phot_g_mean_mag >= {MAG_CUT}
+          AND g_phot_g_mean_mag <= {MAG_CUT_FAINT}
         ORDER BY g_source_id
     """
     if test_mode:
         query += " LIMIT 10000"
 
-    print(f"  Querying Q1 dataset (G >= {MAG_CUT})...")
+    print(f"  Querying Q1 dataset ({_mag_range()})...")
     df = pd.read_sql_query(query, conn)
     conn.close()
 
@@ -97,15 +100,83 @@ def query_q1(username, test_mode=False):
     for col in SELECTED_GAIA_PARAMETERS:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    X  = df[SELECTED_GAIA_PARAMETERS].values
-    y  = df['label'].map(CLASS_MAPPING).values
+    X   = df[SELECTED_GAIA_PARAMETERS].values
+    y   = df['label'].map(CLASS_MAPPING).values
+    mag = df['phot_g_mean_mag'].values.astype(float)
 
     n_star   = (y == 0).sum()
     n_galaxy = (y == 1).sum()
     print(f"  -> {len(X):,} sources  STAR: {n_star:,} ({100*n_star/len(X):.1f}%)  "
           f"GALAXY: {n_galaxy:,} ({100*n_galaxy/len(X):.1f}%)")
 
-    return X, y
+    return X, y, mag
+
+
+def query_q1_extrap(username):
+    """Full-feature query for sources OUTSIDE the training range (G<MAG_CUT or G>MAG_CUT_FAINT).
+    Used only for per-bin extrapolation evaluation — never seen during training."""
+    import psycopg2
+    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
+    gaia_cols = ', '.join([f'g_{col} AS {col}' for col in SELECTED_GAIA_PARAMETERS])
+    conditions = []
+    if MAG_CUT > 15:
+        conditions.append(f'g_phot_g_mean_mag < {MAG_CUT}')
+    if MAG_CUT_FAINT < 90:
+        conditions.append(f'g_phot_g_mean_mag > {MAG_CUT_FAINT}')
+    if not conditions:
+        return None  # no out-of-range region
+    where_extrap = ' OR '.join(conditions)
+    query = f"""
+        SELECT
+            g_phot_g_mean_mag AS phot_g_mean_mag,
+            {gaia_cols},
+            CASE
+                WHEN p_phz_classification = 1 THEN 'STAR'
+                WHEN p_phz_classification = 2 THEN 'GALAXY'
+            END AS label
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        WHERE p_phz_classification IN (1, 2)
+          AND g_phot_g_mean_mag IS NOT NULL
+          AND g_phot_g_mean_mag >= 15
+          AND ({where_extrap})
+        ORDER BY g_source_id
+    """
+    print(f"  Querying Q1 extrapolation sources (outside {_mag_range()})...")
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    df[SELECTED_GAIA_PARAMETERS] = df[SELECTED_GAIA_PARAMETERS].replace('NOT_AVAILABLE', np.nan)
+    for col in SELECTED_GAIA_PARAMETERS:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    X_e   = df[SELECTED_GAIA_PARAMETERS].values
+    y_e   = df['label'].map(CLASS_MAPPING).values
+    mag_e = df['phot_g_mean_mag'].values.astype(float)
+    print(f"  -> {len(X_e):,} extrapolation sources")
+    return X_e, y_e, mag_e
+
+
+def query_q1_population(username):
+    """All Gaia-matched Q1 sources (G >= 15), mag + label only — for fraction panels."""
+    import psycopg2
+    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
+    query = """
+        SELECT
+            g_phot_g_mean_mag AS phot_g_mean_mag,
+            CASE
+                WHEN p_phz_classification = 1  THEN 'STAR'
+                WHEN p_phz_classification = 2  THEN 'GALAXY'
+                WHEN p_phz_classification IN (4, 8) THEN 'QSO_GC'
+                ELSE 'UNCLASSIFIED'
+            END AS label
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        WHERE g_phot_g_mean_mag IS NOT NULL
+          AND g_phot_g_mean_mag >= 15
+        ORDER BY g_source_id
+    """
+    print("  Querying Q1 population (G >= 15, all classes)...")
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    df['phot_g_mean_mag'] = pd.to_numeric(df['phot_g_mean_mag'], errors='coerce')
+    return df
 
 
 # =============================================================================
@@ -280,7 +351,7 @@ def plot_feature_importance(importances, feature_names, output_dir, metrics_summ
     cv_s = cv[order]
 
     n = len(feats)
-    fig, ax = plt.subplots(figsize=(11, max(8, n * 0.38)))
+    fig, ax = plt.subplots(figsize=(18, max(8, n * 0.38)))
 
     cv_abs_max = 0.5
     norm = plt.Normalize(vmin=0, vmax=cv_abs_max)
@@ -330,8 +401,8 @@ def plot_feature_importance(importances, feature_names, output_dir, metrics_summ
             bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='#bbbbbb', alpha=0.95),
         )
 
-    title = f'Q1 Model Feature Importance Stability  ({len(imp)} seeds, G >= {MAG_CUT})'
-    plt.suptitle(title, fontsize=13, fontweight='bold', y=0.99)
+    title = f'Q1 Model Feature Importance Stability  ({len(imp)} seeds, {_mag_range()})'
+    plt.suptitle(title, fontsize=13, fontweight='bold', y=0.96)
     plt.tight_layout()
 
     out = output_dir / 'q1_feature_importance.png'
@@ -352,6 +423,258 @@ def plot_feature_importance(importances, feature_names, output_dir, metrics_summ
 
 
 # =============================================================================
+# Per-bin performance plot
+# =============================================================================
+
+def _fmt_faint(m):
+    """Format faint-cut value: drop .0 for whole numbers, keep decimals otherwise."""
+    return f'{m:.0f}' if m == int(m) else str(m)
+
+
+def _mag_range():
+    """Human-readable magnitude range string, omitting faint bound if no-faint-cut."""
+    if MAG_CUT_FAINT >= 90:
+        return f'{MAG_CUT} \u2264 G'
+    return f'{MAG_CUT} \u2264 G \u2264 {_fmt_faint(MAG_CUT_FAINT)}'
+
+
+def _mag_range_dir():
+    """Compact version for use as a directory name (no spaces)."""
+    if MAG_CUT_FAINT >= 90:
+        return f'{MAG_CUT}\u2264G'
+    return f'{MAG_CUT}\u2264G\u2264{_fmt_faint(MAG_CUT_FAINT)}'
+
+
+_MAG_BINS = [round(e, 2) for e in np.arange(15.0, 22.01, 0.25)[:-1]]
+_BIN_HALF = 0.125
+_MIN_GAL  = 5
+
+
+def plot_perbin_performance(all_models, all_test_idx, X, y, mag, df_pop, output_dir,
+                            extrap=None):
+    """Evaluate each seed model on its own 15% test split, binned by G magnitude.
+
+    Produces a 3-panel figure matching q1_perbin_fixedtrain_performance.png:
+      top  — Galaxy Precision / F1 / Recall per bin (mean ± 1σ across seeds)
+      mid  — STAR / GALAXY fraction per bin (classified sources only, 17-21 window)
+      bot  — STAR / GALAXY / Unclassified fraction per bin (full population G >= 15)
+    """
+    from matplotlib.lines import Line2D
+
+    n_seeds = len(all_models)
+    x       = np.array(_MAG_BINS)
+
+    # --- collect per-seed, per-bin metrics ---
+    # Within training window: use per-seed 15% held-out test set
+    # Outside training window: use extrapolation dataset (never seen during training)
+    X_e, y_e, mag_e = extrap if extrap is not None else (
+        np.empty((0, X.shape[1])), np.empty(0, dtype=int), np.empty(0))
+    all_prec, all_rec, all_f1, all_auc = [], [], [], []
+    all_pred_gf, all_pred_sf = [], []          # model-predicted fractions per bin
+    for model, idx_test in zip(all_models, all_test_idx):
+        X_t   = X[idx_test]
+        y_t   = y[idx_test]
+        mag_t = mag[idx_test]
+        prec_row, rec_row, f1_row, auc_row = [], [], [], []
+        pred_gf_row, pred_sf_row = [], []
+        for centre in _MAG_BINS:
+            lo, hi = centre - _BIN_HALF, centre + _BIN_HALF
+            in_range = (centre >= MAG_CUT) and (centre < MAG_CUT_FAINT)
+            if in_range:
+                mask = (mag_t >= lo) & (mag_t < hi)
+                X_eval, y_eval = X_t[mask], y_t[mask]
+            else:
+                mask = (mag_e >= lo) & (mag_e < hi)
+                X_eval, y_eval = X_e[mask], y_e[mask]
+            n_gal  = int((y_eval == 1).sum())
+            n_star = int((y_eval == 0).sum())
+            if len(y_eval) < 10 or n_gal < _MIN_GAL or n_star < _MIN_GAL:
+                prec_row.append(np.nan); rec_row.append(np.nan); f1_row.append(np.nan)
+                auc_row.append(np.nan)
+                pred_gf_row.append(np.nan); pred_sf_row.append(np.nan)
+                continue
+            y_pred       = model.predict(X_eval)
+            y_pred_proba = model.predict_proba(X_eval)[:, 1]
+            p, r, f1, _ = precision_recall_fscore_support(
+                y_eval, y_pred, labels=[0, 1], zero_division=0)
+            prec_row.append(p[1]); rec_row.append(r[1]); f1_row.append(f1[1])
+            auc_row.append(roc_auc_score(y_eval, y_pred_proba))
+            pred_gf_row.append((y_pred == 1).sum() / len(y_pred))
+            pred_sf_row.append((y_pred == 0).sum() / len(y_pred))
+        all_prec.append(prec_row); all_rec.append(rec_row); all_f1.append(f1_row)
+        all_auc.append(auc_row)
+        all_pred_gf.append(pred_gf_row); all_pred_sf.append(pred_sf_row)
+
+    pred_gf = np.nanmean(np.array(all_pred_gf), axis=0)
+    pred_sf = np.nanmean(np.array(all_pred_sf), axis=0)
+
+    prec = np.array(all_prec); rec = np.array(all_rec); f1 = np.array(all_f1)
+    auc  = np.array(all_auc)
+
+    # --- per-bin classified fracs (STAR/GALAXY labelled sources, full range) ---
+    # Combine training data with extrapolation data for full G coverage
+    if X_e.shape[0] > 0:
+        mag_cl  = np.concatenate([mag, mag_e])
+        y_cl    = np.concatenate([y,   y_e])
+    else:
+        mag_cl, y_cl = mag, y
+    label_cl = np.where(y_cl == 0, 'STAR', 'GALAXY')
+    gf_c, sf_c, ngal_c = [], [], []
+    for centre in _MAG_BINS:
+        lo, hi = centre - _BIN_HALF, centre + _BIN_HALF
+        m = (mag_cl >= lo) & (mag_cl < hi)
+        tot = m.sum()
+        ng  = (label_cl[m] == 'GALAXY').sum()
+        ns  = (label_cl[m] == 'STAR').sum()
+        gf_c.append(ng / tot if tot > 0 else np.nan)
+        sf_c.append(ns / tot if tot > 0 else np.nan)
+        ngal_c.append(int(ng))
+    gf_c = np.array(gf_c); sf_c = np.array(sf_c); ngal_c = np.array(ngal_c)
+
+    # --- per-bin all-source fracs (from population df_pop G >= 15) ---
+    mag_p   = df_pop['phot_g_mean_mag'].values
+    label_p = df_pop['label'].values
+    gf_a, sf_a, of_a, ngal_a = [], [], [], []
+    for centre in _MAG_BINS:
+        lo, hi = centre - _BIN_HALF, centre + _BIN_HALF
+        m   = (mag_p >= lo) & (mag_p < hi)
+        tot = m.sum()
+        ng  = (label_p[m] == 'GALAXY').sum()
+        ns  = (label_p[m] == 'STAR').sum()
+        no  = ((label_p[m] == 'QSO_GC') | (label_p[m] == 'UNCLASSIFIED')).sum()
+        gf_a.append(ng / tot if tot > 0 else np.nan)
+        sf_a.append(ns / tot if tot > 0 else np.nan)
+        of_a.append(no / tot if tot > 0 else np.nan)
+        ngal_a.append(int(ng))
+    gf_a = np.array(gf_a); sf_a = np.array(sf_a)
+    of_a = np.array(of_a); ngal_a = np.array(ngal_a)
+
+    # --- plot ---
+    def _shade(ax):
+        ax.axvspan(x[0] - 0.15, MAG_CUT,       color='lightyellow', alpha=0.6, zorder=0)
+        ax.axvspan(MAG_CUT_FAINT, x[-1] + 0.15, color='lightyellow', alpha=0.6, zorder=0)
+        ax.axvline(x=MAG_CUT,       color='navy',    ls='--', lw=1.5, alpha=0.8)
+        ax.axvline(x=18.5,          color='black',   ls='--', lw=1.5, alpha=0.8)
+        ax.axvline(x=MAG_CUT_FAINT, color='darkred', ls='--', lw=1.5, alpha=0.8)
+        ax.axhline(y=0.5, color='gray', ls=':', lw=1)
+        ax.grid(alpha=0.3, axis='y')
+
+    fig, (ax_top, ax_mid, ax_bot) = plt.subplots(
+        3, 1, figsize=(14, 17),
+        gridspec_kw={'height_ratios': [3, 1.2, 1.2]}, sharex=True)
+
+    # top: metrics
+    _shade(ax_top)
+    metric_handles = []
+    mu_dict = {}
+    for label, arr, color, marker in [
+        ('Galaxy Precision', prec, 'steelblue',     'o'),
+        ('Galaxy F1',        f1,   'mediumseagreen', 's'),
+        ('Galaxy Recall',    rec,  'coral',           '^'),
+        ('ROC AUC',          auc,  'pink',    'D'),
+    ]:
+        mu  = np.nanmean(arr, axis=0)
+        std = np.nanstd(arr,  axis=0)
+        line, = ax_top.plot(x, mu, marker=marker, color=color, lw=2, markersize=8,
+                            label=label, zorder=3)
+        ax_top.fill_between(x, mu - std, mu + std, alpha=0.18, color=color, zorder=2)
+        metric_handles.append(line)
+        mu_dict[label] = mu
+
+    # Annotate every other bin with P / F1 / R / AUC values
+    offsets = {'Galaxy Precision': +0.053, 'Galaxy F1': +0.018, 'Galaxy Recall': -0.018, 'ROC AUC': -0.053}
+    colors  = {'Galaxy Precision': 'steelblue', 'Galaxy F1': 'mediumseagreen', 'Galaxy Recall': 'coral', 'ROC AUC': 'pink'}
+    short   = {'Galaxy Precision': 'P', 'Galaxy F1': 'F1', 'Galaxy Recall': 'R', 'ROC AUC': 'AUC'}
+    for i in range(0, len(_MAG_BINS), 2):
+        for lbl, mu in mu_dict.items():
+            if np.isfinite(mu[i]):
+                y_val = mu[i] + offsets[lbl]
+                above = y_val < 0.92   # flip below when near top to stay in bounds
+                dy  =  0.018 if above else -0.018
+                va  = 'bottom' if above else 'top'
+                ax_top.text(x[i], y_val + dy, f'{short[lbl]}={mu[i]:.2f}',
+                            ha='center', va=va, fontsize=6, color=colors[lbl],
+                            zorder=6)
+    ref_handles = [
+        Line2D([0],[0], color='navy',  ls='--', lw=1.5, alpha=0.8,
+               label=f'G = {MAG_CUT}  (train lo)'),
+        Line2D([0],[0], color='black', ls='--', lw=1.5, alpha=0.8, label='G = 18.5'),
+    ]
+    if MAG_CUT_FAINT < 90:
+        ref_handles.append(Line2D([0],[0], color='darkred', ls='--', lw=1.5, alpha=0.8,
+                                  label=f'G = {MAG_CUT_FAINT}  (train hi)'))
+    ax_top.legend(handles=metric_handles, fontsize=10, loc='lower left')
+    ax_top.set_ylabel('Metric value', fontsize=12, fontweight='bold')
+    ax_top.set_ylim(-0.05, 1.05)
+
+    # mid: classified fracs (true labels + model predictions)
+    _shade(ax_mid)
+    ax_mid.bar(x, gf_c, width=0.22, color='orchid', alpha=0.25, zorder=1)
+    ax_mid.plot(x, sf_c,    color='coral',   lw=2, zorder=4, label='Star (true)',   alpha=0.5)
+    ax_mid.plot(x, gf_c,    color='#9B30B0', lw=2, zorder=4, label='Galaxy (true)')
+    ax_mid.plot(x, pred_sf, color='coral',   lw=2, zorder=4, ls='--',
+                label='Star (pred)', alpha=0.5)
+    ax_mid.plot(x, pred_gf, color='#9B30B0', lw=2, zorder=4, ls='--',
+                label='Galaxy (pred)')
+    ax_mid.set_ylabel('Fraction', fontsize=11, fontweight='bold')
+    ax_mid.set_ylim(0, 1.25)
+    ax_mid.legend(fontsize=9, loc='upper left', ncol=4)
+    ax_mid.set_title('PHZ-labelled fraction (solid) vs model-predicted fraction (dashed)  — STAR + GALAXY per bin',
+                     fontsize=10, loc='left', pad=3)
+    for i in range(0, len(_MAG_BINS), 2):
+        if ngal_c[i] > 0:
+            ax_mid.text(x[i], (gf_c[i] if np.isfinite(gf_c[i]) else 0) + 0.05,
+                        f'{ngal_c[i]:,}', ha='center', fontsize=7, color='#333333', zorder=10)
+
+    # bot: all sources
+    _shade(ax_bot)
+    ax_bot.bar(x, gf_a, width=0.22, color='orchid', alpha=0.25, zorder=1)
+    ax_bot.plot(x, sf_a, color='coral',   lw=2, zorder=4, label='Star',         alpha=0.5)
+    ax_bot.plot(x, gf_a, color='#9B30B0', lw=2, zorder=4, label='Galaxy')
+    ax_bot.plot(x, of_a, color='#8B4513', lw=2, zorder=4, ls='--',
+                label='Unclassified', alpha=0.5)
+    ax_bot.set_ylabel('Fraction', fontsize=11, fontweight='bold')
+    ax_bot.set_ylim(0, 1.25)
+    ax_bot.legend(fontsize=9, loc='upper left', ncol=3)
+    ax_bot.set_title('All Gaia-matched Q1 sources  (incl. unclassified, per bin)',
+                     fontsize=10, loc='left', pad=3)
+    for i in range(0, len(_MAG_BINS), 2):
+        if ngal_a[i] > 0:
+            ax_bot.text(x[i], (gf_a[i] if np.isfinite(gf_a[i]) else 0) + 0.05,
+                        f'{ngal_a[i]:,}', ha='center', fontsize=7, color='#333333', zorder=10)
+
+    tick_vals = [c for c in _MAG_BINS if c == round(c)]
+    ax_bot.set_xlim(x[0] - 0.2, x[-1] + 0.2)
+    ax_bot.set_xticks(tick_vals)
+    ax_bot.set_xticklabels([f'G≈{c:.0f}' for c in tick_vals], fontsize=10)
+    ax_bot.set_xlabel(
+        f'Gaia G bin centre  (model trained on {_mag_range()}) ',
+        fontsize=12, fontweight='bold', labelpad=13)
+
+    plt.suptitle(
+        f'Q1 model ({_mag_range()}) — Galaxy metrics per magnitude bin  '
+        f'(mean ± 1σ, {n_seeds} seeds)',
+        fontsize=13, fontweight='bold', y=0.99)
+    fig.subplots_adjust(top=0.90)
+    plt.tight_layout()
+
+    out = output_dir / 'q1_perbin_performance.png'
+    plt.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  -> {out}")
+
+    npz_out = output_dir / 'q1_perbin_data.npz'
+    np.savez(npz_out,
+             x=x,
+             prec=prec, rec=rec, f1=f1, auc=auc,
+             pred_gf=pred_gf, pred_sf=pred_sf,
+             gf_c=gf_c, sf_c=sf_c, ngal_c=ngal_c,
+             gf_a=gf_a, sf_a=sf_a, of_a=of_a, ngal_a=ngal_a,
+             mag_cut=MAG_CUT, mag_cut_faint=MAG_CUT_FAINT)
+    print(f"  -> {npz_out}")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -359,7 +682,20 @@ def main():
     parser = argparse.ArgumentParser(description='XGBoost Q1 model training')
     parser.add_argument('--test-mode', action='store_true',
                         help='Limit to 10 k sources for quick testing')
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument('--faint-cut', type=float, metavar='MAG',
+                     help='Upper G-mag limit for training (e.g. 21, 21.5, 22). '
+                          'Default: no faint cut.')
+    grp.add_argument('--no-faint-cut', action='store_true',
+                     help='Explicitly remove the faint-end cut (default behaviour).')
     args = parser.parse_args()
+
+    global MAG_CUT_FAINT, OUTPUT_DIR, SEED_MODELS_DIR
+    if args.faint_cut is not None:
+        MAG_CUT_FAINT = args.faint_cut
+
+    OUTPUT_DIR      = PROJECT_DIR / 'output' / 'xgboost_q1' / _mag_range_dir()
+    SEED_MODELS_DIR = OUTPUT_DIR / 'seed_models'
 
     username = os.getenv('PGUSER')
     if not username:
@@ -373,7 +709,7 @@ def main():
     print("XGBoost Q1 Model Training")
     print("=" * 70)
     print(f"  Features:       {len(SELECTED_GAIA_PARAMETERS)}")
-    print(f"  Magnitude cut:  Gaia G >= {MAG_CUT}")
+    print(f"  Magnitude cut:  {_mag_range()}")
     print(f"  Output:         {OUTPUT_DIR}")
     print(f"  Training mode:  {len(SEEDS)}-seed ensemble")
     if args.test_mode:
@@ -381,20 +717,26 @@ def main():
 
     # ── Step 1: Query ─────────────────────────────────────────────────────────
     print("\n[1] Querying Q1 data...")
-    X, y = query_q1(username, test_mode=args.test_mode)
+    X, y, mag = query_q1(username, test_mode=args.test_mode)
 
     # ── Step 2-6: Train/evaluate/save ────────────────────────────────────────
     seeds = SEEDS
     all_metrics = []
     all_importances = []
     all_models = []
+    all_test_idx = []
     all_y_test_proba = []
     y_test_ref = None
     split_summary = None
+    idx_all = np.arange(len(X))
 
     for idx, seed in enumerate(seeds, start=1):
         print(f"\n[2] Splitting data (70/15/15, random_state={seed})...")
         X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y, seed)
+        # Track test indices for per-bin evaluation (same split params as split_data)
+        _, idx_test, _, _ = train_test_split(
+            idx_all, y, test_size=0.15, random_state=seed, stratify=y)
+        all_test_idx.append(idx_test)
 
         n_star = (y_train == 0).sum()
         n_galaxy = (y_train == 1).sum()
@@ -472,12 +814,18 @@ def main():
     print("\n[6b] Generating threshold analysis plot...")
     plot_threshold_analysis(y_test_ref, np.array(all_y_test_proba), OUTPUT_DIR)
 
+    print("\n[6c] Generating per-bin performance plot...")
+    extrap = query_q1_extrap(username)
+    df_pop = query_q1_population(username)
+    plot_perbin_performance(all_models, all_test_idx, X, y, mag, df_pop, OUTPUT_DIR,
+                            extrap=extrap)
+
     # ── Step 7: Summary text ──────────────────────────────────────────────────
     summary_path = OUTPUT_DIR / 'q1_summary.txt'
     with open(summary_path, 'w') as f:
         f.write("XGBOOST Q1 MODEL TRAINING SUMMARY\n")
         f.write("=" * 70 + "\n")
-        f.write(f"Magnitude cut : Gaia G >= {MAG_CUT}\n")
+        f.write(f"Magnitude cut : {_mag_range()}\n")
         f.write(f"Features      : {len(SELECTED_GAIA_PARAMETERS)}\n")
         f.write(f"Training mode : {len(SEEDS)}-seed ensemble\n")
         if split_summary is not None:
