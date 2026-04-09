@@ -24,18 +24,16 @@ Writes:
   output/umap/q1_individual/q1_space_fields.png
 
 Usage:
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_q1_fields_overlay.py
+  python src/analyze_umap_q1_fields_overlay.py
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap, LogNorm
 from matplotlib.gridspec import GridSpec
 
@@ -43,8 +41,6 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
 OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 MAG_CUT   = 17
 
 # ── Field definitions (matching analyze_q1_mag_dist_fields.py) ────────────────
@@ -79,22 +75,10 @@ def assign_fields(ra: np.ndarray, dec: np.ndarray) -> np.ndarray:
     return assignments
 
 
-def query_ra_dec(username: str) -> pd.DataFrame:
-    """Fetch g_source_id, ra, dec for all Q1 sources used in UMAP training."""
-    import psycopg2
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    df = pd.read_sql_query(f"""
-        SELECT g_source_id,
-               m_right_ascension AS ra,
-               m_declination     AS dec
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
-        WHERE p_phz_classification IN (1, 2)
-          AND g_phot_g_mean_mag >= {MAG_CUT}
-        ORDER BY g_source_id
-    """, conn)
-    conn.close()
-    df["g_source_id"] = df["g_source_id"].astype(str)
-    return df
+def load_ra_dec_from_npz(npz_path):
+    """Load RA/Dec arrays from a Q1 npz file (no DB needed)."""
+    data = np.load(npz_path, allow_pickle=True)
+    return data["ra"].astype(float), data["dec"].astype(float)
 
 
 def get_plot_cmap(name: str, *, bad_alpha_zero: bool = False):
@@ -135,37 +119,23 @@ def slice_cmap(cmap, minval=0.0, maxval=1.0, n=256):
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER not set.")
-        return 1
-
     # ── Load Q1 UMAP embedding ────────────────────────────────────────────────
     print("Loading Q1 UMAP arrays...")
     q1         = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
     q1_emb     = q1["embedding"]
     q1_y       = q1["y"]
     source_ids = q1["source_ids"].astype(str)
+    ra         = q1["ra"].astype(float)
+    dec        = q1["dec"].astype(float)
     print(f"  Q1: {len(q1_y):,} sources")
 
-    # ── Query RA/Dec and assign fields ────────────────────────────────────────
-    print("\nQuerying RA/Dec from DB...")
-    df_pos = query_ra_dec(username)
-    print(f"  Retrieved {len(df_pos):,} sources")
-
-    df_pos["field"] = assign_fields(df_pos["ra"].values, df_pos["dec"].values)
-    field_lookup = dict(zip(df_pos["g_source_id"], df_pos["field"]))
-
-    fields_arr = np.array([field_lookup.get(sid, None) for sid in source_ids],
-                          dtype=object)
+    # ── Assign fields from RA/Dec ─────────────────────────────────────────────
+    print("\nAssigning fields from RA/Dec (from npz)...")
+    fields_arr = assign_fields(ra, dec)
 
     for fname in Q1_FIELDS:
         n = (fields_arr == fname).sum()
         print(f"  {fname}: {n:,} sources in embedding")
-
-    n_unmatched = (fields_arr == None).sum()  # noqa: E711
-    if n_unmatched:
-        print(f"  WARNING: {n_unmatched} sources have no field assignment")
 
     # ── Plot setup ────────────────────────────────────────────────────────────
     rng = np.random.RandomState(0)
@@ -279,7 +249,7 @@ def main() -> int:
         fontsize=12, fontweight="bold", y=0.995,
     )
 
-    out = OUTPUT_DIR / "q1_space_fields.png"
+    out = OUTPUT_DIR / "q1_fields.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"\n  -> Saved: {out}")

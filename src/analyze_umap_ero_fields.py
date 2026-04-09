@@ -21,16 +21,15 @@ Reads:
   DB: siwei_zhao_2025.crossmatch_ero_gaia_0_3  (RA/Dec lookup)
 
 Writes:
-  output/umap/ero_individual/ero_space_fields.png
-  output/umap/ero_individual/ero_space_fields_rebalanced.png
+  output/umap/ero_individual/ero_fields.png
+  output/umap/ero_individual/ero_fields_rebalanced.png
 
 Usage:
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_ero_fields_overlay.py
+  python src/analyze_umap_ero_fields_overlay.py
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -43,8 +42,6 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
 OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "ero_individual"
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 MAG_CUT   = 17
 
 # ── Field definitions (from analyze_ero_mag_dist_fields.py) ──────────────────
@@ -111,21 +108,10 @@ def assign_fields(ra: np.ndarray, dec: np.ndarray) -> np.ndarray:
     return assignments
 
 
-def query_ra_dec(username: str):
-    import psycopg2, pandas as pd
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    df = pd.read_sql_query(f"""
-        SELECT g_source_id,
-               e_v_alpha_j2000 AS ra,
-               e_v_delta_j2000 AS dec
-        FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
-        WHERE e_v_class_star IS NOT NULL
-          AND g_phot_g_mean_mag >= {MAG_CUT}
-        ORDER BY g_source_id
-    """, conn)
-    conn.close()
-    df["g_source_id"] = df["g_source_id"].astype(str)
-    return df
+def load_ra_dec_from_npz(npz_path):
+    """Load RA/Dec arrays from an ERO npz file (no DB needed)."""
+    data = np.load(npz_path, allow_pickle=True)
+    return data["ra"].astype(float), data["dec"].astype(float)
 
 
 def get_plot_cmap(name: str, *, bad_alpha_zero: bool = False):
@@ -294,37 +280,21 @@ def _run_pipeline(emb, y, fields_arr, label: str, out_name: str):
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER not set.")
-        return 1
-
-    # ── Query RA/Dec and build field lookup ───────────────────────────────────
-    print("Querying RA/Dec from DB...")
-    df_pos = query_ra_dec(username)
-    print(f"  Retrieved {len(df_pos):,} sources")
-
-    fields_db = assign_fields(df_pos["ra"].values, df_pos["dec"].values)
-    field_lookup = dict(zip(df_pos["g_source_id"], fields_db))
-
-    for f in FIELD_LIST:
-        n = (fields_db == f).sum()
-        print(f"  {f}: {n:,}")
-
-    def _make_field_arr(source_ids):
-        return np.array([field_lookup.get(sid, None) for sid in source_ids], dtype=object)
-
     # ── Regular ERO ───────────────────────────────────────────────────────────
     indiv_path = ARRAYS_DIR / "ero_indiv.npz"
     if not indiv_path.exists():
-        print(f"ERROR: {indiv_path} not found. Run analyze_umap.py first.")
+        print(f"ERROR: {indiv_path} not found. Run analyze_umap_query.py first.")
         return 1
 
-    print("\nLoading ERO individual UMAP arrays...")
-    d  = np.load(indiv_path, allow_pickle=True)
-    emb = d["embedding"];  y = d["y"];  sids = d["source_ids"].astype(str)
+    print("Loading ERO individual UMAP arrays...")
+    d    = np.load(indiv_path, allow_pickle=True)
+    emb  = d["embedding"];  y = d["y"]
+    ra   = d["ra"].astype(float);  dec = d["dec"].astype(float)
+    fields = assign_fields(ra, dec)
     print(f"  {len(y):,} sources")
-    _run_pipeline(emb, y, _make_field_arr(sids), "individual", "ero_space_fields.png")
+    for f in FIELD_LIST:
+        print(f"  {f}: {(fields == f).sum():,}")
+    _run_pipeline(emb, y, fields, "individual", "ero_fields.png")
 
     # ── Rebalanced ERO ────────────────────────────────────────────────────────
     rebal_path = ARRAYS_DIR / "ero_indiv_rebalanced.npz"
@@ -333,10 +303,12 @@ def main() -> int:
         return 0
 
     print("\nLoading rebalanced ERO arrays...")
-    d2  = np.load(rebal_path, allow_pickle=True)
-    emb2 = d2["embedding"];  y2 = d2["y"];  sids2 = d2["source_ids"].astype(str)
+    d2    = np.load(rebal_path, allow_pickle=True)
+    emb2  = d2["embedding"];  y2 = d2["y"]
+    ra2   = d2["ra"].astype(float);  dec2 = d2["dec"].astype(float)
+    fields2 = assign_fields(ra2, dec2)
     print(f"  {len(y2):,} sources")
-    _run_pipeline(emb2, y2, _make_field_arr(sids2), "rebalanced", "ero_space_fields_rebalanced.png")
+    _run_pipeline(emb2, y2, fields2, "rebalanced", "ero_fields_rebalanced.png")
 
     return 0
 

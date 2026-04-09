@@ -4,14 +4,14 @@ UMAP 3D HTML for Q1 Rejected (phz=-1) sources.
 
 Workflow
 --------
-Default run (requires PGUSER):
+Default run:
   1. Load Q1 UMAP embedding + saved cluster labels (q1_cluster_labels.npy).
-  2. Query phz=-1 sources from DB.
+  2. Load phz=-1 sources from q1_allphz.npz.
   3. Project into UMAP space via the fitted reducer.
   4. Assign each source to the nearest Q1 base cluster.
   5. Save q1_rej_projected.csv.
 
---3d run (no DB needed):
+--3d run:
   6. Load saved q1_rej_projected.csv + cluster labels.
   7. Load individual cutout thumbnails + contact sheets.
   8. Generate interactive 3D HTML (UMAP1 × UMAP2 × G mag).
@@ -21,11 +21,11 @@ Default run (requires PGUSER):
 
 Usage
 -----
-  # Full run: DB query + project + save CSV + generate HTML
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_q1_rej_3d.py
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_q1_rej_3d.py --max-points 5000
+  # Full run: load npz + project + save CSV + generate HTML
+  python src/analyze_umap_q1_rej_3d.py
+  python src/analyze_umap_q1_rej_3d.py --max-points 5000
 
-  # Fast re-render: skip DB query, regenerate HTML from saved CSV
+  # Fast re-render: skip projection, regenerate HTML from saved CSV
   python src/analyze_umap_q1_rej_3d.py --3d
   python src/analyze_umap_q1_rej_3d.py --3d --max-points 5000
 """
@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -51,8 +50,6 @@ ARRAYS_DIR   = PROJECT_DIR / "output" / "umap" / "arrays"
 OUTPUT_DIR   = PROJECT_DIR / "output" / "umap" / "q1_individual"
 CUTOUTS_DIR  = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "rej"
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 MAG_CUT   = 17
 
 CLUSTER_COLORS = [
@@ -69,35 +66,19 @@ CLUSTER_COLORS = [
 ]
 
 
-# ── DB query ──────────────────────────────────────────────────────────────────
+# ── Data loading ─────────────────────────────────────────────────────────────
 
-def query_rejected(username: str) -> pd.DataFrame:
-    """Query phz=-1 sources with RA/Dec and Gaia features."""
-    import psycopg2
-    gaia_cols = ", ".join([f"g_{col} AS {col}" for col in SELECTED_GAIA_PARAMETERS])
-    query = f"""
-        SELECT
-            g_source_id AS source_id,
-            m_right_ascension AS ra,
-            m_declination     AS dec,
-            g_phot_g_mean_mag AS phot_g_mean_mag,
-            {gaia_cols}
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
-        WHERE p_phz_classification = -1
-          AND g_phot_g_mean_mag >= {MAG_CUT}
-          AND m_right_ascension IS NOT NULL
-          AND m_declination IS NOT NULL
-        ORDER BY g_source_id
-    """
-    print("  Querying Rejected (phz=-1) sources...")
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-
-    df[SELECTED_GAIA_PARAMETERS] = df[SELECTED_GAIA_PARAMETERS].replace("NOT_AVAILABLE", np.nan)
-    for col in SELECTED_GAIA_PARAMETERS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    print(f"  -> {len(df):,} rejected sources")
+def load_rejected_from_npz() -> pd.DataFrame:
+    """Load phz=-1 sources from q1_allphz.npz."""
+    data = np.load(ARRAYS_DIR / "q1_allphz.npz", allow_pickle=True)
+    df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"]       = data["source_ids"].astype(str)
+    df["ra"]              = data["ra"].astype(float)
+    df["dec"]             = data["dec"].astype(float)
+    df["phot_g_mean_mag"] = data["phot_g_mean_mag"].astype(float)
+    df["phz"]             = data["phz"].astype(int)
+    df = df[df["phz"] == -1].reset_index(drop=True)
+    print(f"  -> {len(df):,} rejected sources (from q1_allphz.npz)")
     return df
 
 
@@ -1014,18 +995,13 @@ def main() -> int:
         )
         return 0
 
-    # ── Default mode: query DB + project + save ────────────────────────────────
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER environment variable not set.")
-        return 1
-
+    # ── Default mode: load npz + project + save ────────────────────────────────
     q1_mean = q1["mean"]
     q1_std  = q1["std"]
     reducer = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
 
-    print("\n[3] Querying Rejected sources from DB...")
-    df_rej = query_rejected(username)
+    print("\n[3] Loading Rejected sources from npz...")
+    df_rej = load_rejected_from_npz()
 
     print("\n[4] Projecting into UMAP space...")
     X = df_rej[SELECTED_GAIA_PARAMETERS].values.astype(float)

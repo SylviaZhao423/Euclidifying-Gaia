@@ -21,15 +21,14 @@ Writes (default: both files if the corresponding .npz exists):
   output/umap/ero_individual/ero_umap_confusion_rebalanced.png
 
 Usage:
-  PGUSER=... python src/analyze_umap_ero_disagreement.py
-  PGUSER=... python src/analyze_umap_ero_disagreement.py --regular-only
-  PGUSER=... python src/analyze_umap_ero_disagreement.py --rebalanced-only
+  python src/analyze_umap_ero_disagreement.py
+  python src/analyze_umap_ero_disagreement.py --regular-only
+  python src/analyze_umap_ero_disagreement.py --rebalanced-only
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -49,8 +48,6 @@ OUTPUT_DIR      = PROJECT_DIR / "output" / "umap" / "ero_individual"
 MAG_CUT        = 17
 PGAL_THRESHOLD = 0.50
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 
 # ── Colormap configuration ────────────────────────────────────────────────────
 CMAP = {
@@ -133,29 +130,12 @@ def load_ensemble_proba(X: np.ndarray) -> np.ndarray:
     return proba
 
 
-def load_ero_class_star(source_ids: np.ndarray, username: str) -> np.ndarray:
-    """Fetch e_v_class_star from DB for the given ERO source_ids."""
-    import psycopg2
-    ids = [int(s) for s in source_ids]
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT g_source_id, e_v_class_star
-                FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
-                WHERE g_source_id = ANY(%s)
-                """,
-                (ids,),
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    lookup = {str(r[0]): r[1] for r in rows}
-    return np.array([lookup.get(str(s), np.nan) for s in source_ids], dtype=float)
+def load_ero_class_star_from_npz(npz_data) -> np.ndarray:
+    """Load e_v_class_star from ERO npz file (no DB needed)."""
+    return npz_data["class_star"].astype(float)
 
 
-def _run_pipeline(use_rebalanced: bool, username: str) -> bool:
+def _run_pipeline(use_rebalanced: bool) -> bool:
     """Load one ERO UMAP npz, predict, plot, save. Returns True if figure written."""
     npz_name = "ero_indiv_rebalanced.npz" if use_rebalanced else "ero_indiv.npz"
     npz_path = ARRAYS_DIR / npz_name
@@ -201,9 +181,9 @@ def _run_pipeline(use_rebalanced: bool, username: str) -> bool:
     accuracy = (counts["TP"] + counts["TN"]) / total
     print(f"  Accuracy: {100*accuracy:.2f}%")
 
-    # ── Fetch ERO class_star ──────────────────────────────────────────────────
-    print("\nFetching e_v_class_star from DB...")
-    class_star = load_ero_class_star(source_ids, username)
+    # ── Load ERO class_star from npz ─────────────────────────────────────────
+    print("\nLoading e_v_class_star from npz...")
+    class_star = load_ero_class_star_from_npz(data)
     ero_pgal   = 1.0 - class_star   # flip so high = galaxy
     n_missing  = np.isnan(ero_pgal).sum()
     print(f"  Retrieved {(~np.isnan(ero_pgal)).sum():,} values  ({n_missing:,} NaN)")
@@ -459,11 +439,6 @@ def main() -> int:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER environment variable not set.")
-        return 1
-
     if args.regular_only:
         tasks = [False]
     elif args.rebalanced_only:
@@ -473,7 +448,7 @@ def main() -> int:
 
     ok_any = False
     for use_rebalanced in tasks:
-        if _run_pipeline(use_rebalanced, username):
+        if _run_pipeline(use_rebalanced):
             ok_any = True
 
     if not ok_any:

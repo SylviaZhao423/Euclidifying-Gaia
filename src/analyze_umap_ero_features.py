@@ -16,7 +16,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -30,8 +29,6 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
 OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "ero_individual"
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 MAG_CUT = 17
 
 ERO_FIELDS = {
@@ -179,23 +176,9 @@ def assign_fields(ra: np.ndarray, dec: np.ndarray) -> np.ndarray:
     return assignments
 
 
-def query_ra_dec(username: str):
-    import psycopg2
-    import pandas as pd
-
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    df = pd.read_sql_query(f"""
-        SELECT g_source_id,
-               e_v_alpha_j2000 AS ra,
-               e_v_delta_j2000 AS dec
-        FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
-        WHERE e_v_class_star IS NOT NULL
-          AND g_phot_g_mean_mag >= {MAG_CUT}
-        ORDER BY g_source_id
-    """, conn)
-    conn.close()
-    df["g_source_id"] = df["g_source_id"].astype(str)
-    return df
+def load_ra_dec_from_npz(npz_data):
+    """Load RA/Dec arrays from an ERO npz file (no DB needed)."""
+    return npz_data["ra"].astype(float), npz_data["dec"].astype(float)
 
 
 
@@ -249,16 +232,9 @@ def main() -> int:
                       background_embedding=emb_bal, background_y=y_bal,
                       xlim=rebal_xlim, ylim=rebal_ylim, mag_label=mag_label)
 
-    username = os.getenv("PGUSER")
-    if not username:
-        print("\nPGUSER not set — skipping field-specific NGC 6397 rebalanced features plot.")
-        print(f"\nAll outputs saved under: {OUTPUT_DIR}")
-        return 0
-
-    print("\nLoading ERO RA/Dec lookup for field assignment...")
-    df_coords = query_ra_dec(username)
-    field_lookup = dict(zip(df_coords["g_source_id"], assign_fields(df_coords["ra"].to_numpy(), df_coords["dec"].to_numpy())))
-    fields_bal = np.array([field_lookup.get(str(sid), None) for sid in rebal_data["source_ids"]], dtype=object)
+    print("\nAssigning fields from RA/Dec (from npz)...")
+    ra_bal, dec_bal = load_ra_dec_from_npz(rebal_data)
+    fields_bal = assign_fields(ra_bal, dec_bal)
     m_ngc = fields_bal == "NGC 6397"
 
     if not np.any(m_ngc):

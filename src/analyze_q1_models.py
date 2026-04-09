@@ -114,13 +114,19 @@ def make_metrics_panel_plot(datasets: list[tuple[dict, float]], output_path: Pat
 
         mu_base = mus[(baseline_faint, key)]
 
-        for (d, faint), model_color in zip(datasets, MODEL_COLORS):
+        for mi, ((d, faint), model_color) in enumerate(zip(datasets, MODEL_COLORS)):
             mu  = mus[(faint, key)]
             label = _mag_label(faint)
 
-            # ── top: absolute ──────────────────────────────────────────────
-            ax_abs.plot(x, mu, color=model_color, lw=0.8, alpha=0.95, zorder=3,
-                        label=label)
+            # ── top: absolute — baseline (17 ≤ G) on top, thicker dashed for visibility
+            z_abs = 5 if faint == baseline_faint else 3 + mi * 0.1
+            if faint == baseline_faint:
+                line_kw = dict(lw=2.0, ls='--')
+            else:
+                line_kw = dict(lw=0.8, ls='-')
+
+            ax_abs.plot(x, mu, color=model_color, alpha=0.95, zorder=z_abs,
+                        label=label, **line_kw)
 
             # ── bottom: delta vs baseline (skip baseline itself) ───────────
             if faint == baseline_faint:

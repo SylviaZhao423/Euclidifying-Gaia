@@ -11,7 +11,7 @@ Layout: 1 row × 3 cols
 Reads:
   output/umap/arrays/q1_indiv.npz
   output/umap/arrays/q1_indiv_reducer.joblib
-  output/umap/arrays/q1_desi.npz
+  output/umap/arrays/q1_allphz_desi.npz
   output/umap/arrays/ero_desi.npz
 
 Writes:
@@ -110,16 +110,17 @@ def main() -> int:
         return emb
 
     # ── Load DESI arrays ──────────────────────────────────────────────────────
-    q1_desi_path  = ARRAYS_DIR / "q1_desi.npz"
+    q1_desi_path  = ARRAYS_DIR / "q1_allphz_desi.npz"
     ero_desi_path = ARRAYS_DIR / "ero_desi.npz"
     for p in [q1_desi_path, ero_desi_path]:
         if not p.exists():
             print(f"ERROR: {p} not found.")
             return 1
 
-    q1_desi     = np.load(q1_desi_path,  allow_pickle=True)
+    q1_desi_all = np.load(q1_desi_path, allow_pickle=True)
+    q1_desi_mask = np.isin(q1_desi_all["phz"].astype(int), [1, 2])
+    q1_desi_X   = q1_desi_all["X_features"].astype(float)[q1_desi_mask]
     ero_desi    = np.load(ero_desi_path, allow_pickle=True)
-    q1_desi_X   = q1_desi["X_features"].astype(float)
     ero_desi_X  = ero_desi["X_features"].astype(float)
 
     n_q1_desi  = len(q1_desi_X)

@@ -109,11 +109,10 @@ def assign_to_clusters(rej_emb: np.ndarray,
 
 def _make_title(k: int):
     def _title(row, size, _k=k):
+        sid = str(row.get('source_id', ''))
         return (f"Rejected (phz=-1)  Cluster {_k}\n"
                 f"RA={float(row['ra']):.4f}  Dec={float(row['dec']):+.4f}\n"
-                f"G={float(row['phot_g_mean_mag']):.2f}  "
-                f"UMAP({float(row['umap1']):.1f},{float(row['umap2']):.1f})  "
-                f"[{size:.1f}\"]")
+                f"G={float(row['phot_g_mean_mag']):.2f}  id={sid}")
     return _title
 
 

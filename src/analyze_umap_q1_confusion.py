@@ -60,8 +60,6 @@ ARRAYS_DIR      = None
 SEED_MODELS_DIR = None
 OUTPUT_DIR      = None
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 
 # ── Colormap configuration ───────────────────────────────────────────────────
 # Change these two strings only.
@@ -172,26 +170,9 @@ def load_ensemble_proba(X: np.ndarray) -> np.ndarray:
     return proba
 
 
-def load_phz_gal_prob(source_ids: np.ndarray, username: str) -> np.ndarray:
-    """Fetch p_phz_gal_prob from DB for the given source_ids. Returns array aligned to source_ids."""
-    import psycopg2
-    ids = [int(s) for s in source_ids]
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT g_source_id, p_phz_gal_prob
-                FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
-                WHERE g_source_id = ANY(%s)
-                """,
-                (ids,),
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    lookup = {str(r[0]): r[1] for r in rows}
-    return np.array([lookup.get(str(s), np.nan) for s in source_ids], dtype=float)
+def load_phz_gal_prob_from_npz(npz_data) -> np.ndarray:
+    """Load p_phz_gal_prob from Q1 npz file (no DB needed)."""
+    return npz_data["phz_gal_prob"].astype(float)
 
 
 def main() -> int:
@@ -222,12 +203,6 @@ def main() -> int:
     npz_path = ARRAYS_DIR / "q1_indiv.npz"
     if not npz_path.exists():
         print(f"ERROR: {npz_path} not found. Run analyze_umap.py first.")
-        return 1
-
-    import os
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER environment variable not set.")
         return 1
 
     print("Loading Q1 individual UMAP arrays...")
@@ -269,11 +244,11 @@ def main() -> int:
     accuracy = (counts["TP"] + counts["TN"]) / total
     print(f"  Accuracy: {100*accuracy:.2f}%")
 
-    # ── Fetch PHZ galaxy probability ──────────────────────────────────────────
-    print("\nFetching p_phz_gal_prob from DB...")
-    phz_gal_prob = load_phz_gal_prob(source_ids, username)
+    # ── Load PHZ galaxy probability from npz ─────────────────────────────────
+    print("\nLoading p_phz_gal_prob from npz...")
+    phz_gal_prob = load_phz_gal_prob_from_npz(data)
     n_missing = np.isnan(phz_gal_prob).sum()
-    print(f"  Retrieved {(~np.isnan(phz_gal_prob)).sum():,} values  ({n_missing:,} NaN)")
+    print(f"  Loaded {(~np.isnan(phz_gal_prob)).sum():,} values  ({n_missing:,} NaN)")
 
     # ── Plotting setup ────────────────────────────────────────────────────────
     rng = np.random.RandomState(0)

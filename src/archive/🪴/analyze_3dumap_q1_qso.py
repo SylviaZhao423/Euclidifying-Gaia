@@ -10,6 +10,7 @@ Reads:
   output/umap/arrays/q1_indiv.npz
   output/umap/arrays/q1_indiv_reducer.joblib
   output/umap/arrays/q1_cluster_labels.npy
+  output/umap/arrays/q1_allphz.npz
 
 Writes:
   output/umap/q1_individual/q1_qso.png
@@ -17,11 +18,11 @@ Writes:
   output/umap/arrays/q1_qso_projected.csv
 
 Usage:
-  # Full run: DB query + project + save CSV + 2D PNG + 3D HTML
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_q1_qso_3d.py
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_q1_qso_3d.py --max-points 5000
+  # Full run: load npz + project + save CSV + 2D PNG + 3D HTML
+  python src/analyze_umap_q1_qso_3d.py
+  python src/analyze_umap_q1_qso_3d.py --max-points 5000
 
-  # Fast re-render: skip DB query, regenerate 3D HTML from saved CSV
+  # Fast re-render: skip projection, regenerate 3D HTML from saved CSV
   python src/analyze_umap_q1_qso_3d.py --3d
   python src/analyze_umap_q1_qso_3d.py --3d --max-points 5000
 """
@@ -30,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -48,15 +48,13 @@ ARRAYS_DIR   = PROJECT_DIR / "output" / "umap" / "arrays"
 OUTPUT_DIR   = PROJECT_DIR / "output" / "umap" / "q1_individual"
 CUTOUTS_DIR  = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "qso"
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 MAG_CUT   = 17
 
 QSO_LABELS = {
     4: ("QSO",              "cyan"),
     5: ("Multi (Star ∩ QSO)", "yellow"),
     6: ("Multi (Gal ∩ QSO)",  "#F45347"),
-    7: ("Outlier∩QSO",      "orange"),
+    7: ("Multi (all three)", "orange"),
 }
 
 PHZ_MARKERS = {4: "o", 5: "s", 6: "D", 7: "+"}
@@ -79,34 +77,17 @@ CLUSTER_COLORS = [
 ]
 
 
-def query_qso_variants(username: str) -> pd.DataFrame:
-    import psycopg2
-    gaia_cols = ", ".join([f"g_{col} AS {col}" for col in SELECTED_GAIA_PARAMETERS])
-    query = f"""
-        SELECT
-            g_source_id AS source_id,
-            m_right_ascension AS ra,
-            m_declination     AS dec,
-            g_phot_g_mean_mag AS phot_g_mean_mag,
-            p_phz_classification AS phz,
-            {gaia_cols}
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
-        WHERE p_phz_classification IN (4, 5, 6, 7)
-          AND g_phot_g_mean_mag >= {MAG_CUT}
-          AND m_right_ascension IS NOT NULL
-          AND m_declination IS NOT NULL
-        ORDER BY g_source_id
-    """
-    print("  Querying QSO variants (phz=4/5/6/7)...")
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-
-    df[SELECTED_GAIA_PARAMETERS] = df[SELECTED_GAIA_PARAMETERS].replace("NOT_AVAILABLE", np.nan)
-    for col in SELECTED_GAIA_PARAMETERS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["phz"] = df["phz"].astype(int)
-    print(f"  -> {len(df):,} QSO-variant sources")
+def load_qso_from_npz() -> pd.DataFrame:
+    """Load QSO-variant sources (phz=4/5/6/7) from q1_allphz.npz."""
+    data = np.load(ARRAYS_DIR / "q1_allphz.npz", allow_pickle=True)
+    df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"]       = data["source_ids"].astype(str)
+    df["ra"]              = data["ra"].astype(float)
+    df["dec"]             = data["dec"].astype(float)
+    df["phot_g_mean_mag"] = data["phot_g_mean_mag"].astype(float)
+    df["phz"]             = data["phz"].astype(int)
+    df = df[df["phz"].isin([4, 5, 6, 7])].reset_index(drop=True)
+    print(f"  -> {len(df):,} QSO-variant sources (from q1_allphz.npz)")
     for v, (lbl, _) in QSO_LABELS.items():
         n = (df["phz"] == v).sum()
         if n:
@@ -1229,12 +1210,7 @@ def main() -> int:
                             feature_names=SELECTED_GAIA_PARAMETERS)
         return 0
 
-    # ── Default mode: full run (DB query + 2D plot + save data) ───────────────
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER environment variable not set.")
-        return 1
-
+    # ── Default mode: full run (load npz + 2D plot + save data) ────────────────
     q1_mean = q1["mean"]
     q1_std  = q1["std"]
     reducer = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
@@ -1251,8 +1227,8 @@ def main() -> int:
     print(f"  Cluster sizes: " +
           "  ".join(f"C{k}={( q1_labels==k).sum():,}" for k in cluster_ids))
 
-    print("\n[3] Querying QSO variants from DB...")
-    df_qso = query_qso_variants(username)
+    print("\n[3] Loading QSO variants from npz...")
+    df_qso = load_qso_from_npz()
 
     print("\n[4] Projecting QSO sources into UMAP space...")
     X = df_qso[SELECTED_GAIA_PARAMETERS].values.astype(float)

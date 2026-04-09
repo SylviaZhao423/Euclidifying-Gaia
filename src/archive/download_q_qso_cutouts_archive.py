@@ -62,7 +62,7 @@ QSO_LABELS = {
     4: ("QSO",              "green"),
     5: ("Multi (Star∩QSO)", "red"),
     6: ("Multi (Gal∩QSO)",  "steelblue"),
-    7: ("Outlier∩QSO",      "orange"),
+    7: ("Multi (all three)", "orange"),
 }
 
 # ── Data loading ──────────────────────────────────────────────────────────────
@@ -128,11 +128,10 @@ def assign_to_clusters(qso_emb: np.ndarray,
 def _make_title(lbl: str):
     """Return a title_fn that captures the phz label by value."""
     def _title(row, size, _lbl=lbl):
+        sid = str(row.get('source_id', ''))
         return (f"phz={int(row['phz'])} {_lbl}\n"
                 f"RA={float(row['ra']):.4f}  Dec={float(row['dec']):+.4f}\n"
-                f"G={float(row['phot_g_mean_mag']):.2f}  "
-                f"UMAP({float(row['umap1']):.1f},{float(row['umap2']):.1f})  "
-                f"[{size:.1f}\"]")
+                f"G={float(row['phot_g_mean_mag']):.2f}  id={sid}")
     return _title
 
 

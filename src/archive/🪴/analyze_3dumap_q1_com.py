@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 """
-Interactive 3D UMAP HTML showing all phz classification categories.
+Combined interactive 3D UMAP HTML with switchable QSO / Rejected overlay.
 
 Produces:
-  q1_allphz_3d.html  — interactive 3D: UMAP x/y + G magnitude as z
-                       Q1 base always shown; all phz classes overlaid simultaneously.
+  q1_overlay_3d.html  — interactive 3D: UMAP x/y + G magnitude as z
+                        Q1 base always shown; overlay dropdown switches between
+                        QSO variants (phz=4/5/6/7) and Rejected (phz=-1).
 
 Reads:
   output/umap/arrays/q1_indiv.npz
   output/umap/arrays/q1_indiv_reducer.joblib
   output/umap/arrays/q1_cluster_labels.npy
+  output/umap/arrays/q1_allphz.npz
 
 Writes:
-  output/umap/q1_individual/q1_allphz_3d.html
-  output/umap/arrays/q1_allphz_projected.csv
+  output/umap/q1_individual/q1_overlay_3d.html
+  output/umap/arrays/q1_qso_projected.csv
+  output/umap/arrays/q1_rej_projected.csv
 
 Usage:
-  # Full run: DB query + project + save CSV + generate HTML
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_q1_allphz_3d.py
+  # Full run: load npz + project + save CSVs + generate HTML
+  python src/analyze_umap_q1_overlay_3d.py
+  python src/analyze_umap_q1_overlay_3d.py --max-points 5000
 
-  # Fast re-render: skip DB query, regenerate HTML from saved CSV
-  python src/analyze_umap_q1_allphz_3d.py --3d
-  python src/analyze_umap_q1_allphz_3d.py --3d --max-points 2000
+  # Fast re-render: skip projection, regenerate HTML from saved CSVs
+  python src/analyze_umap_q1_overlay_3d.py --3d
+  python src/analyze_umap_q1_overlay_3d.py --3d --max-points 5000
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -40,35 +43,23 @@ from sklearn.neighbors import NearestNeighbors
 sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
-CUTOUTS_DIR = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts"
+PROJECT_DIR     = Path(__file__).resolve().parents[1]
+ARRAYS_DIR      = PROJECT_DIR / "output" / "umap" / "arrays"
+OUTPUT_DIR      = PROJECT_DIR / "output" / "umap" / "q1_individual"
+CUTOUTS_DIR_QSO = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "qso"
+CUTOUTS_DIR_REJ = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "rej"
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 MAG_CUT   = 17
 
-PHZ_LABELS = {
-     1: ("Star",               "cyan",     "circle"),
-     2: ("Galaxy",             "#F45347",  "circle"),
-     3: ("Multi (Star ∩ Gal)",   "#FFC107",  "square"),
-     4: ("QSO",                "#4CAF50",  "circle"),
-     5: ("Multi (Star ∩ QSO)",   "#E53935",  "square"),
-     6: ("Multi (Gal ∩ QSO)",    "#00ACC1",  "diamond"),
-     7: ("Multi (all three)",  "#FF7043",  "cross"),
-    -1: ("Rejected",           "#9C27B0",  "circle-open"),
-     0: ("Outlier",            "#FF9800",  "circle-open"),
+QSO_LABELS = {
+    4: ("QSO",                "cyan"),
+    5: ("Multi (Star ∩ QSO)", "yellow"),
+    6: ("Multi (Gal ∩ QSO)",  "#F45347"),
+    7: ("Multi (all three)",   "orange"),
 }
 
-# Subdirectory per non-QSO phz class under CUTOUTS_DIR
-PHZ_DIRS = {
-    1: "star",
-    2: "galaxy",
-    3: "multi_sg",
-    -1: "rej",
-    0: "outlier",
-}
+# Plotly 3D symbol equivalents
+PHZ_PLOTLY_SYMBOLS = {4: "circle", 5: "square", 6: "diamond", 7: "cross"}
 
 CLUSTER_COLORS = [
     "#1f77b4",       # 0 — blue
@@ -83,53 +74,42 @@ CLUSTER_COLORS = [
     "#bcbd22",       # 9 — olive
 ]
 
-# 3D scatter sizes: phz overlay is the reference; Q1 noise/clusters use 0.7× so that
-# with legend itemsizing="trace", legend glyphs match that ratio.
-PHZ_SCATTER_MARKER_SIZE = 5
-Q1_BASE_SCATTER_MARKER_SIZE = PHZ_SCATTER_MARKER_SIZE * 0.7
+
+# ── Data loading ─────────────────────────────────────────────────────────────
+
+def _load_allphz_from_npz() -> pd.DataFrame:
+    """Load all phz sources from q1_allphz.npz (shared helper)."""
+    data = np.load(ARRAYS_DIR / "q1_allphz.npz", allow_pickle=True)
+    df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"]       = data["source_ids"].astype(str)
+    df["ra"]              = data["ra"].astype(float)
+    df["dec"]             = data["dec"].astype(float)
+    df["phot_g_mean_mag"] = data["phot_g_mean_mag"].astype(float)
+    df["phz"]             = data["phz"].astype(int)
+    return df
 
 
-# ── DB query ──────────────────────────────────────────────────────────────────
-
-def query_all_phz(username: str) -> pd.DataFrame:
-    """Query all phz classes with RA/Dec and Gaia features."""
-    import psycopg2
-    gaia_cols = ", ".join([f"g_{col} AS {col}" for col in SELECTED_GAIA_PARAMETERS])
-    phz_values = ", ".join(str(v) for v in PHZ_LABELS.keys())
-    query = f"""
-        SELECT
-            g_source_id AS source_id,
-            m_right_ascension AS ra,
-            m_declination     AS dec,
-            g_phot_g_mean_mag AS phot_g_mean_mag,
-            p_phz_classification AS phz,
-            {gaia_cols}
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
-        WHERE p_phz_classification IN ({phz_values})
-          AND g_phot_g_mean_mag >= {MAG_CUT}
-          AND m_right_ascension IS NOT NULL
-          AND m_declination IS NOT NULL
-          AND p_phz_classification IS NOT NULL
-        ORDER BY g_source_id
-    """
-    print("  Querying all phz classification sources...")
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-
-    df[SELECTED_GAIA_PARAMETERS] = df[SELECTED_GAIA_PARAMETERS].replace("NOT_AVAILABLE", np.nan)
-    for col in SELECTED_GAIA_PARAMETERS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["phz"] = df["phz"].astype(int)
-    print(f"  -> {len(df):,} total sources")
-    for v, (lbl, _, _) in PHZ_LABELS.items():
+def load_qso_from_npz() -> pd.DataFrame:
+    """Load QSO-variant sources (phz=4/5/6/7) from q1_allphz.npz."""
+    df = _load_allphz_from_npz()
+    df = df[df["phz"].isin([4, 5, 6, 7])].reset_index(drop=True)
+    print(f"  -> {len(df):,} QSO-variant sources (from q1_allphz.npz)")
+    for v, (lbl, _) in QSO_LABELS.items():
         n = (df["phz"] == v).sum()
         if n:
             print(f"     phz={v}  {lbl}: {n:,}")
     return df
 
 
-# ── Cluster assignment ─────────────────────────────────────────────────────────
+def load_rejected_from_npz() -> pd.DataFrame:
+    """Load phz=-1 sources from q1_allphz.npz."""
+    df = _load_allphz_from_npz()
+    df = df[df["phz"] == -1].reset_index(drop=True)
+    print(f"  -> {len(df):,} rejected sources (from q1_allphz.npz)")
+    return df
+
+
+# ── Cluster assignment ────────────────────────────────────────────────────────
 
 def assign_to_clusters(src_emb: np.ndarray,
                        q1_emb: np.ndarray,
@@ -145,16 +125,16 @@ def assign_to_clusters(src_emb: np.ndarray,
     return q1_labels[valid_indices[idx]]
 
 
-# ── Cutout / contact-sheet caches ─────────────────────────────────────────────
+# ── Cutout caches (QSO) ───────────────────────────────────────────────────────
 
-def load_cutout_cache(cutouts_dir: Path) -> dict:
-    """Scan manifest*.csv files recursively and return {source_id_str: base64_png_str}."""
+def load_cutout_cache_qso(cutouts_dir: Path) -> dict:
+    """Scan cluster*/manifest_phz*.csv and return {source_id_str: base64_png_str}."""
     import base64
     from io import BytesIO
     from PIL import Image
 
     cache = {}
-    for manifest_path in sorted(cutouts_dir.rglob("manifest*.csv")):
+    for manifest_path in sorted(cutouts_dir.glob("*/manifest_phz*.csv")):
         cell_dir = manifest_path.parent
         try:
             df = pd.read_csv(manifest_path)
@@ -177,25 +157,17 @@ def load_cutout_cache(cutouts_dir: Path) -> dict:
                 cache[sid] = b64
             except Exception:
                 continue
-    print(f"  Loaded {len(cache)} cached cutout thumbnails")
+    print(f"  [QSO] Loaded {len(cache)} cached cutout thumbnails")
     return cache
 
 
-def load_contact_sheet_cache_allphz(cutouts_dir: Path) -> tuple[dict, dict]:
-    """Scan contact sheets for all phz classes.
-
-    Non-QSO (phz 1,2,3,-1,0):
-      {cutouts_dir}/{phz_dir}/cluster{k}/contact_sheet.png
-      count: rows in {cutouts_dir}/{phz_dir}/cluster{k}/manifest.csv
-
-    QSO (phz 4,5,6,7):
-      {cutouts_dir}/qso/cluster{k}/contact_sheet_phz{v}.png
-      count: rows in {cutouts_dir}/qso/cluster{k}/manifest_phz{v}.csv
+def load_contact_sheet_cache_qso(cutouts_dir: Path) -> tuple[dict, dict]:
+    """Scan cluster*/contact_sheet_phz*.png.
 
     Returns
     -------
     cache  : {phz_str: {cluster_str: base64_str}}
-    counts : {phz_str: {cluster_str: int}}
+    counts : {phz_str: {cluster_str: int}}  — rows in the matching manifest
     """
     import base64
     from io import BytesIO
@@ -203,62 +175,104 @@ def load_contact_sheet_cache_allphz(cutouts_dir: Path) -> tuple[dict, dict]:
 
     cache:  dict[str, dict[str, str]] = {}
     counts: dict[str, dict[str, int]] = {}
-
-    # Non-QSO phz classes
-    for v, subdir in PHZ_DIRS.items():
-        phz_root = cutouts_dir / subdir
-        if not phz_root.exists():
-            continue
-        for cluster_dir in sorted(phz_root.glob("cluster*")):
-            k = cluster_dir.name.replace("cluster", "")
-            sheet_path = cluster_dir / "contact_sheet.png"
-            if not sheet_path.exists():
-                continue
+    for cluster_dir in sorted(cutouts_dir.glob("cluster*")):
+        k = cluster_dir.name.replace("cluster", "")
+        for sheet_path in sorted(cluster_dir.glob("contact_sheet_phz*.png")):
+            v = sheet_path.stem.replace("contact_sheet_phz", "")
             try:
                 img = Image.open(sheet_path).convert("RGB")
                 buf = BytesIO()
                 img.save(buf, format="PNG")
                 b64 = base64.b64encode(buf.getvalue()).decode()
-                cache.setdefault(str(v), {})[k] = b64
+                cache.setdefault(v, {})[k] = b64
             except Exception:
                 continue
-            manifest = cluster_dir / "manifest.csv"
-            n = 0
+            manifest = cluster_dir / f"manifest_phz{v}.csv"
             if manifest.exists():
                 try:
                     with open(manifest) as f:
-                        n = max(0, sum(1 for _ in f) - 1)
+                        n = sum(1 for _ in f) - 1
                 except Exception:
                     n = 0
-            counts.setdefault(str(v), {})[k] = n
-
-    # QSO phz classes (4,5,6,7) stored under qso/ with per-phz contact sheets
-    qso_root = cutouts_dir / "qso"
-    if qso_root.exists():
-        for cluster_dir in sorted(qso_root.glob("cluster*")):
-            k = cluster_dir.name.replace("cluster", "")
-            for sheet_path in sorted(cluster_dir.glob("contact_sheet_phz*.png")):
-                v_str = sheet_path.stem.replace("contact_sheet_phz", "")
-                try:
-                    img = Image.open(sheet_path).convert("RGB")
-                    buf = BytesIO()
-                    img.save(buf, format="PNG")
-                    b64 = base64.b64encode(buf.getvalue()).decode()
-                    cache.setdefault(v_str, {})[k] = b64
-                except Exception:
-                    continue
-                manifest = cluster_dir / f"manifest_phz{v_str}.csv"
+            else:
                 n = 0
-                if manifest.exists():
-                    try:
-                        with open(manifest) as f:
-                            n = max(0, sum(1 for _ in f) - 1)
-                    except Exception:
-                        n = 0
-                counts.setdefault(v_str, {})[k] = n
-
+            counts.setdefault(v, {})[k] = max(n, 0)
     n_sheets = sum(len(d) for d in cache.values())
-    print(f"  Loaded {n_sheets} contact sheet(s) for phz values: {sorted(cache.keys())}")
+    print(f"  [QSO] Loaded {n_sheets} contact sheet(s) for phz values: {sorted(cache.keys())}")
+    return cache, counts
+
+
+# ── Cutout caches (REJ) ───────────────────────────────────────────────────────
+
+def load_cutout_cache_rej(cutouts_dir: Path) -> dict:
+    """Scan cluster*/manifest.csv and return {source_id_str: base64_png_str}."""
+    import base64
+    from io import BytesIO
+    from PIL import Image
+
+    cache = {}
+    for manifest_path in sorted(cutouts_dir.glob("*/manifest.csv")):
+        cell_dir = manifest_path.parent
+        try:
+            df = pd.read_csv(manifest_path)
+        except Exception:
+            continue
+        if "cutout_file" not in df.columns:
+            continue
+        for _, row in df.iterrows():
+            if pd.isna(row.get("cutout_file")):
+                continue
+            png_path = cell_dir / row["cutout_file"]
+            if not png_path.exists():
+                continue
+            try:
+                img = Image.open(png_path).convert("RGB")
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                cache[str(row["source_id"])] = b64
+            except Exception:
+                continue
+    print(f"  [REJ] Loaded {len(cache)} cached cutout thumbnails")
+    return cache
+
+
+def load_contact_sheet_cache_rej(cutouts_dir: Path) -> tuple[dict, dict]:
+    """Scan cluster*/contact_sheet.png.
+
+    Returns
+    -------
+    cache  : {cluster_str: base64_str}
+    counts : {cluster_str: int}  — rows in the matching manifest.csv
+    """
+    import base64
+    from io import BytesIO
+    from PIL import Image
+
+    cache:  dict[str, str] = {}
+    counts: dict[str, int] = {}
+    for cluster_dir in sorted(cutouts_dir.glob("cluster*")):
+        k = cluster_dir.name.replace("cluster", "")
+        sheet_path = cluster_dir / "contact_sheet.png"
+        if sheet_path.exists():
+            try:
+                img = Image.open(sheet_path).convert("RGB")
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                cache[k] = base64.b64encode(buf.getvalue()).decode()
+            except Exception:
+                pass
+        manifest = cluster_dir / "manifest.csv"
+        if manifest.exists():
+            try:
+                with open(manifest) as f:
+                    n = sum(1 for _ in f) - 1
+            except Exception:
+                n = 0
+        else:
+            n = 0
+        counts[k] = max(n, 0)
+    print(f"  [REJ] Loaded {len(cache)} contact sheet(s) for clusters: {sorted(cache.keys())}")
     return cache, counts
 
 
@@ -284,14 +298,16 @@ def _subsample_keep_cutouts(df: pd.DataFrame, cutout_sids: set,
 
 def plot_umap_3d_plotly(
     q1_emb, q1_labels, q1_gmag,
-    df_allphz,
+    qso_emb, qso_phz, qso_gmag,
+    rej_emb, rej_cluster, rej_gmag,
     output_dir,
-    cutout_cache=None,
-    contact_sheet_cache=None,
-    sheet_counts=None,
+    cutout_cache_qso=None, df_qso=None,
+    cutout_cache_rej=None, df_rej=None,
+    qso_contact_sheet_cache=None, qso_sheet_counts=None,
+    rej_contact_sheet_cache=None, rej_sheet_counts=None,
     q1_features=None, feature_names=None,
 ):
-    """Interactive 3D: UMAP x/y + G mag as z. All phz classes shown simultaneously."""
+    """Interactive 3D: UMAP x/y + G mag as z.  Switchable QSO / Rejected overlay."""
     try:
         import plotly.graph_objects as go
     except ImportError:
@@ -315,13 +331,13 @@ def plot_umap_3d_plotly(
                 feat_ranges[fname] = [0.0, 1.0]
 
     def _feat_cd(mask):
+        """Feature customdata rows for the given mask; None if no features loaded."""
         if q1_features is None:
             return None
         return [[None if not np.isfinite(v) else round(float(v), 4) for v in row]
                 for row in q1_features[mask]]
 
     traces = []
-    b64_js: dict = {}
 
     # ── Q1 base background ────────────────────────────────────────────────────
     noise_mask = q1_labels == -1
@@ -330,7 +346,7 @@ def plot_umap_3d_plotly(
         traces.append(go.Scatter3d(
             x=q1_emb[noise_mask, 0], y=q1_emb[noise_mask, 1], z=z_noise,
             mode="markers",
-            marker=dict(size=Q1_BASE_SCATTER_MARKER_SIZE, color="#2a2a2a", opacity=0.5),
+            marker=dict(size=1, color="#2a2a2a", opacity=0.5),
             name="noise",
             customdata=_feat_cd(noise_mask),
         ))
@@ -340,24 +356,21 @@ def plot_umap_3d_plotly(
         traces.append(go.Scatter3d(
             x=q1_emb[m, 0], y=q1_emb[m, 1], z=z_k,
             mode="markers",
-            marker=dict(size=Q1_BASE_SCATTER_MARKER_SIZE,
-                        color=CLUSTER_COLORS[k % len(CLUSTER_COLORS)], opacity=0.15),
+            marker=dict(size=1, color=CLUSTER_COLORS[k % len(CLUSTER_COLORS)], opacity=0.15),
             name=f"Q1 Cluster {k}",
             customdata=_feat_cd(m),
         ))
 
-    # ── PHZ overlay traces: one legend entry + per-cluster data sub-traces ────
-    phz_arr  = df_allphz["phz"].values if df_allphz is not None else np.array([])
-    phz_gmag = df_allphz["phot_g_mean_mag"].values.astype(float) if df_allphz is not None else np.array([])
-    phz_emb  = df_allphz[["umap1", "umap2"]].values if df_allphz is not None else np.zeros((0, 2))
-    _phz_cl  = df_allphz["cluster"].values if (df_allphz is not None and "cluster" in df_allphz.columns) else None
+    # ── QSO overlay traces ────────────────────────────────────────────────────
+    b64_js: dict = {}
+    _qso_cl = df_qso["cluster"].values if (df_qso is not None and "cluster" in df_qso.columns) else None
 
-    for v, (lbl, col, sym) in PHZ_LABELS.items():
-        m_v = phz_arr == v
+    for v, (lbl, col) in QSO_LABELS.items():
+        m_v = qso_phz == v
         if not m_v.any():
             continue
 
-        mkr = dict(size=PHZ_SCATTER_MARKER_SIZE, color=col, symbol=sym,
+        mkr = dict(size=5, color=col, symbol=PHZ_PLOTLY_SYMBOLS.get(v, "circle"),
                    opacity=0.95, line=dict(width=0.3, color="rgba(255,255,255,0.25)"))
 
         # Legend-entry trace (NaN phantom, showlegend=True)
@@ -370,16 +383,16 @@ def plot_umap_3d_plotly(
             hoverinfo="skip",
         ))
 
-        # Data sub-traces split by cluster, name="phz={v} C{k}", showlegend=False
-        sub_clusters = sorted(set(int(c) for c in _phz_cl[m_v])) if _phz_cl is not None else [-1]
+        # Data sub-traces split by cluster (showlegend=False)
+        sub_clusters = sorted(set(int(c) for c in _qso_cl[m_v])) if _qso_cl is not None else [-1]
         for k in sub_clusters:
-            mk = m_v & (_phz_cl == k) if _phz_cl is not None else m_v
+            mk = m_v & (_qso_cl == k) if _qso_cl is not None else m_v
             if not mk.any():
                 continue
-            z_v = phz_gmag[mk]
+            z_q = qso_gmag[mk] if qso_gmag is not None else np.zeros(mk.sum())
             custom = []
-            if df_allphz is not None:
-                sub_df = df_allphz[mk].reset_index(drop=True)
+            if df_qso is not None:
+                sub_df = df_qso[mk].reset_index(drop=True)
                 for _, row in sub_df.iterrows():
                     sid   = str(row.get("source_id", ""))
                     ra    = float(row["ra"])
@@ -395,14 +408,13 @@ def plot_umap_3d_plotly(
                             feats.append(None)
                     custom.append([sid, round(ra, 4), round(dec, 4),
                                    round(gmag, 4), label] + feats)
-                    if cutout_cache and sid in cutout_cache:
-                        b64_js[sid] = cutout_cache[sid]
+                    if cutout_cache_qso and sid in cutout_cache_qso:
+                        b64_js[sid] = cutout_cache_qso[sid]
             else:
                 _empty = ["", 0.0, 0.0, 0.0, ""] + [None] * len(feature_names or [])
                 custom = [_empty for _ in range(mk.sum())]
-
             traces.append(go.Scatter3d(
-                x=phz_emb[mk, 0], y=phz_emb[mk, 1], z=z_v,
+                x=qso_emb[mk, 0], y=qso_emb[mk, 1], z=z_q,
                 mode="markers",
                 marker=mkr,
                 name=f"phz={v} C{k}",
@@ -411,23 +423,98 @@ def plot_umap_3d_plotly(
                 showlegend=False,
             ))
 
+    # ── REJ overlay traces ────────────────────────────────────────────────────
+    for k in cluster_ids:
+        m = rej_cluster == k
+        if not m.any():
+            continue
+        z_r = rej_gmag[m] if rej_gmag is not None else np.zeros(m.sum())
+        label = f"Rejected C{k}"
+        custom = []
+        if df_rej is not None:
+            sub = df_rej[m].reset_index(drop=True)
+            for _, row in sub.iterrows():
+                sid  = str(row.get("source_id", ""))
+                ra   = float(row["ra"])
+                dec  = float(row["dec"])
+                gmag = float(row["phot_g_mean_mag"])
+                feats: list = []
+                for fn in (feature_names or []):
+                    try:
+                        fv = float(row.get(fn, float("nan")))
+                        feats.append(None if not np.isfinite(fv) else round(fv, 4))
+                    except (ValueError, TypeError):
+                        feats.append(None)
+                custom.append([sid, round(ra, 4), round(dec, 4), round(gmag, 4), label] + feats)
+                if cutout_cache_rej and sid in cutout_cache_rej:
+                    b64_js[sid] = cutout_cache_rej[sid]
+        else:
+            _empty = ["", 0.0, 0.0, 0.0, label] + [None] * len(feature_names or [])
+            custom = [_empty for _ in range(m.sum())]
+
+        traces.append(go.Scatter3d(
+            x=rej_emb[m, 0], y=rej_emb[m, 1], z=z_r,
+            mode="markers",
+            marker=dict(
+                size=4,
+                color=CLUSTER_COLORS[k % len(CLUSTER_COLORS)],
+                symbol="diamond", opacity=0.92,
+                line=dict(width=0.3, color="rgba(255,255,255,0.2)"),
+            ),
+            name=label,
+            customdata=custom,
+            hovertemplate="RA=%{customdata[1]:.4f}<br>Dec=%{customdata[2]:+.4f}<br>G=%{customdata[3]:.2f}<extra>%{customdata[4]}</extra>",
+            showlegend=True,
+        ))
+
+    # Unassigned rejected
+    unassigned = rej_cluster == -1
+    if unassigned.any():
+        z_u = rej_gmag[unassigned] if rej_gmag is not None else np.zeros(unassigned.sum())
+        label_u = "Rejected (unassigned)"
+        custom_u = []
+        if df_rej is not None:
+            sub = df_rej[unassigned].reset_index(drop=True)
+            for _, row in sub.iterrows():
+                sid  = str(row.get("source_id", ""))
+                ra   = float(row["ra"])
+                dec  = float(row["dec"])
+                gmag = float(row["phot_g_mean_mag"])
+                feats: list = []
+                for fn in (feature_names or []):
+                    try:
+                        fv = float(row.get(fn, float("nan")))
+                        feats.append(None if not np.isfinite(fv) else round(fv, 4))
+                    except (ValueError, TypeError):
+                        feats.append(None)
+                custom_u.append([sid, round(ra, 4), round(dec, 4), round(gmag, 4), label_u] + feats)
+                if cutout_cache_rej and sid in cutout_cache_rej:
+                    b64_js[sid] = cutout_cache_rej[sid]
+        traces.append(go.Scatter3d(
+            x=rej_emb[unassigned, 0], y=rej_emb[unassigned, 1], z=z_u,
+            mode="markers",
+            marker=dict(size=3, color="#666", symbol="x", opacity=0.5,
+                        line=dict(width=1, color="#444")),
+            name=label_u,
+            customdata=custom_u,
+            hovertemplate="RA=%{customdata[1]:.4f}<br>Dec=%{customdata[2]:+.4f}<br>G=%{customdata[3]:.2f}<extra>%{customdata[4]}</extra>",
+            showlegend=True,
+        ))
+
     # ── Fixed axis ranges ──────────────────────────────────────────────────────
     _pad = 0.05
-    _all_x = np.concatenate([q1_emb[:, 0], phz_emb[:, 0]]) if len(phz_emb) > 0 else q1_emb[:, 0]
-    _all_y = np.concatenate([q1_emb[:, 1], phz_emb[:, 1]]) if len(phz_emb) > 0 else q1_emb[:, 1]
+    _all_x = np.concatenate([q1_emb[:, 0], qso_emb[:, 0], rej_emb[:, 0]])
+    _all_y = np.concatenate([q1_emb[:, 1], qso_emb[:, 1], rej_emb[:, 1]])
     _xr = [float(_all_x.min() - (np.ptp(_all_x) * _pad)),
            float(_all_x.max() + (np.ptp(_all_x) * _pad))]
     _yr = [float(_all_y.min() - (np.ptp(_all_y) * _pad)),
            float(_all_y.max() + (np.ptp(_all_y) * _pad))]
-    if q1_gmag is not None and len(phz_gmag) > 0:
+    if q1_gmag is not None and qso_gmag is not None and rej_gmag is not None:
         _gz = np.concatenate([q1_gmag[np.isfinite(q1_gmag)],
-                              phz_gmag[np.isfinite(phz_gmag)]])
+                              qso_gmag[np.isfinite(qso_gmag)],
+                              rej_gmag[np.isfinite(rej_gmag)]])
         _zpad = float(np.ptp(_gz) * _pad)
-        _zr = [float(_gz.max()) + _zpad, float(_gz.min()) - _zpad]
-    elif q1_gmag is not None:
-        _gz = q1_gmag[np.isfinite(q1_gmag)]
-        _zpad = float(np.ptp(_gz) * _pad)
-        _zr = [float(_gz.max()) + _zpad, float(_gz.min()) - _zpad]
+        _zr = [float(_gz.max()) + _zpad, float(_gz.min()) - _zpad]  # reversed: faint→bright
     else:
         _zr = None
 
@@ -461,7 +548,7 @@ def plot_umap_3d_plotly(
             bordercolor="#222",
             borderwidth=1,
             font=dict(color="#999", size=11),
-            itemsizing="trace",
+            itemsizing="constant",
             x=1, xanchor="right",
             y=0.98, yanchor="top",
         ),
@@ -474,14 +561,25 @@ def plot_umap_3d_plotly(
                                        modeBarButtonsToRemove=["toImage", "sendDataToCloud",
                                                                "editInChartStudio"]))
 
-    b64_json              = json.dumps(b64_js)
-    n_cached              = len(b64_js)
-    contact_sheets_json   = json.dumps(contact_sheet_cache or {})
-    sheet_counts_json     = json.dumps(sheet_counts or {})
-    feature_names_json    = json.dumps(feature_names or [])
-    feature_ranges_json   = json.dumps(feat_ranges)
-    cluster_colors_json   = json.dumps(CLUSTER_COLORS)
-    feature_options_html  = "\n".join(
+    # Merge cutout caches: QSO first, then REJ (REJ may overwrite if same sid, but sids are distinct)
+    merged_cutouts = {}
+    if cutout_cache_qso:
+        merged_cutouts.update(cutout_cache_qso)
+    if cutout_cache_rej:
+        merged_cutouts.update(cutout_cache_rej)
+    # Only embed the sids actually referenced in traces
+    merged_cutouts = {k: v for k, v in merged_cutouts.items() if k in b64_js}
+
+    merged_cutouts_json = json.dumps(merged_cutouts)
+    n_cached            = len(merged_cutouts)
+    qso_cs_json         = json.dumps(qso_contact_sheet_cache or {})
+    qso_counts_json     = json.dumps(qso_sheet_counts or {})
+    rej_cs_json         = json.dumps(rej_contact_sheet_cache or {})
+    rej_counts_json     = json.dumps(rej_sheet_counts or {})
+    feature_names_json  = json.dumps(feature_names or [])
+    feature_ranges_json = json.dumps(feat_ranges)
+    cluster_colors_json = json.dumps(CLUSTER_COLORS)
+    feature_options_html = "\n".join(
         f'      <option value="{fn}">{fn}</option>'
         for fn in (feature_names or [])
     )
@@ -490,7 +588,7 @@ def plot_umap_3d_plotly(
 <html>
 <head>
 <meta charset="utf-8">
-<title>Euclid Q1 — All PHZ UMAP</title>
+<title>Euclid Q1 — Overlay UMAP</title>
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
   .plotly-notifier {{ display: none !important; }}
@@ -550,7 +648,7 @@ def plot_umap_3d_plotly(
     display: flex; justify-content: flex-end; margin-bottom: 10px;
   }}
   #pin-btn {{
-    font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
     padding: 3px 8px; cursor: pointer;
     border: 1px solid #222; border-radius: 2px;
     background: transparent; color: #444;
@@ -598,7 +696,6 @@ def plot_umap_3d_plotly(
     width: 100%; border: 1px solid #181818; margin-bottom: 4px;
     display: block; border-radius: 2px;
   }}
-
   #color-mode-bar {{
     padding: 7px 16px; border-bottom: 1px solid #181818;
     display: flex; align-items: center; gap: 8px; flex-shrink: 0;
@@ -616,6 +713,23 @@ def plot_umap_3d_plotly(
   }}
   #color-mode-select:focus {{ outline: none; border-color: #333; }}
   #color-mode-select option {{ background: #111; }}
+  #overlay-bar {{
+    padding: 7px 16px; border-bottom: 1px solid #181818;
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  }}
+  #overlay-label {{
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: #666; white-space: nowrap;
+  }}
+  #overlay-select {{
+    flex: 1; background: #0e0e0e; color: #666;
+    border: 1px solid #222; border-radius: 2px;
+    font-size: 10px; padding: 3px 4px; cursor: pointer;
+    font-family: "SF Mono", "Fira Code", Menlo, Consolas, monospace;
+    max-width: 100%;
+  }}
+  #overlay-select:focus {{ outline: none; border-color: #333; }}
+  #overlay-select option {{ background: #111; }}
 </style>
 </head>
 <body>
@@ -625,6 +739,13 @@ def plot_umap_3d_plotly(
   <div id="sidebar-header">
     <div id="sidebar-eyebrow">Euclid Q1 · UMAP</div>
     <div id="sidebar-hint">hover a point · click to pin</div>
+  </div>
+  <div id="overlay-bar">
+    <span id="overlay-label">Overlay</span>
+    <select id="overlay-select">
+      <option value="qso">QSO variants</option>
+      <option value="rej">Rejected</option>
+    </select>
   </div>
   <div id="color-mode-bar">
     <span id="color-mode-label">Colour Q1</span>
@@ -654,15 +775,17 @@ def plot_umap_3d_plotly(
   </div>
 </div>
 <script>
-var cutouts = {b64_json};
-var contact_sheets = {contact_sheets_json};
-var sheet_counts = {sheet_counts_json};
-/* cluster_sheets: invert contact_sheets → {{cluster: {{phz: base64}}}} */
+var cutouts = {merged_cutouts_json};
+var qso_contact_sheets = {qso_cs_json};
+var qso_sheet_counts = {qso_counts_json};
+var rej_contact_sheets = {rej_cs_json};
+var rej_sheet_counts = {rej_counts_json};
+/* cluster_sheets: invert qso_contact_sheets → {{cluster: {{phz: base64}}}} */
 var cluster_sheets = {{}};
-Object.keys(contact_sheets).forEach(function(v) {{
-  Object.keys(contact_sheets[v]).forEach(function(k) {{
+Object.keys(qso_contact_sheets).forEach(function(v) {{
+  Object.keys(qso_contact_sheets[v]).forEach(function(k) {{
     if (!cluster_sheets[k]) cluster_sheets[k] = {{}};
-    cluster_sheets[k][v] = contact_sheets[v][k];
+    cluster_sheets[k][v] = qso_contact_sheets[v][k];
   }});
 }});
 /* feature coloring */
@@ -674,6 +797,7 @@ var COLORSCALE_RDBU = [
   [0.5,  'rgb(247,247,247)'],
   [0.75, 'rgb(214,96,77)'], [1,    'rgb(103,0,31)']
 ];
+var activeOverlay = 'qso';
 var pinned = false;
 var sheetMode = false;
 var sheetPhz = null;
@@ -714,20 +838,21 @@ function clearSheetMode() {{
 }}
 
 function _countTotal(countsObj) {{
-  return Object.values(countsObj).reduce(function(a, b) {{ return a + b; }}, 0);
+  /* sum all integer values in a {{key: int}} object */
+  return Object.values(countsObj).reduce(function(a,b){{return a+b;}}, 0);
 }}
 
 function showContactSheets(v) {{
-  /* phz isolation → show all clusters for this phz */
-  var clusters = contact_sheets[v];
+  /* QSO phz isolation → show all clusters for this phz */
+  var clusters = qso_contact_sheets[v];
   if (!clusters || Object.keys(clusters).length === 0) {{
     sheetTitle.innerHTML = 'phz=' + v + ' — no sheets cached';
     sheetImages.innerHTML = '';
     sheetView.style.display = 'block';
     return;
   }}
-  var keys = Object.keys(clusters).map(Number).sort(function(a, b) {{ return a - b; }});
-  var phzCounts = sheet_counts[v] || {{}};
+  var keys = Object.keys(clusters).map(Number).sort(function(a,b){{return a-b;}});
+  var phzCounts = qso_sheet_counts[v] || {{}};
   var total = _countTotal(phzCounts);
   var html = '';
   keys.forEach(function(k) {{
@@ -741,7 +866,7 @@ function showContactSheets(v) {{
 }}
 
 function showClusterSheets(k) {{
-  /* cluster isolation → show all phz for this cluster */
+  /* QSO cluster isolation → show all phz for this cluster */
   var phzs = cluster_sheets[String(k)];
   if (!phzs || Object.keys(phzs).length === 0) {{
     sheetTitle.innerHTML = 'Cluster ' + k + ' — no sheets cached';
@@ -749,11 +874,11 @@ function showClusterSheets(k) {{
     sheetView.style.display = 'block';
     return;
   }}
-  var keys = Object.keys(phzs).map(Number).sort(function(a, b) {{ return a - b; }});
+  var keys = Object.keys(phzs).map(Number).sort(function(a,b){{return a-b;}});
   var total = 0;
   var html = '';
   keys.forEach(function(v) {{
-    var n = (sheet_counts[String(v)] || {{}})[String(k)];
+    var n = (qso_sheet_counts[String(v)] || {{}})[String(k)];
     n = (n !== undefined) ? n : '?';
     if (typeof n === 'number') total += n;
     html += '<div class="sheet-cluster-label">phz=' + v + ' (' + n + ' sources)</div>';
@@ -764,7 +889,35 @@ function showClusterSheets(k) {{
   sheetView.style.display = 'block';
 }}
 
+function showRejContactSheet(k) {{
+  /* REJ cluster isolation → single contact sheet */
+  var b64 = rej_contact_sheets[String(k)];
+  var n = rej_sheet_counts[String(k)] !== undefined ? rej_sheet_counts[String(k)] : '?';
+  if (!b64) {{
+    sheetTitle.innerHTML = 'Cluster ' + k + ' — no sheet cached';
+    sheetImages.innerHTML = '';
+    sheetView.style.display = 'block';
+    return;
+  }}
+  sheetTitle.innerHTML = 'Cluster ' + k + ' contact sheet<br>' + n + ' sources';
+  sheetImages.innerHTML = '<img src="data:image/png;base64,' + b64 + '">';
+  sheetView.style.display = 'block';
+}}
+
 sheetClose.addEventListener('click', function() {{ clearSheetMode(); }});
+
+/* ── overlay switching ── */
+function switchOverlay(name) {{
+  activeOverlay = name;
+  isolatedCluster = null; isolatedPhz = null;
+  hiddenClusters = {{}}; hiddenPhz = {{}};
+  clearSheetMode();
+  /* heading removed; overlay selection visible in the dropdown */
+  applyVisibility();
+}}
+document.getElementById('overlay-select').addEventListener('change', function() {{
+  switchOverlay(this.value);
+}});
 
 /* ── feature coloring ── */
 function _q1BaseIndices() {{
@@ -776,16 +929,40 @@ function _q1BaseIndices() {{
 }}
 
 function _phzSubIndices() {{
-  /* matches "phz=N C..." where N may be negative (e.g. phz=-1 C0) */
   var out = [];
   plotDiv.data.forEach(function(tr, i) {{
-    if (/^phz=-?\\d+ C/.test(tr.name)) out.push(i);
+    if (/^phz=\\d+ C/.test(tr.name)) out.push(i);
   }});
   return out;
 }}
 
+function _rejIndices() {{
+  var out = [];
+  plotDiv.data.forEach(function(tr, i) {{
+    if (/^Rejected C\\d+$/.test(tr.name) || tr.name === 'Rejected (unassigned)') out.push(i);
+  }});
+  return out;
+}}
+
+/* Update PHZ tooltip: RA/Dec/G + phz label (+ feature if active). */
 function updatePhzHoverTemplate(feature) {{
   var idxs = _phzSubIndices();
+  if (!idxs.length) return;
+  var base = 'RA=%{{customdata[1]:.4f}}<br>Dec=%{{customdata[2]:+.4f}}<br>G=%{{customdata[3]:.2f}}';
+  var ext;
+  if (feature === 'clusters') {{
+    ext = '<extra>%{{customdata[4]}}</extra>';
+  }} else {{
+    var fi = featureNames.indexOf(feature);
+    if (fi < 0) {{ ext = '<extra>%{{customdata[4]}}</extra>'; }}
+    else {{ ext = '<extra>%{{customdata[4]}}<br>' + feature + ': %{{customdata[' + (5 + fi) + ']:.4g}}</extra>'; }}
+  }}
+  Plotly.restyle(plotDiv, {{'hovertemplate': base + ext}}, idxs);
+}}
+
+/* Update REJ tooltip: RA/Dec/G + cluster label (+ feature if active). */
+function updateRejHoverTemplate(feature) {{
+  var idxs = _rejIndices();
   if (!idxs.length) return;
   var base = 'RA=%{{customdata[1]:.4f}}<br>Dec=%{{customdata[2]:+.4f}}<br>G=%{{customdata[3]:.2f}}';
   var ext;
@@ -841,6 +1018,7 @@ function recolorQ1Base(feature) {{
     }}, idxs);
   }}
   updatePhzHoverTemplate(feature);
+  updateRejHoverTemplate(feature);
 }}
 
 document.getElementById('color-mode-select').addEventListener('change', function() {{
@@ -849,14 +1027,13 @@ document.getElementById('color-mode-select').addEventListener('change', function
 
 /* ── trace map & visibility ── */
 function buildTraceMap() {{
-  var baseCluster = {{}}, phzLegend = {{}}, phzSub = {{}};
+  var baseCluster = {{}}, phzLegend = {{}}, phzSub = {{}}, rejTrace = {{}};
   plotDiv.data.forEach(function(tr, i) {{
     var nm = tr.name;
-    /* phz sub-trace: "phz=N C..." — N may be negative */
-    var mSub = nm.match(/^phz=(-?\\d+) C(.+)$/);
+    var mSub = nm.match(/^phz=(\\d+) C(.+)$/);
     var mCl  = nm.match(/^Q1 Cluster (\\d+)$/);
-    /* legend entry: "phz=N ..." but NOT a sub-trace */
-    var mPhz = nm.match(/^phz=(-?\\d+)/);
+    var mPhz = nm.match(/^phz=(\\d+)/);
+    var mRej = nm.match(/^Rejected C(\\d+)$/);
     if (mSub) {{
       if (!phzSub[mSub[1]]) phzSub[mSub[1]] = {{}};
       phzSub[mSub[1]][mSub[2]] = i;
@@ -864,9 +1041,11 @@ function buildTraceMap() {{
       baseCluster[mCl[1]] = i;
     }} else if (mPhz) {{
       phzLegend[mPhz[1]] = i;
+    }} else if (mRej) {{
+      rejTrace[mRej[1]] = i;
     }}
   }});
-  return {{baseCluster: baseCluster, phzLegend: phzLegend, phzSub: phzSub}};
+  return {{baseCluster: baseCluster, phzLegend: phzLegend, phzSub: phzSub, rejTrace: rejTrace}};
 }}
 
 function applyVisibility() {{
@@ -874,53 +1053,81 @@ function applyVisibility() {{
   var n = plotDiv.data.length;
   var vis = new Array(n).fill(true);
 
-  if (isolatedCluster !== null) {{
-    /* Cluster isolated: hide other clusters; phz legend always hidden;
-       within the isolated cluster, also respect hiddenPhz. */
-    var ck = String(isolatedCluster);
-    Object.keys(map.baseCluster).forEach(function(k) {{
-      if (k !== ck) vis[map.baseCluster[k]] = 'legendonly';
+  /* First: completely hide all traces belonging to the inactive overlay */
+  if (activeOverlay === 'qso') {{
+    /* hide all REJ traces — false removes them from legend entirely */
+    Object.keys(map.rejTrace).forEach(function(k) {{ vis[map.rejTrace[k]] = false; }});
+    plotDiv.data.forEach(function(tr, i) {{
+      if (tr.name === 'Rejected (unassigned)') vis[i] = false;
     }});
-    Object.keys(map.phzLegend).forEach(function(v) {{ vis[map.phzLegend[v]] = 'legendonly'; }});
-    Object.keys(map.phzSub).forEach(function(v) {{
-      Object.keys(map.phzSub[v]).forEach(function(k) {{
-        if (k !== ck || hiddenPhz[v]) vis[map.phzSub[v][k]] = 'legendonly';
-      }});
-    }});
-
-  }} else if (isolatedPhz !== null) {{
-    /* Phz isolated: hide other phz; within isolated phz, respect hiddenClusters. */
-    var cv = String(isolatedPhz);
-    Object.keys(map.phzLegend).forEach(function(v) {{
-      if (v !== cv) vis[map.phzLegend[v]] = 'legendonly';
-    }});
-    Object.keys(map.baseCluster).forEach(function(k) {{
-      /* hide clusters that have no data for this phz, or are explicitly hidden */
-      var hasPhz = map.phzSub[cv] && map.phzSub[cv][k] !== undefined;
-      if (!hasPhz || hiddenClusters[k]) vis[map.baseCluster[k]] = 'legendonly';
-    }});
-    Object.keys(map.phzSub).forEach(function(v) {{
-      Object.keys(map.phzSub[v]).forEach(function(k) {{
-        if (v !== cv || hiddenClusters[k]) vis[map.phzSub[v][k]] = 'legendonly';
-      }});
-    }});
-
   }} else {{
-    /* Normal mode: apply hiddenClusters and hiddenPhz independently. */
-    Object.keys(hiddenClusters).forEach(function(k) {{
-      if (!hiddenClusters[k]) return;
-      if (map.baseCluster[k] !== undefined) vis[map.baseCluster[k]] = 'legendonly';
+    /* hide all QSO traces — false removes them from legend entirely */
+    Object.keys(map.phzLegend).forEach(function(v) {{ vis[map.phzLegend[v]] = false; }});
+    Object.keys(map.phzSub).forEach(function(v) {{
+      Object.keys(map.phzSub[v]).forEach(function(k) {{ vis[map.phzSub[v][k]] = false; }});
+    }});
+  }}
+
+  /* Then: apply isolation/hidden logic for the active overlay */
+  if (activeOverlay === 'qso') {{
+    if (isolatedCluster !== null) {{
+      var ck = String(isolatedCluster);
+      Object.keys(map.baseCluster).forEach(function(k) {{
+        if (k !== ck) vis[map.baseCluster[k]] = 'legendonly';
+      }});
+      Object.keys(map.phzLegend).forEach(function(v) {{ vis[map.phzLegend[v]] = 'legendonly'; }});
       Object.keys(map.phzSub).forEach(function(v) {{
-        if (map.phzSub[v][k] !== undefined) vis[map.phzSub[v][k]] = 'legendonly';
+        Object.keys(map.phzSub[v]).forEach(function(k) {{
+          if (k !== ck || hiddenPhz[v]) vis[map.phzSub[v][k]] = 'legendonly';
+        }});
       }});
-    }});
-    Object.keys(hiddenPhz).forEach(function(v) {{
-      if (!hiddenPhz[v]) return;
-      if (map.phzLegend[v] !== undefined) vis[map.phzLegend[v]] = 'legendonly';
-      Object.keys((map.phzSub[v] || {{}})).forEach(function(k) {{
-        vis[map.phzSub[v][k]] = 'legendonly';
+    }} else if (isolatedPhz !== null) {{
+      var cv = String(isolatedPhz);
+      Object.keys(map.phzLegend).forEach(function(v) {{
+        if (v !== cv) vis[map.phzLegend[v]] = 'legendonly';
       }});
-    }});
+      Object.keys(map.baseCluster).forEach(function(k) {{
+        var hasPhz = map.phzSub[cv] && map.phzSub[cv][k] !== undefined;
+        if (!hasPhz || hiddenClusters[k]) vis[map.baseCluster[k]] = 'legendonly';
+      }});
+      Object.keys(map.phzSub).forEach(function(v) {{
+        Object.keys(map.phzSub[v]).forEach(function(k) {{
+          if (v !== cv || hiddenClusters[k]) vis[map.phzSub[v][k]] = 'legendonly';
+        }});
+      }});
+    }} else {{
+      Object.keys(hiddenClusters).forEach(function(k) {{
+        if (!hiddenClusters[k]) return;
+        if (map.baseCluster[k] !== undefined) vis[map.baseCluster[k]] = 'legendonly';
+        Object.keys(map.phzSub).forEach(function(v) {{
+          if (map.phzSub[v][k] !== undefined) vis[map.phzSub[v][k]] = 'legendonly';
+        }});
+      }});
+      Object.keys(hiddenPhz).forEach(function(v) {{
+        if (!hiddenPhz[v]) return;
+        if (map.phzLegend[v] !== undefined) vis[map.phzLegend[v]] = 'legendonly';
+        Object.keys((map.phzSub[v] || {{}})).forEach(function(k) {{
+          vis[map.phzSub[v][k]] = 'legendonly';
+        }});
+      }});
+    }}
+  }} else {{
+    /* activeOverlay === 'rej' */
+    if (isolatedCluster !== null) {{
+      var ck = String(isolatedCluster);
+      Object.keys(map.baseCluster).forEach(function(k) {{
+        if (k !== ck) vis[map.baseCluster[k]] = 'legendonly';
+      }});
+      Object.keys(map.rejTrace).forEach(function(k) {{
+        if (k !== ck) vis[map.rejTrace[k]] = 'legendonly';
+      }});
+    }} else {{
+      Object.keys(hiddenClusters).forEach(function(k) {{
+        if (!hiddenClusters[k]) return;
+        if (map.baseCluster[k] !== undefined) vis[map.baseCluster[k]] = 'legendonly';
+        if (map.rejTrace[k]    !== undefined) vis[map.rejTrace[k]]    = 'legendonly';
+      }});
+    }}
   }}
 
   Plotly.restyle(plotDiv, {{visible: vis}});
@@ -936,43 +1143,52 @@ function restoreAll() {{
    Cmd+click:    isolate (or un-isolate if already isolated) */
 plotDiv.on('plotly_legendclick', function(data) {{
   var traceName = data.data[data.expandedIndex].name;
-  /* ignore phz sub-traces */
-  if (/^phz=-?\\d+ C/.test(traceName)) return false;
-  var mCl  = traceName.match(/^Q1 Cluster (\\d+)$/);
-  var mPhz = traceName.match(/^phz=(-?\\d+)/);
   var cmd = data.event && (data.event.metaKey || data.event.ctrlKey);
 
-  if (cmd) {{
-    /* Cmd+click → isolate / un-isolate */
-    hiddenClusters = {{}}; hiddenPhz = {{}};
-    if (mCl) {{
-      var k = mCl[1];
-      if (isolatedCluster === k) {{ isolatedCluster = null; clearSheetMode(); }}
-      else {{ isolatedCluster = k; isolatedPhz = null; sheetMode = true; sheetCluster = k; showClusterSheets(Number(k)); }}
-    }} else if (mPhz) {{
-      var v = mPhz[1];
-      if (isolatedPhz === v) {{ isolatedPhz = null; clearSheetMode(); }}
-      else {{ isolatedPhz = v; isolatedCluster = null; sheetMode = true; sheetPhz = v; showContactSheets(v); }}
+  if (activeOverlay === 'qso') {{
+    if (/^phz=\\d+ C/.test(traceName)) return false;  /* ignore sub-traces */
+    var mCl  = traceName.match(/^Q1 Cluster (\\d+)$/);
+    var mPhz = traceName.match(/^phz=(\\d+)/);
+    if (!mCl && !mPhz) return false;
+    if (cmd) {{
+      hiddenClusters = {{}}; hiddenPhz = {{}};
+      if (mCl) {{
+        var k = mCl[1];
+        if (isolatedCluster === k) {{ isolatedCluster = null; clearSheetMode(); }}
+        else {{ isolatedCluster = k; isolatedPhz = null; sheetMode = true; sheetCluster = k; showClusterSheets(Number(k)); }}
+      }} else if (mPhz) {{
+        var v = mPhz[1];
+        if (isolatedPhz === v) {{ isolatedPhz = null; clearSheetMode(); }}
+        else {{ isolatedPhz = v; isolatedCluster = null; sheetMode = true; sheetPhz = v; showContactSheets(v); }}
+      }}
+    }} else {{
+      if (mCl) {{
+        var k = mCl[1];
+        if (isolatedPhz !== null) {{
+          hiddenClusters[k] = !hiddenClusters[k];
+        }} else {{
+          isolatedCluster = null;
+          hiddenClusters[k] = !hiddenClusters[k];
+        }}
+      }} else if (mPhz) {{
+        var v = mPhz[1];
+        isolatedPhz = null;
+        hiddenPhz[v] = !hiddenPhz[v];
+      }}
     }}
   }} else {{
-    /* Plain click → toggle.
-       If a cluster is isolated and user clicks a phz entry, keep the isolation
-       and just toggle hiddenPhz within it (and vice versa). Only clear the
-       isolation when clicking the same type as what is isolated. */
-    if (mCl) {{
-      var k = mCl[1];
-      if (isolatedPhz !== null) {{
-        /* Within phz isolation: toggle this cluster's base + sub-trace */
-        hiddenClusters[k] = !hiddenClusters[k];
-      }} else {{
-        isolatedCluster = null; /* exit cluster isolation — now in normal toggle mode */
-        hiddenClusters[k] = !hiddenClusters[k];
-      }}
-    }} else if (mPhz) {{
-      var v = mPhz[1];
-      isolatedPhz = null;    /* clicking phz clears phz isolation */
-      /* keep isolatedCluster — user is filtering phz inside an isolated cluster */
-      hiddenPhz[v] = !hiddenPhz[v];
+    /* activeOverlay === 'rej' */
+    var mCl  = traceName.match(/^Q1 Cluster (\\d+)$/);
+    var mRej = traceName.match(/^Rejected C(\\d+)$/);
+    if (!mCl && !mRej) return false;  /* noise / unassigned — ignore */
+    var k = mCl ? mCl[1] : mRej[1];
+    if (cmd) {{
+      hiddenClusters = {{}};
+      if (isolatedCluster === k) {{ isolatedCluster = null; clearSheetMode(); }}
+      else {{ isolatedCluster = k; sheetMode = true; sheetCluster = k; showRejContactSheet(Number(k)); }}
+    }} else {{
+      isolatedCluster = null;
+      hiddenClusters[k] = !hiddenClusters[k];
     }}
   }}
 
@@ -981,7 +1197,7 @@ plotDiv.on('plotly_legendclick', function(data) {{
 }});
 
 plotDiv.on('plotly_legenddoubleclick', function(data) {{
-  return false;
+  return false;  /* suppress Plotly default; all logic is in legendclick */
 }});
 
 document.addEventListener('keydown', function(e) {{
@@ -1022,6 +1238,10 @@ function showPoint(sid, info) {{
 
 function _selectedFeature() {{ return document.getElementById('color-mode-select').value; }}
 
+/* Build sidebar content from a hovered/clicked Plotly point.
+   Q1 base traces   → show cluster name + selected feature value (no cutout).
+   PHZ sub-traces   → show phz label + RA/Dec/G + selected feature value + cutout.
+   REJ traces       → show cluster label + RA/Dec/G + selected feature value + cutout. */
 function showPointFromPt(pt) {{
   var nm = pt.data.name;
   var isQ1 = /^Q1 Cluster \\d+$/.test(nm) || nm === 'noise';
@@ -1116,11 +1336,26 @@ document.addEventListener('mouseup', function() {{
   document.body.style.userSelect = '';
 }});
 
+/* Initialise: hide REJ traces on load (default overlay is QSO) */
+applyVisibility();
+
+/* Permanently suppress Rejected C* legend entries — Q1 Cluster entries already
+   show the same cluster colours, so the Rejected labels are redundant. */
+(function() {{
+  var rejIdxs = [];
+  plotDiv.data.forEach(function(tr, i) {{
+    if (/^Rejected C\\d+$/.test(tr.name) || tr.name === 'Rejected (unassigned)') {{
+      rejIdxs.push(i);
+    }}
+  }});
+  if (rejIdxs.length) Plotly.restyle(plotDiv, {{showlegend: false}}, rejIdxs);
+}})();
+
 </script>
 </body>
 </html>"""
 
-    out = output_dir / "q1_allphz_3d.html"
+    out = output_dir / "q1_overlay_3d.html"
     out.write_text(html, encoding="utf-8")
     print(f"  -> {out}  ({n_cached} cutouts embedded)")
 
@@ -1129,15 +1364,15 @@ document.addEventListener('mouseup', function() {{
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Interactive 3D UMAP HTML for all phz classification categories"
+        description="Combined interactive 3D UMAP with switchable QSO / Rejected overlay"
     )
     parser.add_argument("--3d", dest="make_3d", action="store_true",
-                        help="Generate the 3D HTML from saved CSV (no DB query). "
+                        help="Generate the 3D HTML from saved CSVs (no DB query). "
                              "Run default mode first to save projected data.")
     parser.add_argument("--max-points", type=int, default=500,
-                        help="Max points per phz class (applied independently). "
+                        help="Max points per overlay (applied independently to QSO and REJ). "
                              "Sources with cached cutouts are always kept; remainder is "
-                             "random-sampled. Default: 500.")
+                             "random-sampled. Default: no limit.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for subsampling (default: 42).")
     parser.add_argument("--dpi", type=int, default=150,
@@ -1171,132 +1406,151 @@ def main() -> int:
     print(f"  Cluster sizes: " +
           "  ".join(f"C{k}={(q1_labels==k).sum():,}" for k in cluster_ids))
 
-    allphz_path = ARRAYS_DIR / "q1_allphz_projected.csv"
-
-    # ── --3d mode: load saved CSV, generate HTML ───────────────────────────────
+    # ── --3d mode: load saved CSVs, generate HTML ─────────────────────────────
     if args.make_3d:
-        if not allphz_path.exists():
-            print(f"ERROR: {allphz_path} not found. Run without --3d first.")
-            return 1
+        qso_path = ARRAYS_DIR / "q1_qso_projected.csv"
+        rej_path = ARRAYS_DIR / "q1_rej_projected.csv"
+        for p in (qso_path, rej_path):
+            if not p.exists():
+                print(f"ERROR: {p} not found. Run without --3d first.")
+                return 1
 
-        print("\n[3] Loading saved allphz projected data...")
-        df_allphz = pd.read_csv(allphz_path)
-        df_allphz["phz"] = df_allphz["phz"].astype(int)
-        if "cluster" in df_allphz.columns:
-            df_allphz["cluster"] = df_allphz["cluster"].astype(int)
-        print(f"  {len(df_allphz):,} sources loaded")
+        print("\n[3] Loading saved QSO and Rejected data...")
+        df_qso  = pd.read_csv(qso_path)
+        df_rej  = pd.read_csv(rej_path)
+        qso_emb = df_qso[["umap1", "umap2"]].values
+        rej_emb = df_rej[["umap1", "umap2"]].values
+        print(f"  {len(df_qso):,} QSO sources loaded")
+        print(f"  {len(df_rej):,} Rejected sources loaded")
 
-        # Assign clusters if not in CSV
-        if "cluster" not in df_allphz.columns:
-            print("\n  Assigning cluster labels (not found in CSV)...")
-            src_emb = df_allphz[["umap1", "umap2"]].values
-            df_allphz["cluster"] = assign_to_clusters(src_emb, q1_emb, q1_labels)
-
-        print("\n[4] Loading cached cutout thumbnails...")
-        cutout_cache = load_cutout_cache(CUTOUTS_DIR)
-
-        print("\n[4b] Loading contact sheets...")
-        contact_sheet_cache, sheet_counts = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
+        print("\n[4] Loading cached cutout thumbnails and contact sheets...")
+        cutout_cache_qso = load_cutout_cache_qso(CUTOUTS_DIR_QSO)
+        qso_cs, qso_counts = load_contact_sheet_cache_qso(CUTOUTS_DIR_QSO)
+        cutout_cache_rej = load_cutout_cache_rej(CUTOUTS_DIR_REJ)
+        rej_cs, rej_counts = load_contact_sheet_cache_rej(CUTOUTS_DIR_REJ)
 
         if args.max_points is not None:
-            print(f"\n  Applying --max-points {args.max_points} per phz class...")
-            parts = []
-            cutout_sids = set(cutout_cache.keys())
-            for v in PHZ_LABELS:
-                sub = df_allphz[df_allphz["phz"] == v]
-                if len(sub) == 0:
-                    continue
-                if len(sub) > args.max_points:
-                    print(f"  phz={v}:")
-                    sub = _subsample_keep_cutouts(sub, cutout_sids, args.max_points, args.seed)
-                parts.append(sub)
-            df_allphz = pd.concat(parts, ignore_index=True) if parts else df_allphz
+            if len(df_qso) > args.max_points:
+                print(f"\n  Applying --max-points {args.max_points} to QSO...")
+                df_qso  = _subsample_keep_cutouts(
+                    df_qso, set(cutout_cache_qso.keys()), args.max_points, args.seed)
+                qso_emb = df_qso[["umap1", "umap2"]].values
+            if len(df_rej) > args.max_points:
+                print(f"\n  Applying --max-points {args.max_points} to REJ...")
+                df_rej  = _subsample_keep_cutouts(
+                    df_rej, set(cutout_cache_rej.keys()), args.max_points, args.seed)
+                rej_emb = df_rej[["umap1", "umap2"]].values
 
-        print("\n[5] Generating 3D HTML...")
+        print("\n[5] Generating combined 3D HTML...")
+        qso_gmag = df_qso["phot_g_mean_mag"].values.astype(float)
+        rej_gmag = df_rej["phot_g_mean_mag"].values.astype(float)
         plot_umap_3d_plotly(
             q1_emb, q1_labels, q1_gmag,
-            df_allphz,
+            qso_emb, df_qso["phz"].values, qso_gmag,
+            rej_emb, df_rej["cluster"].values, rej_gmag,
             OUTPUT_DIR,
-            cutout_cache=cutout_cache,
-            contact_sheet_cache=contact_sheet_cache,
-            sheet_counts=sheet_counts,
+            cutout_cache_qso=cutout_cache_qso, df_qso=df_qso,
+            cutout_cache_rej=cutout_cache_rej, df_rej=df_rej,
+            qso_contact_sheet_cache=qso_cs, qso_sheet_counts=qso_counts,
+            rej_contact_sheet_cache=rej_cs, rej_sheet_counts=rej_counts,
             q1_features=q1_features,
             feature_names=SELECTED_GAIA_PARAMETERS,
         )
         return 0
 
-    # ── Default mode: query DB + project + save CSV + generate HTML ────────────
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER environment variable not set.")
-        return 1
-
+    # ── Default mode: load npz + project + save CSVs ───────────────────────────
     q1_mean = q1["mean"]
     q1_std  = q1["std"]
     reducer = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
-
-    print("\n[3] Querying all phz sources from DB...")
-    df_allphz = query_all_phz(username)
-
-    print("\n[4] Projecting into UMAP space...")
-    X = df_allphz[SELECTED_GAIA_PARAMETERS].values.astype(float)
     std_safe = np.where(q1_std > 0, q1_std, 1.0)
-    X_scaled = (X - q1_mean) / std_safe
-    X_scaled = np.where(np.isfinite(X_scaled), X_scaled, 0.0)
-    emb = reducer.transform(X_scaled)
-    print(f"  Projected {len(emb):,} sources")
 
-    df_allphz = df_allphz.copy()
-    df_allphz["umap1"] = emb[:, 0]
-    df_allphz["umap2"] = emb[:, 1]
+    print("\n[3] Loading QSO variants and Rejected sources from npz...")
+    df_qso = load_qso_from_npz()
+    df_rej = load_rejected_from_npz()
 
-    print("\n[5] Assigning cluster labels...")
-    df_allphz["cluster"] = assign_to_clusters(emb, q1_emb, q1_labels)
+    print("\n[4] Projecting QSO sources into UMAP space...")
+    X_qso = df_qso[SELECTED_GAIA_PARAMETERS].values.astype(float)
+    X_qso_scaled = np.where(np.isfinite((X_qso - q1_mean) / std_safe),
+                            (X_qso - q1_mean) / std_safe, 0.0)
+    qso_emb = reducer.transform(X_qso_scaled)
+    print(f"  Projected {len(qso_emb):,} QSO sources")
+    qso_cluster = assign_to_clusters(qso_emb, q1_emb, q1_labels)
+    df_qso = df_qso.copy()
+    df_qso["umap1"]   = qso_emb[:, 0]
+    df_qso["umap2"]   = qso_emb[:, 1]
+    df_qso["cluster"] = qso_cluster
+
+    print("\n  QSO cluster assignment:")
     for k in cluster_ids:
-        n = (df_allphz["cluster"] == k).sum()
+        n = (qso_cluster == k).sum()
         if n:
-            print(f"  C{k}: {n:,}")
-    n_noise = (df_allphz["cluster"] == -1).sum()
+            print(f"    C{k}: {n:,}")
+    n_noise = (qso_cluster == -1).sum()
     if n_noise:
-        print(f"  noise: {n_noise:,}")
+        print(f"    unassigned: {n_noise:,}")
 
-    df_allphz.to_csv(allphz_path, index=False)
-    print(f"\n  Allphz projected data saved → {allphz_path}")
+    qso_path = ARRAYS_DIR / "q1_qso_projected.csv"
+    df_qso.to_csv(qso_path, index=False)
+    print(f"\n  QSO projected data saved → {qso_path}")
 
-    print("\n[6] Loading cached cutout thumbnails...")
-    cutout_cache = load_cutout_cache(CUTOUTS_DIR)
+    print("\n[5] Projecting Rejected sources into UMAP space...")
+    X_rej = df_rej[SELECTED_GAIA_PARAMETERS].values.astype(float)
+    X_rej_scaled = np.where(np.isfinite((X_rej - q1_mean) / std_safe),
+                            (X_rej - q1_mean) / std_safe, 0.0)
+    rej_emb = reducer.transform(X_rej_scaled)
+    print(f"  Projected {len(rej_emb):,} Rejected sources")
+    rej_cluster = assign_to_clusters(rej_emb, q1_emb, q1_labels)
+    df_rej = df_rej.copy()
+    df_rej["umap1"]   = rej_emb[:, 0]
+    df_rej["umap2"]   = rej_emb[:, 1]
+    df_rej["cluster"] = rej_cluster
 
-    print("\n[6b] Loading contact sheets...")
-    contact_sheet_cache, sheet_counts = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
+    print("\n  Rejected cluster assignment:")
+    for k in cluster_ids:
+        n = (rej_cluster == k).sum()
+        if n:
+            print(f"    C{k}: {n:,}")
+    n_noise = (rej_cluster == -1).sum()
+    if n_noise:
+        print(f"    unassigned: {n_noise:,}")
+
+    rej_path = ARRAYS_DIR / "q1_rej_projected.csv"
+    df_rej.to_csv(rej_path, index=False)
+    print(f"\n  Rejected projected data saved → {rej_path}")
+
+    print("\n[6] Loading cached cutout thumbnails and contact sheets...")
+    cutout_cache_qso = load_cutout_cache_qso(CUTOUTS_DIR_QSO)
+    qso_cs, qso_counts = load_contact_sheet_cache_qso(CUTOUTS_DIR_QSO)
+    cutout_cache_rej = load_cutout_cache_rej(CUTOUTS_DIR_REJ)
+    rej_cs, rej_counts = load_contact_sheet_cache_rej(CUTOUTS_DIR_REJ)
 
     if args.max_points is not None:
-        print(f"\n  Applying --max-points {args.max_points} per phz class...")
-        parts = []
-        cutout_sids = set(cutout_cache.keys())
-        for v in PHZ_LABELS:
-            sub = df_allphz[df_allphz["phz"] == v]
-            if len(sub) == 0:
-                continue
-            if len(sub) > args.max_points:
-                print(f"  phz={v}:")
-                sub = _subsample_keep_cutouts(sub, cutout_sids, args.max_points, args.seed)
-            parts.append(sub)
-        df_allphz = pd.concat(parts, ignore_index=True) if parts else df_allphz
+        if len(df_qso) > args.max_points:
+            print(f"\n  Applying --max-points {args.max_points} to QSO...")
+            df_qso  = _subsample_keep_cutouts(
+                df_qso, set(cutout_cache_qso.keys()), args.max_points, args.seed)
+            qso_emb = df_qso[["umap1", "umap2"]].values
+        if len(df_rej) > args.max_points:
+            print(f"\n  Applying --max-points {args.max_points} to REJ...")
+            df_rej  = _subsample_keep_cutouts(
+                df_rej, set(cutout_cache_rej.keys()), args.max_points, args.seed)
+            rej_emb = df_rej[["umap1", "umap2"]].values
 
-    print("\n[7] Generating interactive 3D HTML...")
+    print("\n[7] Generating combined 3D HTML...")
+    qso_gmag = df_qso["phot_g_mean_mag"].values.astype(float)
+    rej_gmag = df_rej["phot_g_mean_mag"].values.astype(float)
     plot_umap_3d_plotly(
         q1_emb, q1_labels, q1_gmag,
-        df_allphz,
+        qso_emb, df_qso["phz"].values, qso_gmag,
+        rej_emb, df_rej["cluster"].values, rej_gmag,
         OUTPUT_DIR,
-        cutout_cache=cutout_cache,
-        contact_sheet_cache=contact_sheet_cache,
-        sheet_counts=sheet_counts,
+        cutout_cache_qso=cutout_cache_qso, df_qso=df_qso,
+        cutout_cache_rej=cutout_cache_rej, df_rej=df_rej,
+        qso_contact_sheet_cache=qso_cs, qso_sheet_counts=qso_counts,
+        rej_contact_sheet_cache=rej_cs, rej_sheet_counts=rej_counts,
         q1_features=q1_features,
         feature_names=SELECTED_GAIA_PARAMETERS,
     )
-
-    print("\n" + "=" * 60)
-    print(f"Done. Output in: {OUTPUT_DIR}")
     return 0
 
 

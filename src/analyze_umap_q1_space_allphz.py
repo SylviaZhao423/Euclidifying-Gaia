@@ -18,12 +18,11 @@ Writes:
   output/umap/q1_individual/allphz_in_q1_space.png
 
 Usage:
-  PGUSER=siwei_zhao_2025 python src/analyze_umap_allphz_in_q1_space.py
+  python src/analyze_umap_allphz_in_q1_space.py
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -41,8 +40,6 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
 OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
 
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
 MAG_CUT   = 17
 MAX_PER_CLASS = 5_000
 
@@ -99,47 +96,17 @@ def _slice_cmap(cmap, minval: float = 0.0, maxval: float = 1.0, n: int = 256):
     )
 
 
-def query_all_phz(username: str) -> pd.DataFrame:
-    import psycopg2
-    gaia_cols = ", ".join([f"g_{col} AS {col}" for col in SELECTED_GAIA_PARAMETERS])
-    query = f"""
-        SELECT {gaia_cols}, p_phz_classification
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
-        WHERE g_phot_g_mean_mag >= {MAG_CUT}
-          AND p_phz_classification IS NOT NULL
-        ORDER BY g_source_id
-    """
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-
-    df[SELECTED_GAIA_PARAMETERS] = df[SELECTED_GAIA_PARAMETERS].replace("NOT_AVAILABLE", np.nan)
-    for col in SELECTED_GAIA_PARAMETERS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["phz"] = df["p_phz_classification"].astype(int)
+def load_allphz_from_npz() -> pd.DataFrame:
+    """Load all-PHZ data from q1_allphz.npz (no DB needed)."""
+    data = np.load(ARRAYS_DIR / "q1_allphz.npz", allow_pickle=True)
+    df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
+    df["phz"] = data["phz"].astype(int)
     return df
 
 
-def load_phz_gal_prob(source_ids: np.ndarray, username: str) -> np.ndarray:
-    """Fetch p_phz_gal_prob from DB for the given source_ids."""
-    import psycopg2
-    ids = [int(s) for s in source_ids]
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT g_source_id, p_phz_gal_prob
-                FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
-                WHERE g_source_id = ANY(%s)
-                """,
-                (ids,),
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    lookup = {str(r[0]): r[1] for r in rows}
-    return np.array([lookup.get(str(s), np.nan) for s in source_ids], dtype=float)
+def load_phz_gal_prob_from_npz(npz_data) -> np.ndarray:
+    """Load p_phz_gal_prob from Q1 npz file (no DB needed)."""
+    return npz_data["phz_gal_prob"].astype(float)
 
 
 def _project(df_sub, q1_mean, q1_std, reducer, max_n=MAX_PER_CLASS):
@@ -155,11 +122,6 @@ def _project(df_sub, q1_mean, q1_std, reducer, max_n=MAX_PER_CLASS):
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER not set.")
-        return 1
-
     # ── Load Q1 normalisation + reducer ──────────────────────────────────────
     print("Loading Q1 reducer and normalisation stats...")
     q1 = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
@@ -173,15 +135,15 @@ def main() -> int:
     reducer = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
     print(f"  Q1: {len(q1_y):,} sources")
 
-    # ── Fetch PHZ P(galaxy) for Q1 sources ───────────────────────────────────
-    print("\nFetching p_phz_gal_prob for Q1 sources...")
-    phz_gal_prob = load_phz_gal_prob(source_ids, username)
+    # ── Load PHZ P(galaxy) from npz ────────────────────────────────────────────
+    print("\nLoading p_phz_gal_prob from npz...")
+    phz_gal_prob = load_phz_gal_prob_from_npz(q1)
     n_miss = np.isnan(phz_gal_prob).sum()
-    print(f"  Retrieved {(~np.isnan(phz_gal_prob)).sum():,} values  ({n_miss:,} NaN)")
+    print(f"  Loaded {(~np.isnan(phz_gal_prob)).sum():,} values  ({n_miss:,} NaN)")
 
-    # ── Query all PHZ classes from DB ─────────────────────────────────────────
-    print("\nQuerying all PHZ classes from DB...")
-    df = query_all_phz(username)
+    # ── Load all PHZ classes from npz ────────────────────────────────────────
+    print("\nLoading all PHZ classes from npz...")
+    df = load_allphz_from_npz()
     print(f"  Total rows: {len(df):,}")
     all_vals = sorted(df["phz"].unique())
     for v in all_vals:

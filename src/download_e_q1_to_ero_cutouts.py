@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """
-Like download_q1_to_ero_cutouts.py but with log stretch instead of ZScale linear
-stretch — better reveals nucleus/core structure.
+Download Euclid ERO VIS cutouts for ERO×Q1 agreement/disagreement groups,
+stratified by Q1 UMAP cluster.
 
-Crosshair coloured by Gaia corrected BP/RP excess (c_star, coolwarm colourmap),
-same encoding as the original script.  c_star is already in the source CSVs so
-no DB lookup is needed.
+Cutouts use log stretch with crosshair coloured by Gaia corrected BP/RP
+excess (c_star, coolwarm colourmap: blue=star, red=galaxy).
+
+Each ERO source is projected into Q1 UMAP space via the fitted reducer,
+then assigned to the nearest Q1 cluster.  Per-cluster contact sheets and
+manifests are saved under {group}/cluster{k}/.
 
 Reads:
   output/q1_to_ero/disagree_ero_gal_q1_star.csv
   output/q1_to_ero/disagree_ero_star_q1_gal.csv
   output/q1_to_ero/agree_both_galaxy.csv
   output/q1_to_ero/agree_both_star.csv
+  output/umap/arrays/ero_indiv.npz              (ERO Gaia features + source IDs)
+  output/umap/arrays/q1_indiv.npz               (Q1 UMAP embedding + normalisation)
+  output/umap/arrays/q1_indiv_reducer.joblib    (fitted UMAP reducer)
+  output/umap/arrays/q1_cluster_labels.npy      (Q1 cluster labels)
+  output/euclid_ero_fits_cache/*.fits
 
 Writes:
-  output/euclid_cutouts/ero_cutouts/q1_to_ero_log/{group}/contact_sheet_{group}.png
-  output/euclid_cutouts/ero_cutouts/q1_to_ero_log/{group}/manifest.csv
+  output/euclid_cutouts/ero_cutouts/q1_to_ero/{group}/manifest.csv
+  output/euclid_cutouts/ero_cutouts/q1_to_ero/{group}/cluster{k}/contact_sheet.png
+  output/euclid_cutouts/ero_cutouts/q1_to_ero/{group}/cluster{k}/manifest.csv
+  output/euclid_cutouts/ero_cutouts/q1_to_ero/{group}/cluster{k}/cutouts/cutout_NNNN.png
 
 Usage:
-  PGUSER=siwei_zhao_2025 python src/download_q1_to_ero_cutouts_log.py
-  python src/download_q1_to_ero_cutouts_log.py --size-arcsec 30 --limit 20
+  python src/download_e_q1_to_ero_cutouts.py
+  python src/download_e_q1_to_ero_cutouts.py --per-cell 20
+  python src/download_e_q1_to_ero_cutouts.py --size-arcsec 6
 """
 
 from __future__ import annotations
@@ -33,10 +44,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-INPUT_DIR    = PROJECT_ROOT / "output" / "q1_to_ero"
-OUTPUT_DIR   = PROJECT_ROOT / "output" / "euclid_cutouts" / "ero_cutouts" / "q1_to_ero"
-FITS_CACHE   = PROJECT_ROOT / "output" / "euclid_ero_fits_cache"
+PROJECT_ROOT   = Path(__file__).resolve().parents[1]
+INPUT_DIR      = PROJECT_ROOT / "output" / "q1_to_ero"
+OUTPUT_DIR     = PROJECT_ROOT / "output" / "euclid_cutouts" / "ero_cutouts" / "q1_to_ero"
+FITS_CACHE     = PROJECT_ROOT / "output" / "euclid_ero_fits_cache"
+ARRAYS_DIR     = PROJECT_ROOT / "output" / "umap" / "arrays"
+Q1_INDIV_NPZ   = ARRAYS_DIR / "q1_indiv.npz"
+Q1_LABELS_NPY  = ARRAYS_DIR / "q1_cluster_labels.npy"
 
 CSV_GROUPS = {
     "disagree_ero_gal_q1_star": INPUT_DIR / "disagree_ero_gal_q1_star.csv",
@@ -242,9 +256,62 @@ def source_basename(row: pd.Series) -> str:
     return f"{field}_ra{ra}_dec{dec}"
 
 
+# ── Cluster assignment ────────────────────────────────────────────────────────
+
+def build_cluster_map() -> dict[str, int]:
+    """Build {source_id_str → cluster_int} by projecting ERO sources into Q1 UMAP space.
+
+    Loads ERO Gaia features from ero_indiv.npz, projects via the Q1 reducer,
+    then assigns each source to the nearest Q1 cluster (nearest-neighbour in
+    UMAP space among points with valid cluster labels ≥ 0).
+    """
+    import joblib
+    from sklearn.neighbors import NearestNeighbors
+
+    ero_npz_path = ARRAYS_DIR / "ero_indiv.npz"
+    reducer_path = ARRAYS_DIR / "q1_indiv_reducer.joblib"
+    for p in [ero_npz_path, Q1_INDIV_NPZ, Q1_LABELS_NPY, reducer_path]:
+        if not p.exists():
+            print(f"  WARNING: {p.name} not found — cluster info unavailable.")
+            return {}
+
+    ero_data  = np.load(ero_npz_path, allow_pickle=True)
+    q1_data   = np.load(Q1_INDIV_NPZ, allow_pickle=True)
+    q1_emb    = q1_data["embedding"]
+    q1_mean   = q1_data["mean"]
+    q1_std    = q1_data["std"]
+    q1_labels = np.load(Q1_LABELS_NPY)
+    reducer   = joblib.load(reducer_path)
+
+    valid_mask = q1_labels >= 0
+    if valid_mask.sum() == 0:
+        print("  WARNING: No valid Q1 cluster points — cluster info unavailable.")
+        return {}
+
+    # Project ERO features into Q1 UMAP space
+    X_ero = ero_data["X_raw"].astype(float)
+    std_safe = np.where(q1_std > 0, q1_std, 1.0)
+    X_scaled = (X_ero - q1_mean) / std_safe
+    X_scaled = np.where(np.isfinite(X_scaled), X_scaled, 0.0)
+    ero_emb = reducer.transform(X_scaled)
+
+    # Assign to nearest valid Q1 cluster
+    nn = NearestNeighbors(n_neighbors=1, algorithm="auto")
+    nn.fit(q1_emb[valid_mask])
+    _, idx = nn.kneighbors(ero_emb)
+    idx = idx.ravel()
+    clusters = q1_labels[np.where(valid_mask)[0][idx]].astype(int)
+
+    result = dict(zip(ero_data["source_ids"].astype(str), clusters))
+    unique_clusters = sorted(set(clusters))
+    print(f"  Cluster assignments: {len(result):,} sources → clusters {unique_clusters}")
+    return result
+
+
 # ── Per-group processing ──────────────────────────────────────────────────────
 
-def process_group(name: str, csv_path: Path, args: argparse.Namespace) -> None:
+def process_group(name: str, csv_path: Path, args: argparse.Namespace,
+                  cluster_map: dict[str, int] | None = None) -> None:
     if not csv_path.exists():
         raise FileNotFoundError(f"Missing input CSV: {csv_path}")
 
@@ -255,69 +322,107 @@ def process_group(name: str, csv_path: Path, args: argparse.Namespace) -> None:
     else:
         df = df.sort_values(["xgb_q1_prob", "class_star"], ascending=[False, False])
     df = df.reset_index(drop=True)
-    if args.limit is not None:
-        df = df.head(args.limit).copy()
 
     group_dir = OUTPUT_DIR / name
     group_dir.mkdir(parents=True, exist_ok=True)
 
+    # Assign cluster to each source
+    if cluster_map:
+        df["cluster"] = df["g_source_id"].astype(str).map(cluster_map).fillna(-1).astype(int)
+    else:
+        df["cluster"] = -1
+
+    # Load FITS for all needed fields upfront
     needed_fields = df["field"].dropna().unique().tolist()
-    print(f"\n[{name}]  {len(df):,} sources across fields: {needed_fields}")
+    print(f"\n[{name}]  {len(df):,} total sources, fields: {needed_fields}")
+    fits_cache: dict[str, Path | None] = {f: get_cached_fits(f) for f in needed_fields}
 
-    fits_cache: dict[str, Path | None] = {}
-    for field in needed_fields:
-        fits_cache[field] = get_cached_fits(field)
+    all_records: list[dict] = []
 
-    records     = []
-    cell_images = []
-    n = len(df)
+    cluster_ids = sorted(df["cluster"].unique())
 
-    for idx, row in df.iterrows():
-        field  = row.get("field", "")
-        base   = source_basename(row)
-        status, message = "ok", ""
+    for k in cluster_ids:
+        cl_label = f"cluster{k}" if k >= 0 else "noise"
+        cl_df    = df[df["cluster"] == k].copy().reset_index(drop=True)
 
-        fits_path = fits_cache.get(field)
-        if fits_path is None:
-            status, message = "skipped", f"no FITS for field '{field}'"
-        elif not fits_path.exists():
-            status, message = "error", "FITS file missing from cache"
-        else:
-            try:
-                size_arcsec = dynamic_cutout_size(row, args)
-                c_star_val  = row.get("c_star", None)
-                c_star_val  = float(c_star_val) if pd.notna(c_star_val) else None
-                title = (f"{field}  VIS  "
-                         f"RA={float(row['ra']):.4f}  Dec={float(row['dec']):+.4f}\n"
-                         f"cs={row['class_star']:.3f}  "
-                         f"P(gal|Q1)={row['xgb_q1_prob']:.3f}  "
-                         f"G={row['phot_g_mean_mag']:.2f}  "
-                         f"[{size_arcsec:.1f}\"]")
-                img = make_cutout_image(fits_path, float(row["ra"]), float(row["dec"]),
-                                        size_arcsec, title, dpi=args.dpi,
-                                        c_star=c_star_val)
-                cell_images.append(img)
-            except Exception as exc:
-                status, message = "error", str(exc)
+        # Per-cluster limit (take highest-confidence sources first — already sorted)
+        if args.per_cell is not None and len(cl_df) > args.per_cell:
+            cl_df = cl_df.head(args.per_cell)
 
-        print(f"  {idx+1:>4}/{n}  {base}  {status}"
-              + (f"  — {message}" if message else ""))
-        records.append({**row.to_dict(), "status": status, "message": message})
+        cl_dir       = group_dir / cl_label
+        cutouts_subdir = cl_dir / "cutouts"
+        cl_dir.mkdir(parents=True, exist_ok=True)
+        cutouts_subdir.mkdir(exist_ok=True)
 
-    pd.DataFrame(records).to_csv(group_dir / "manifest.csv", index=False)
-    make_contact_sheet(cell_images, group_dir / name)
+        cl_records: list[dict] = []
+        cl_cell_imgs: list     = []
+        local_idx = 0
+        n_cl = len(cl_df)
+        print(f"  [{cl_label}]  {n_cl} sources")
+
+        for i, row in cl_df.iterrows():
+            field  = row.get("field", "")
+            base   = source_basename(row)
+            status, message, cutout_file = "ok", "", ""
+
+            fits_path = fits_cache.get(field)
+            if fits_path is None:
+                status, message = "skipped", f"no FITS for field '{field}'"
+            elif not fits_path.exists():
+                status, message = "error", "FITS file missing from cache"
+            else:
+                try:
+                    size_arcsec = dynamic_cutout_size(row, args)
+                    c_star_val  = row.get("c_star", None)
+                    c_star_val  = float(c_star_val) if pd.notna(c_star_val) else None
+                    sid = str(row.get('g_source_id', ''))
+                    title = (f"{name}  {cl_label}\n"
+                             f"RA={float(row['ra']):.4f}  Dec={float(row['dec']):+.4f}\n"
+                             f"G={row['phot_g_mean_mag']:.2f}  id={sid}")
+                    img = make_cutout_image(fits_path, float(row["ra"]), float(row["dec"]),
+                                            size_arcsec, title, dpi=args.dpi,
+                                            c_star=c_star_val)
+                    # ── Save individual cutout PNG ────────────────────────────
+                    indiv_path = cutouts_subdir / f"cutout_{local_idx:04d}.png"
+                    plt.imsave(str(indiv_path), img)
+                    cutout_file = f"cutouts/cutout_{local_idx:04d}.png"
+                    cl_cell_imgs.append(img)
+                    local_idx += 1
+                except Exception as exc:
+                    status, message = "error", str(exc)
+
+            print(f"    {i+1:>4}/{n_cl}  {base}  {status}"
+                  + (f"  — {message}" if message else ""))
+
+            rec = {**row.to_dict(),
+                   "source_id":   row.get("g_source_id", ""),   # alias for load_cutout_cache
+                   "status":      status,
+                   "message":     message,
+                   "cutout_file": cutout_file}
+            cl_records.append(rec)
+            all_records.append(rec)
+
+        # ── Per-cluster contact sheet + manifest ──────────────────────────────
+        make_contact_sheet(cl_cell_imgs, cl_dir / "contact_sheet")
+        pd.DataFrame(cl_records).to_csv(cl_dir / "manifest.csv", index=False)
+        print(f"    → {len(cl_cell_imgs)} cutouts, contact_sheet.png saved")
+
+    # ── Overall group manifest (all clusters combined) ────────────────────────
+    pd.DataFrame(all_records).to_csv(group_dir / "manifest.csv", index=False)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Euclid ERO VIS cutouts — log stretch + c_star crosshair.")
-    p.add_argument("--size-arcsec", type=float, default=None)
-    p.add_argument("--size-min",    type=float, default=4.0)
-    p.add_argument("--size-max",    type=float, default=8.0)
-    p.add_argument("--size-scale",  type=float, default=8.0)
-    p.add_argument("--limit",       type=int,   default=300)
-    p.add_argument("--dpi",         type=int,   default=75)
+    p.add_argument("--size-arcsec",  type=float, default=None,
+                   help="Fixed cutout size in arcsec (overrides dynamic sizing).")
+    p.add_argument("--size-min",     type=float, default=4.0)
+    p.add_argument("--size-max",     type=float, default=8.0)
+    p.add_argument("--size-scale",   type=float, default=8.0)
+    p.add_argument("--per-cell",  type=int,   default=30,
+                   help="Max sources per (group × cluster) cell (default: 30).")
+    p.add_argument("--dpi",          type=int,   default=75)
     return p.parse_args()
 
 
@@ -327,13 +432,18 @@ def main() -> int:
 
     print("=" * 65)
     print("Euclid ERO VIS cutouts — log stretch + c_star crosshair")
-    print(f"  Limit : {args.limit} per group")
+    print(f"  Per cell    : {args.per_cell}")
     print("=" * 65)
 
     save_cmap_legend(OUTPUT_DIR)
 
+    print("\n[cluster] Building ERO → Q1 cluster map...")
+    cluster_map = build_cluster_map()
+    if not cluster_map:
+        print("  (No cluster info — contact sheets will not be split by cluster)")
+
     for name, csv_path in CSV_GROUPS.items():
-        process_group(name, csv_path, args)
+        process_group(name, csv_path, args, cluster_map=cluster_map)
 
     print(f"\nAll outputs saved under: {OUTPUT_DIR}")
     return 0
