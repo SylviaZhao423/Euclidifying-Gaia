@@ -45,6 +45,9 @@ output/
 *.swo
 *~
 
+# Slides
+docs/slides/
+
 # OS
 .DS_Store
 Thumbs.db
