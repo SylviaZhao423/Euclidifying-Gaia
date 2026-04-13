@@ -116,7 +116,7 @@ PHZ_DIRS = {
      7: "7_all_three", -1: "-1_rej",        0: "0_outlier",
 }
 
-DESI_CUTOUTS_DIR = CUTOUTS_DIR / "desi"
+DESI_CUTOUTS_DIR = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "desi"
 
 DESI_CATEGORY_DIRS = {
      2: "agree_both_gal",
@@ -171,8 +171,9 @@ Q1_TO_ERO_DIR      = PROJECT_DIR / "output" / "q1_to_ero"
 Q1_SEED_MODELS_DIR = PROJECT_DIR / "output" / "xgboost_q1" / "seed_models"
 PROJECTED_DIR      = ARRAYS_DIR  / "projected"
 GAIA_XGB_CSV       = ARRAYS_DIR  / "xgb_gaia_projected.csv"
+GAIA_HILAT_CSV     = ARRAYS_DIR  / "xgb_gaia_hilat_projected.csv"
 
-STAR_THRESH = 0.5   # XGBoost star probability threshold
+GAL_THRESH = 0.5   # XGBoost galaxy probability threshold
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -569,6 +570,94 @@ def _subsample_keep_cutouts(df, cutout_sids, max_points, seed=42):
     return result
 
 
+def _subsample_hybrid(df, phz_col, phz_labels, cutout_sids,
+                      max_total=5000, floor=500, seed=42):
+    """Hybrid density-preserving subsample for All PHZ overlay.
+
+    Classes with fewer than `floor` sources are kept in full.
+    The remaining budget (max_total - small classes) is split proportionally
+    among the larger classes, preserving their relative densities.
+    """
+    parts = []
+    small_classes = {}
+    large_classes = {}
+    for v in phz_labels:
+        sub = df[df[phz_col] == v]
+        if len(sub) == 0:
+            continue
+        if len(sub) <= floor:
+            small_classes[v] = sub
+        else:
+            large_classes[v] = sub
+
+    # Keep all small classes
+    small_total = sum(len(s) for s in small_classes.values())
+    for v, sub in small_classes.items():
+        lbl = phz_labels[v]
+        print(f"     phz={v} {lbl}: {len(sub):,} (all kept, below floor)")
+        parts.append(sub)
+
+    # Distribute remaining budget proportionally among large classes
+    budget = max(0, max_total - small_total)
+    large_total = sum(len(s) for s in large_classes.values())
+    for v, sub in large_classes.items():
+        lbl = phz_labels[v]
+        if large_total > 0:
+            n_alloc = max(1, int(round(budget * len(sub) / large_total)))
+        else:
+            n_alloc = budget
+        n_alloc = min(n_alloc, len(sub))
+        if n_alloc < len(sub):
+            sub = _subsample_keep_cutouts(sub, cutout_sids, n_alloc, seed)
+        else:
+            print(f"     phz={v} {lbl}: {len(sub):,} (all kept)")
+        parts.append(sub)
+
+    result = pd.concat(parts, ignore_index=True) if parts else df
+    print(f"  Total after hybrid subsample: {len(result):,} / {len(df):,}")
+    return result
+
+
+def _random_subsample_idx(n_total: int, max_points: int, seed: int = 42) -> np.ndarray:
+    """Return indices for a uniform random subsample (density-preserving)."""
+    if n_total <= max_points:
+        return np.arange(n_total)
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(n_total, max_points, replace=False))
+
+
+def _compute_gal_ecl_lat(ra_deg: np.ndarray, dec_deg: np.ndarray):
+    """Compute galactic latitude (b) and ecliptic latitude from RA/Dec (ICRS degrees).
+
+    Returns (gal_lat, ecl_lat) in degrees.
+    """
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    coords = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+    gal_lat = coords.galactic.b.deg
+    ecl_lat = coords.barycentricmeanecliptic.lat.deg
+    return np.asarray(gal_lat), np.asarray(ecl_lat)
+
+
+def _filter_gaia_xgb_hilat(df_gxgb, min_abs_gal_lat=10.0, min_abs_ecl_lat=45.0):
+    """Filter Gaia XGB DataFrame to high galactic + ecliptic latitude sources.
+
+    Uses b and ecl_lat columns if present, otherwise computes from ra/dec.
+    Returns filtered DataFrame.
+    """
+    if "b" in df_gxgb.columns and "ecl_lat" in df_gxgb.columns:
+        gal_lat = df_gxgb["b"].values.astype(float)
+        ecl_lat = df_gxgb["ecl_lat"].values.astype(float)
+    elif "ra" in df_gxgb.columns and "dec" in df_gxgb.columns:
+        gal_lat, ecl_lat = _compute_gal_ecl_lat(
+            df_gxgb["ra"].values.astype(float),
+            df_gxgb["dec"].values.astype(float))
+    else:
+        return None
+    mask = (np.abs(gal_lat) > min_abs_gal_lat) & (np.abs(ecl_lat) > min_abs_ecl_lat)
+    return df_gxgb[mask].reset_index(drop=True)
+
+
 # ── ERO projection helper ─────────────────────────────────────────────────────
 
 def _project_ero(npz_path: Path, q1_mean, q1_std, reducer) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -720,7 +809,7 @@ def plot_umap_3d_plotly(
     ero_sheet_extra=None,
     ero_cutout_cache=None,
     # Gaia XGB
-    gaia_xgb_emb=None, gaia_xgb_star_prob=None,
+    gaia_xgb_emb=None, gaia_xgb_gal_prob=None,
     gaia_xgb_sids=None, gaia_xgb_gmag=None,
     # Pre-computed range overrides (e.g. ERO features — range from ERO distribution)
     feature_ranges_override=None,
@@ -746,6 +835,11 @@ def plot_umap_3d_plotly(
     # Gaia XGB extra
     gaia_xgb_ra=None,
     gaia_xgb_dec=None,
+    # Gaia XGB high-latitude subset
+    gaia_hilat_emb=None, gaia_hilat_gal_prob=None,
+    gaia_hilat_sids=None, gaia_hilat_gmag=None,
+    gaia_hilat_ra=None, gaia_hilat_dec=None,
+    density_hist_data=None,   # pre-built per-category histogram dict from _build_density_hists
 ):
     try:
         import plotly.graph_objects as go
@@ -1048,13 +1142,13 @@ def plot_umap_3d_plotly(
                     if gaia_xgb_emb is not None else None)
     _gaia_xgb_cats: list[str] = []  # category labels for legend traces
     _gaia_cat_data: list[tuple] = []  # (mask, short_name, lbl, color)
-    if gaia_xgb_emb is not None and gaia_xgb_star_prob is not None:
-        m_star = gaia_xgb_star_prob >= STAR_THRESH
-        m_gal  = ~m_star
-        gaia_pgal = 1.0 - gaia_xgb_star_prob
+    if gaia_xgb_emb is not None and gaia_xgb_gal_prob is not None:
+        m_gal  = gaia_xgb_gal_prob >= GAL_THRESH
+        m_star = ~m_gal
+        gaia_pgal = gaia_xgb_gal_prob
         for mask, short, lbl, color in [
-            (m_star, "star", f"Gaia XGB Stars  (prob ≥ {STAR_THRESH},  n={int(m_star.sum()):,})", "#EF9A9A"),
-            (m_gal,  "gal",  f"Gaia XGB Galaxies  (prob < {STAR_THRESH},  n={int(m_gal.sum()):,})",  "#90CAF9"),
+            (m_star, "star", f"Gaia XGB Stars  (P(gal) < {GAL_THRESH},  n={int(m_star.sum()):,})", "#EF9A9A"),
+            (m_gal,  "gal",  f"Gaia XGB Galaxies  (P(gal) ≥ {GAL_THRESH},  n={int(m_gal.sum()):,})",  "#90CAF9"),
         ]:
             if not mask.any():
                 continue
@@ -1072,8 +1166,8 @@ def plot_umap_3d_plotly(
     # Sub-traces per category×cluster
     n_pre_gaia_xgb_sub = len(traces)
     n_gaia_xgb_sub     = 0
-    if gaia_xgb_emb is not None and gaia_xgb_star_prob is not None:
-        gaia_pgal = 1.0 - gaia_xgb_star_prob
+    if gaia_xgb_emb is not None and gaia_xgb_gal_prob is not None:
+        gaia_pgal = gaia_xgb_gal_prob
         for mask, short, lbl, color in _gaia_cat_data:
             for k in _q1_cluster_ids:
                 mk = mask & (_gaia_xgb_cl == k) if _gaia_xgb_cl is not None else mask
@@ -1081,12 +1175,12 @@ def plot_umap_3d_plotly(
                     continue
                 n_pts   = int(mk.sum())
                 sids_m  = gaia_xgb_sids[mk] if gaia_xgb_sids is not None else np.array([""] * n_pts)
-                probs_m = gaia_xgb_star_prob[mk]
+                probs_m = gaia_xgb_gal_prob[mk]
                 z_g     = gaia_xgb_gmag[mk] if gaia_xgb_gmag is not None else np.zeros(n_pts)
                 ra_m    = gaia_xgb_ra[mk]  if gaia_xgb_ra  is not None else np.full(n_pts, np.nan)
                 dec_m   = gaia_xgb_dec[mk] if gaia_xgb_dec is not None else np.full(n_pts, np.nan)
                 gm_m    = gaia_xgb_gmag[mk] if gaia_xgb_gmag is not None else np.full(n_pts, np.nan)
-                # customdata: [sid, star_prob, ra, dec, gmag]
+                # customdata: [sid, gal_prob, ra, dec, gmag]
                 cd = [[str(sids_m[i]), round(float(probs_m[i]), 4),
                        round(float(ra_m[i]), 4)  if np.isfinite(ra_m[i])  else None,
                        round(float(dec_m[i]), 4) if np.isfinite(dec_m[i]) else None,
@@ -1104,6 +1198,70 @@ def plot_umap_3d_plotly(
                 _gaia_z_gmag.append(z_g.tolist())
                 _gaia_z_model_pgal.append([round(float(v), 4) for v in gaia_pgal[mk]])
                 n_gaia_xgb_sub += 1
+
+    # ── Gaia XGB high-lat overlay (legend + sub-traces, same structure) ──────
+    n_pre_gaia_hilat     = len(traces)
+    n_gaia_hilat_legend  = 0
+    _gaia_hilat_cl = (assign_to_clusters(gaia_hilat_emb, q1_emb, q1_labels)
+                      if gaia_hilat_emb is not None else None)
+    _gaia_hilat_cats: list[str] = []
+    _gaia_hilat_cat_data: list[tuple] = []
+    _gaia_hilat_z_gmag: list[list] = []
+    _gaia_hilat_z_model_pgal: list[list] = []
+    if gaia_hilat_emb is not None and gaia_hilat_gal_prob is not None:
+        m_gal_hl  = gaia_hilat_gal_prob >= GAL_THRESH
+        m_star_hl = ~m_gal_hl
+        hilat_pgal = gaia_hilat_gal_prob
+        for mask, short, lbl, color in [
+            (m_star_hl, "star", f"Gaia XGB HL Stars  (P(gal) < {GAL_THRESH},  n={int(m_star_hl.sum()):,})", "#EF9A9A"),
+            (m_gal_hl,  "gal",  f"Gaia XGB HL Galaxies  (P(gal) ≥ {GAL_THRESH},  n={int(m_gal_hl.sum()):,})",  "#90CAF9"),
+        ]:
+            if not mask.any():
+                continue
+            traces.append(go.Scatter3d(
+                x=[None], y=[None], z=[None], mode="markers",
+                marker=dict(size=5, color=color, opacity=0.95,
+                            line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
+                name=lbl, showlegend=True, visible=False,
+            ))
+            _gaia_hilat_cats.append(short)
+            _gaia_hilat_cat_data.append((mask, short, lbl, color))
+            n_gaia_hilat_legend += 1
+
+    # High-lat sub-traces per category×cluster
+    n_pre_gaia_hilat_sub = len(traces)
+    n_gaia_hilat_sub     = 0
+    if gaia_hilat_emb is not None and gaia_hilat_gal_prob is not None:
+        hilat_pgal = gaia_hilat_gal_prob
+        for mask, short, lbl, color in _gaia_hilat_cat_data:
+            for k in _q1_cluster_ids:
+                mk = mask & (_gaia_hilat_cl == k) if _gaia_hilat_cl is not None else mask
+                if not mk.any():
+                    continue
+                n_pts   = int(mk.sum())
+                sids_m  = gaia_hilat_sids[mk] if gaia_hilat_sids is not None else np.array([""] * n_pts)
+                probs_m = gaia_hilat_gal_prob[mk]
+                z_g     = gaia_hilat_gmag[mk] if gaia_hilat_gmag is not None else np.zeros(n_pts)
+                ra_m    = gaia_hilat_ra[mk]  if gaia_hilat_ra  is not None else np.full(n_pts, np.nan)
+                dec_m   = gaia_hilat_dec[mk] if gaia_hilat_dec is not None else np.full(n_pts, np.nan)
+                gm_m    = gaia_hilat_gmag[mk] if gaia_hilat_gmag is not None else np.full(n_pts, np.nan)
+                cd = [[str(sids_m[i]), round(float(probs_m[i]), 4),
+                       round(float(ra_m[i]), 4)  if np.isfinite(ra_m[i])  else None,
+                       round(float(dec_m[i]), 4) if np.isfinite(dec_m[i]) else None,
+                       round(float(gm_m[i]), 2)  if np.isfinite(gm_m[i])  else None]
+                      for i in range(n_pts)]
+                traces.append(go.Scatter3d(
+                    x=gaia_hilat_emb[mk, 0], y=gaia_hilat_emb[mk, 1], z=z_g,
+                    mode="markers",
+                    marker=dict(size=5, color=color, opacity=0.95,
+                                line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
+                    name=f"gxhl_{short} C{k}",
+                    hovertemplate=f"RA=%{{customdata[2]:.4f}}<br>Dec=%{{customdata[3]:+.4f}}<br>G=%{{customdata[4]:.2f}}<extra>{lbl.split('(')[0].strip()}</extra>",
+                    customdata=cd, showlegend=False, visible=False,
+                ))
+                _gaia_hilat_z_gmag.append(z_g.tolist())
+                _gaia_hilat_z_model_pgal.append([round(float(v), 4) for v in hilat_pgal[mk]])
+                n_gaia_hilat_sub += 1
 
     # ── ERO-DESI overlay (sub-traces per cluster, like PHZ) ──────────────────
     n_pre_ero_desi       = len(traces)
@@ -1280,6 +1438,11 @@ def plot_umap_3d_plotly(
     gaia_xgb_sub_start_json       = json.dumps(n_pre_gaia_xgb_sub)
     gaia_xgb_n_sub_json           = json.dumps(n_gaia_xgb_sub)
     gaia_xgb_cats_json            = json.dumps(_gaia_xgb_cats)
+    gaia_hilat_start_json         = json.dumps(n_pre_gaia_hilat)
+    gaia_hilat_n_legend_json      = json.dumps(n_gaia_hilat_legend)
+    gaia_hilat_sub_start_json     = json.dumps(n_pre_gaia_hilat_sub)
+    gaia_hilat_n_sub_json         = json.dumps(n_gaia_hilat_sub)
+    gaia_hilat_cats_json          = json.dumps(_gaia_hilat_cats)
     ero_desi_start_json           = json.dumps(n_pre_ero_desi)
     ero_desi_n_legend_json        = json.dumps(n_ero_desi_legend)
     ero_desi_sub_start_json       = json.dumps(n_pre_ero_desi_sub)
@@ -1306,9 +1469,29 @@ def plot_umap_3d_plotly(
                                      "model_pgal": _ero_rebal_z_model_pgal})
     gaia_xgb_z_json    = json.dumps({"g_mag":      _gaia_z_gmag,
                                      "model_pgal": _gaia_z_model_pgal})
+    gaia_hilat_z_json  = json.dumps({"g_mag":      _gaia_hilat_z_gmag,
+                                     "model_pgal": _gaia_hilat_z_model_pgal})
     ero_desi_z_json    = json.dumps({"g_mag":      _ero_desi_z_gmag,
                                      "model_pgal": _ero_desi_z_model_pgal})
     gmag_z_range_json  = json.dumps(_zr if _zr else [25, 17])
+    density_hist_json  = json.dumps(density_hist_data or {})
+
+    # Q1 base point UMAP coordinates (stored separately from Plotly traces for
+    # reliable density bin lookup — Scatter3d trace .x/.y may not be accessible)
+    _q1_base_coords = []
+    if noise_mask.any():
+        _q1_base_coords.append({
+            "x": [round(float(v), 4) for v in q1_emb[noise_mask, 0]],
+            "y": [round(float(v), 4) for v in q1_emb[noise_mask, 1]],
+        })
+    for k in cluster_ids:
+        m = q1_labels == k
+        _q1_base_coords.append({
+            "x": [round(float(v), 4) for v in q1_emb[m, 0]],
+            "y": [round(float(v), 4) for v in q1_emb[m, 1]],
+        })
+    q1_base_coords_json = json.dumps(_q1_base_coords)
+
 
     # Colour dropdown HTML with optgroups
     gaia_opts = "\n".join(
@@ -1458,6 +1641,7 @@ def plot_umap_3d_plotly(
       <option value="ero">ERO</option>
       <option value="ero_rebalanced">ERO Rebalanced</option>
       <option value="gaia_xgb">Gaia XGB</option>
+      <option value="gaia_hilat">Gaia XGB (high-lat)</option>
     </select>
   </div>
   <div id="color-mode-bar">
@@ -1472,6 +1656,7 @@ def plot_umap_3d_plotly(
     <span id="color-mode-label">Colour</span>
     <select id="color-mode-select">
       <option value="clusters">clusters</option>
+      <option value="umap_density">UMAP density</option>
       <optgroup label="── Gaia ──">
 {gaia_opts}
       </optgroup>
@@ -1527,6 +1712,11 @@ var GAIA_XGB_N_LEGEND      = {gaia_xgb_n_legend_json};
 var GAIA_XGB_SUB_START     = {gaia_xgb_sub_start_json};
 var GAIA_XGB_N_SUB         = {gaia_xgb_n_sub_json};
 var GAIA_XGB_CATS          = {gaia_xgb_cats_json};
+var GAIA_HILAT_START       = {gaia_hilat_start_json};
+var GAIA_HILAT_N_LEGEND    = {gaia_hilat_n_legend_json};
+var GAIA_HILAT_SUB_START   = {gaia_hilat_sub_start_json};
+var GAIA_HILAT_N_SUB       = {gaia_hilat_n_sub_json};
+var GAIA_HILAT_CATS        = {gaia_hilat_cats_json};
 var ERO_DESI_START         = {ero_desi_start_json};
 var ERO_DESI_N_LEGEND      = {ero_desi_n_legend_json};
 var ERO_DESI_SUB_START     = {ero_desi_sub_start_json};
@@ -1544,6 +1734,7 @@ var PHZ_SUB_Z   = {phz_sub_z_json};
 var ERO_REG_Z   = {ero_reg_z_json};
 var ERO_REBAL_Z = {ero_rebal_z_json};
 var GAIA_XGB_Z  = {gaia_xgb_z_json};
+var GAIA_HILAT_Z = {gaia_hilat_z_json};
 var ERO_DESI_Z  = {ero_desi_z_json};
 var GMAG_Z_RANGE = {gmag_z_range_json};
 
@@ -1572,6 +1763,8 @@ Object.keys(ero_desi_contact_sheets).forEach(function(v) {{
 /* Q1 feature names (Gaia + Q1 Euclid, index into Q1 base customdata) */
 var featureNames   = {feature_names_json};
 var featureRanges  = {feature_ranges_json};
+var densityHistData = {density_hist_json};
+var q1BaseCoords    = {q1_base_coords_json};
 
 /* ERO feature names (index into ERO trace customdata rows) */
 var eroFeatureNames  = {ero_feature_names_json};
@@ -1584,6 +1777,11 @@ var COLORSCALE_RDBU = [
   [0,'rgb(5,48,97)'],[0.25,'rgb(33,102,172)'],
   [0.5,'rgb(247,247,247)'],
   [0.75,'rgb(214,96,77)'],[1,'rgb(103,0,31)']
+];
+var COLORSCALE_VIRIDIS = [
+  [0,'rgb(68,1,84)'],[0.25,'rgb(59,82,139)'],
+  [0.5,'rgb(33,145,140)'],[0.75,'rgb(94,201,98)'],
+  [1,'rgb(253,231,37)']
 ];
 
 var pinned          = false;
@@ -1598,6 +1796,8 @@ var isolatedEROGroup = null;
 var hiddenEROGroups  = {{}};
 var isolatedGaiaXgb  = null;
 var hiddenGaiaXgb    = {{}};
+var isolatedGaiaHilat = null;
+var hiddenGaiaHilat   = {{}};
 var isolatedEroDesi  = null;
 var hiddenEroDesi    = {{}};
 var activeOverlay   = 'allphz';
@@ -1854,6 +2054,9 @@ function _initIndices() {{
   var gaiaXgbLeg = [], gaiaXgbSub = [];
   for (i = GAIA_XGB_START; i < GAIA_XGB_START + GAIA_XGB_N_LEGEND; i++) gaiaXgbLeg.push(i);
   for (i = GAIA_XGB_SUB_START; i < GAIA_XGB_SUB_START + GAIA_XGB_N_SUB; i++) {{ gaiaXgb.push(i); gaiaXgbSub.push(i); }}
+  var gaiaHilatLeg = [], gaiaHilatSub = [], gaiaHilat = [];
+  for (i = GAIA_HILAT_START; i < GAIA_HILAT_START + GAIA_HILAT_N_LEGEND; i++) gaiaHilatLeg.push(i);
+  for (i = GAIA_HILAT_SUB_START; i < GAIA_HILAT_SUB_START + GAIA_HILAT_N_SUB; i++) {{ gaiaHilat.push(i); gaiaHilatSub.push(i); }}
   for (i = ERO_DESI_START; i < ERO_DESI_START + ERO_DESI_N_LEGEND; i++) eroDesiLeg.push(i);
   for (i = ERO_DESI_SUB_START; i < ERO_DESI_SUB_START + ERO_DESI_N_SUB; i++) eroDesiSub.push(i);
 
@@ -1884,6 +2087,17 @@ function _initIndices() {{
     if (m) {{
       if (!gaiaXgbSubMap[m[1]]) gaiaXgbSubMap[m[1]] = {{}};
       gaiaXgbSubMap[m[1]][m[2]] = idx;
+    }}
+  }});
+
+  /* Gaia high-lat sub-trace map: gaiaHilatSubMap[cat][cluster] = traceIdx */
+  var gaiaHilatSubMap = {{}};
+  gaiaHilatSub.forEach(function(idx) {{
+    var nm = plotDiv.data[idx].name;
+    var m  = nm.match(/^gxhl_(\\w+) C(\\d+)$/);
+    if (m) {{
+      if (!gaiaHilatSubMap[m[1]]) gaiaHilatSubMap[m[1]] = {{}};
+      gaiaHilatSubMap[m[1]][m[2]] = idx;
     }}
   }});
 
@@ -1923,6 +2137,7 @@ function _initIndices() {{
     eroReg: eroReg, eroRegDummy: eroRegDummy, eroRegSubMap: eroRegSubMap,
     eroRebal: eroRebal, eroRebalDummy: eroRebalDummy, eroRebalSubMap: eroRebalSubMap,
     gaiaXgb: gaiaXgb, gaiaXgbLeg: gaiaXgbLeg, gaiaXgbSub: gaiaXgbSub, gaiaXgbSubMap: gaiaXgbSubMap,
+    gaiaHilat: gaiaHilat, gaiaHilatLeg: gaiaHilatLeg, gaiaHilatSub: gaiaHilatSub, gaiaHilatSubMap: gaiaHilatSubMap,
     eroDesiLeg: eroDesiLeg, eroDesiSub: eroDesiSub, eroDesiSubMap: eroDesiSubMap,
     baseCluster: baseCluster, phzLegend: phzLegend,
     phzSubMap: phzSubMap, desiLegend: desiLegend, desiSub: desiSub,
@@ -1942,6 +2157,9 @@ function buildTraceMap() {{
 function _isGaiaXgbOverlay() {{
   return activeOverlay === 'gaia_xgb';
 }}
+function _isGaiaHilatOverlay() {{
+  return activeOverlay === 'gaia_hilat';
+}}
 function _isEROOverlay() {{
   return (activeOverlay==='ero' || activeOverlay==='ero_rebalanced');
 }}
@@ -1950,6 +2168,127 @@ function _isERORebal() {{
 }}
 function _isEroDesiOverlay() {{
   return activeOverlay === 'ero_desi';
+}}
+
+/* ── Dynamic density helpers ── */
+function _currentOverlaySubIndices() {{
+  var ov = activeOverlay || 'allphz';
+  if (ov==='allphz' || ov==='desi') return _IDX.phzSub;
+  if (ov==='ero')             return _IDX.eroReg;
+  if (ov==='ero_rebalanced')  return _IDX.eroRebal;
+  if (ov==='ero_desi')        return _IDX.eroDesiSub || [];
+  if (ov==='gaia_xgb')        return _IDX.gaiaXgbSub || [];
+  if (ov==='gaia_hilat')      return _IDX.gaiaHilatSub || [];
+  return [];
+}}
+
+/* Extract category key from sub-trace name for density histogram lookup */
+function _extractDensityCat(name) {{
+  var m;
+  m = name.match(/^phz=(-?\\d+) C\\d+$/);       if (m) return m[1];
+  m = name.match(/^ero_(?:ero|eror)_grp=(.+) C\\d+$/); if (m) return m[1];
+  m = name.match(/^gxgb_(\\w+) C\\d+$/);         if (m) return m[1].toLowerCase();
+  m = name.match(/^gxhl_(\\w+) C\\d+$/);          if (m) return m[1].toLowerCase();
+  m = name.match(/^ed_cat=(\\d+) C\\d+$/);         if (m) return m[1];
+  return null;
+}}
+
+function _recomputeDensityColor() {{
+  if (_selectedFeature() !== 'umap_density') return;
+  var baseIdxs = _q1BaseIndices(); if (!baseIdxs.length) return;
+  if (!densityHistData || !densityHistData.bins) return;
+
+  var bins = densityHistData.bins;
+  var nBins = bins.n, xmin = bins.xmin, xmax = bins.xmax, ymin = bins.ymin, ymax = bins.ymax;
+  var xStep = (xmax - xmin) / nBins, yStep = (ymax - ymin) / nBins;
+
+  /* Determine overlay key for histogram lookup */
+  var ov = activeOverlay || 'allphz';
+  var histKey = (ov === 'ero_rebalanced') ? 'ero_rebal' : ov;
+  var ovHists = (densityHistData.overlays || {{}})[histKey] || {{}};
+
+  /* Find visible categories by scanning sub-traces */
+  var visCats = {{}};
+  var subIdxs = _currentOverlaySubIndices();
+  subIdxs.forEach(function(si) {{
+    var t = plotDiv.data[si];
+    if (t.visible !== true) return;
+    var cat = _extractDensityCat(t.name);
+    if (cat) visCats[cat] = true;
+  }});
+
+  /* Sum ALL categories to get fixed colorbar range for this overlay */
+  var fullHist = new Float32Array(nBins * nBins);
+  Object.keys(ovHists).forEach(function(cat) {{
+    var h = ovHists[cat];
+    if (!h) return;
+    for (var i = 0; i < h.length && i < fullHist.length; i++) fullHist[i] += h[i];
+  }});
+
+  /* Sum precomputed histograms for VISIBLE categories only */
+  var sumHist = new Float32Array(nBins * nBins);
+  var hasCats = false;
+  Object.keys(visCats).forEach(function(cat) {{
+    var h = ovHists[cat];
+    if (!h) return;
+    hasCats = true;
+    for (var i = 0; i < h.length && i < sumHist.length; i++) sumHist[i] += h[i];
+  }});
+
+  if (!hasCats) {{
+    /* Fallback: show all categories */
+    for (var i = 0; i < fullHist.length; i++) sumHist[i] = fullHist[i];
+    hasCats = true;
+  }}
+
+  /* Fixed colorbar range from full overlay (all categories), so hiding
+     categories shows density decrease against a consistent scale */
+  var fixedVmax = 0;
+  for (var _di = 0; _di < fullHist.length; _di++) {{
+    var _fv = Math.log10(fullHist[_di] + 1);
+    if (_fv > fixedVmax) fixedVmax = _fv;
+  }}
+  if (fixedVmax === 0) fixedVmax = 1;
+
+  /* Evaluate at Q1 base points using standalone coordinate arrays
+     (plotDiv.data[bi].x/y may not be reliably accessible for Scatter3d) */
+  var colorArrays = [], showscales = [];
+  var nB = baseIdxs.length;
+  baseIdxs.forEach(function(bi, ii) {{
+    var coords = q1BaseCoords[ii];
+    if (!coords) {{ colorArrays.push([]); showscales.push(false); return; }}
+    var xs = coords.x, ys = coords.y;
+    var colors = new Array(xs.length);
+    for (var j = 0; j < xs.length; j++) {{
+      var xi = Math.min(Math.max(Math.floor((xs[j] - xmin) / xStep), 0), nBins - 1);
+      var yi = Math.min(Math.max(Math.floor((ys[j] - ymin) / yStep), 0), nBins - 1);
+      colors[j] = Math.log10(sumHist[xi * nBins + yi] + 1);
+    }}
+    colorArrays.push(colors);
+    showscales.push(ii === 0);
+  }});
+  var vmin = 0, vmax = fixedVmax;
+
+  /* Directly mutate trace marker objects (more reliable for Scatter3d than restyle) */
+  baseIdxs.forEach(function(bi, ii) {{
+    var mk = plotDiv.data[bi].marker;
+    mk.color      = colorArrays[ii];
+    mk.colorscale = COLORSCALE_VIRIDIS;
+    mk.cmin       = vmin;
+    mk.cmax       = vmax;
+    mk.opacity    = 0.5;
+    mk.showscale  = (ii === 0);
+    if (ii === 0) {{
+      mk.colorbar = {{
+        x: 0.02, xanchor: 'left', len: 0.4, thickness: 10,
+        tickfont: {{color:'#555', size:8}},
+        title: 'log\u2081\u2080(count+1)',
+      }};
+    }} else {{
+      mk.colorbar = undefined;
+    }}
+  }});
+  Plotly.redraw(plotDiv);
 }}
 
 /* ── Q1 base colour helpers ── */
@@ -1980,9 +2319,13 @@ function recolorQ1Base(feature) {{
       opacities.push(mCl ? 0.15 : 0.5); showscales.push(false);
     }});
     Plotly.restyle(plotDiv, {{'marker.color':colors,'marker.opacity':opacities,'marker.showscale':showscales}}, idxs);
+  }} else if (feature==='umap_density') {{
+    _recomputeDensityColor();
+    return;
   }} else {{
     var fi=featureNames.indexOf(feature); if (fi<0) return;
     var rng=featureRanges[feature]||[0,1], colorArrays=[], showscales=[];
+    var _csA=[], _cmiA=[], _cmaA=[], _opA=[];
     idxs.forEach(function(i,ii) {{
       var cd=plotDiv.data[i].customdata||[];
       colorArrays.push(cd.map(function(row) {{
@@ -1990,10 +2333,11 @@ function recolorQ1Base(feature) {{
         return (v!==null&&v!==undefined&&isFinite(v))?v:null;
       }}));
       showscales.push(ii===0);
+      _csA.push(COLORSCALE_RDBU); _cmiA.push(rng[0]); _cmaA.push(rng[1]); _opA.push(0.5);
     }});
     Plotly.restyle(plotDiv, {{
-      'marker.color': colorArrays, 'marker.colorscale': [COLORSCALE_RDBU],
-      'marker.cmin': [rng[0]], 'marker.cmax': [rng[1]], 'marker.opacity': [0.5],
+      'marker.color': colorArrays, 'marker.colorscale': _csA,
+      'marker.cmin': _cmiA, 'marker.cmax': _cmaA, 'marker.opacity': _opA,
       'marker.showscale': showscales,
       'marker.colorbar.x': 0.02, 'marker.colorbar.xanchor': 'left',
       'marker.colorbar.len': 0.4, 'marker.colorbar.thickness': 10,
@@ -2087,6 +2431,19 @@ function _updateOverlayHoverTemplates(feature) {{
     Plotly.restyle(plotDiv, {{'hovertemplate': templates}}, gxIdxs);
   }}
 
+  /* Gaia high-lat sub-traces: same format as Gaia XGB */
+  var ghIdxs = _IDX.gaiaHilatSub || [];
+  if (ghIdxs.length) {{
+    var templates = [];
+    ghIdxs.forEach(function(i) {{
+      var ht = plotDiv.data[i].hovertemplate || '';
+      var m = ht.match(/<extra>(.*?)<\\/extra>/);
+      var lbl = m ? m[1].replace(/<br>.*/, '') : plotDiv.data[i].name;
+      templates.push('RA=%{{customdata[2]:.4f}}<br>Dec=%{{customdata[3]:+.4f}}<br>G=%{{customdata[4]:.2f}}<extra>' + lbl + '</extra>');
+    }});
+    Plotly.restyle(plotDiv, {{'hovertemplate': templates}}, ghIdxs);
+  }}
+
   /* ERO DESI sub-traces: no features, consistent format */
   var edIdxs = _IDX.eroDesiSub || [];
   if (edIdxs.length) {{
@@ -2164,10 +2521,12 @@ function applyVisibility() {{
   var map=buildTraceMap(), n=plotDiv.data.length;
   var vis=new Array(n).fill(true);
 
-  /* Always hide all ERO, Gaia XGB, and ERO-DESI traces first; re-enable active set below */
+  /* Always hide all ERO, Gaia XGB, Gaia high-lat, and ERO-DESI traces first; re-enable active set below */
   _allEROIndices().forEach(function(i){{vis[i]=false;}});
   _IDX.gaiaXgbLeg.forEach(function(i){{vis[i]=false;}});
   _IDX.gaiaXgbSub.forEach(function(i){{vis[i]=false;}});
+  _IDX.gaiaHilatLeg.forEach(function(i){{vis[i]=false;}});
+  _IDX.gaiaHilatSub.forEach(function(i){{vis[i]=false;}});
   _IDX.eroDesiLeg.forEach(function(i){{vis[i]=false;}});
   _IDX.eroDesiSub.forEach(function(i){{vis[i]=false;}});
 
@@ -2250,6 +2609,44 @@ function applyVisibility() {{
         var catHidden = hiddenGaiaXgb[catLegIdx];
         Object.keys(_gxSubMap[cat]).forEach(function(k) {{
           vis[_gxSubMap[cat][k]] = (catHidden || hiddenClusters[k]) ? 'legendonly' : true;
+        }});
+      }});
+      _applyClusterVis(vis, map, null);
+    }}
+
+  }} else if (_isGaiaHilatOverlay()) {{
+    _hideAllPhzDesi(vis, map);
+    _applyOverlayTraces(vis, _IDX.gaiaHilatLeg, isolatedGaiaHilat, hiddenGaiaHilat);
+    var _ghSubMap = _IDX.gaiaHilatSubMap;
+
+    if (isolatedCluster !== null) {{
+      var ck = String(isolatedCluster);
+      Object.keys(_ghSubMap).forEach(function(cat) {{
+        var catLegIdx = GAIA_HILAT_START + GAIA_HILAT_CATS.indexOf(cat);
+        var catHidden = hiddenGaiaHilat[catLegIdx];
+        Object.keys(_ghSubMap[cat]).forEach(function(k) {{
+          vis[_ghSubMap[cat][k]] = (k !== ck || catHidden) ? 'legendonly' : true;
+        }});
+      }});
+      _applyClusterVis(vis, map, null);
+
+    }} else if (isolatedGaiaHilat !== null) {{
+      var _ghTraceIdx = isolatedGaiaHilat - GAIA_HILAT_START;
+      var _ghCat = (_ghTraceIdx >= 0 && _ghTraceIdx < GAIA_HILAT_CATS.length)
+                   ? GAIA_HILAT_CATS[_ghTraceIdx] : null;
+      Object.keys(_ghSubMap).forEach(function(cat) {{
+        Object.keys(_ghSubMap[cat]).forEach(function(k) {{
+          vis[_ghSubMap[cat][k]] = (cat !== _ghCat || hiddenClusters[k]) ? 'legendonly' : true;
+        }});
+      }});
+      _applyClusterVis(vis, map, null);
+
+    }} else {{
+      Object.keys(_ghSubMap).forEach(function(cat) {{
+        var catLegIdx = GAIA_HILAT_START + GAIA_HILAT_CATS.indexOf(cat);
+        var catHidden = hiddenGaiaHilat[catLegIdx];
+        Object.keys(_ghSubMap[cat]).forEach(function(k) {{
+          vis[_ghSubMap[cat][k]] = (catHidden || hiddenClusters[k]) ? 'legendonly' : true;
         }});
       }});
       _applyClusterVis(vis, map, null);
@@ -2351,14 +2748,15 @@ function applyVisibility() {{
 
   /* In non-PHZ/DESI overlays, disable Q1 base hover detection so overlay
      points (ERO, Gaia XGB, ERO-DESI) are reachable for hover/click/pin */
-  var skipQ1 = (_isEROOverlay() || _isGaiaXgbOverlay() || _isEroDesiOverlay());
+  var skipQ1 = (_isEROOverlay() || _isGaiaXgbOverlay() || _isGaiaHilatOverlay() || _isEroDesiOverlay());
   var q1Hi   = _q1BaseIndices();
   var hoverArr = new Array(n);
   for (var _h = 0; _h < n; _h++) hoverArr[_h] = 'all';
   if (skipQ1) {{ q1Hi.forEach(function(i){{ hoverArr[i] = 'skip'; }}); }}
 
-  Plotly.restyle(plotDiv, {{visible: vis, hoverinfo: hoverArr}});
-
+  Plotly.restyle(plotDiv, {{visible: vis, hoverinfo: hoverArr}}).then(function() {{
+    _recomputeDensityColor();
+  }});
 }}
 
 function _updateEROOptgroup() {{
@@ -2455,6 +2853,15 @@ function applyZAxis(opt) {{
         rZ.push(GAIA_XGB_Z[gxKey][j]);
       }});
     }}
+  }} else if (_isGaiaHilatOverlay()) {{
+    var ghIdx = _IDX.gaiaHilatSub;
+    var ghKey = GAIA_HILAT_Z[opt] ? opt : 'g_mag';
+    if (ghIdx.length && ghIdx.length === GAIA_HILAT_Z[ghKey].length) {{
+      ghIdx.forEach(function(i,j) {{
+        rIdx.push(i);
+        rZ.push(GAIA_HILAT_Z[ghKey][j]);
+      }});
+    }}
   }} else if (_isEroDesiOverlay()) {{
     var edIdx = _IDX.eroDesiSub;
     var edKey = ERO_DESI_Z[opt] ? opt : 'g_mag';
@@ -2505,7 +2912,7 @@ function _updateZOptions() {{
   var sel    = document.getElementById('z-select');
   var phzOpt = sel.querySelector('option[value="phz_pgal"]');
   if (!phzOpt) return;
-  var noPhz = _isEROOverlay() || _isGaiaXgbOverlay() || _isEroDesiOverlay();
+  var noPhz = _isEROOverlay() || _isGaiaXgbOverlay() || _isGaiaHilatOverlay() || _isEroDesiOverlay();
   phzOpt.disabled = noPhz;
   phzOpt.style.color = noPhz ? '#555' : '';
   /* Auto-switch if the user was on PHZ P(gal) and switched to an unsupported overlay */
@@ -2519,6 +2926,7 @@ function switchOverlay(name) {{
   activeOverlay = name;
   isolatedCluster=null; isolatedPhz=null; hiddenClusters={{}}; hiddenPhz={{}};
   isolatedEROGroup=null; hiddenEROGroups={{}}; isolatedGaiaXgb=null; hiddenGaiaXgb={{}};
+  isolatedGaiaHilat=null; hiddenGaiaHilat={{}};
   isolatedEroDesi=null; hiddenEroDesi={{}};
   clearSheetMode();
   _updateEROOptgroup();
@@ -2536,6 +2944,7 @@ document.getElementById('overlay-select').addEventListener('change', function() 
 function restoreAll() {{
   isolatedPhz=null; isolatedCluster=null; hiddenClusters={{}}; hiddenPhz={{}};
   isolatedEROGroup=null; hiddenEROGroups={{}}; isolatedGaiaXgb=null; hiddenGaiaXgb={{}};
+  isolatedGaiaHilat=null; hiddenGaiaHilat={{}};
   isolatedEroDesi=null; hiddenEroDesi={{}};
   applyVisibility();
 }}
@@ -2593,6 +3002,17 @@ plotDiv.on('plotly_legendclick', function(data) {{
     }} else {{
       isolatedGaiaXgb = null;
       hiddenGaiaXgb[traceIdx] = !hiddenGaiaXgb[traceIdx];
+    }}
+    applyVisibility(); return false;
+  }}
+  if (traceIdx >= GAIA_HILAT_START && traceIdx < GAIA_HILAT_START + GAIA_HILAT_N_LEGEND) {{
+    var cmd = data.event && (data.event.metaKey || data.event.ctrlKey);
+    if (cmd) {{
+      hiddenClusters = {{}}; hiddenGaiaHilat = {{}};
+      isolatedGaiaHilat = (isolatedGaiaHilat === traceIdx) ? null : traceIdx;
+    }} else {{
+      isolatedGaiaHilat = null;
+      hiddenGaiaHilat[traceIdx] = !hiddenGaiaHilat[traceIdx];
     }}
     applyVisibility(); return false;
   }}
@@ -2664,7 +3084,7 @@ document.addEventListener('keydown', function(e) {{
 }});
 plotDiv.addEventListener('dblclick', function(e) {{
   var anyHidden=Object.values(hiddenClusters).some(Boolean)||Object.values(hiddenPhz).some(Boolean)||Object.values(hiddenEROGroups).some(Boolean);
-  if(isolatedPhz===null&&isolatedCluster===null&&isolatedEROGroup===null&&isolatedGaiaXgb===null&&isolatedEroDesi===null&&!anyHidden) return;
+  if(isolatedPhz===null&&isolatedCluster===null&&isolatedEROGroup===null&&isolatedGaiaXgb===null&&isolatedGaiaHilat===null&&isolatedEroDesi===null&&!anyHidden) return;
   var node=e.target;
   while(node){{if(node.classList&&node.classList.contains('legend'))return;node=node.parentNode;}}
   restoreAll(); clearSheetMode();
@@ -2688,6 +3108,8 @@ function showPointFromPt(pt) {{
                    (ci >= ERO_DESI_SUB_START && ci < ERO_DESI_SUB_START + ERO_DESI_N_SUB);
   var isGaiaXgb  = (ci >= GAIA_XGB_START && ci < GAIA_XGB_START + GAIA_XGB_N_LEGEND) ||
                    (ci >= GAIA_XGB_SUB_START && ci < GAIA_XGB_SUB_START + GAIA_XGB_N_SUB);
+  var isGaiaHilat = (ci >= GAIA_HILAT_START && ci < GAIA_HILAT_START + GAIA_HILAT_N_LEGEND) ||
+                    (ci >= GAIA_HILAT_SUB_START && ci < GAIA_HILAT_SUB_START + GAIA_HILAT_N_SUB);
   var isERO      = (ci >= ERO_REGULAR_START && ci < GAIA_XGB_START);
   if (isEroDesi) {{
     var cd = pt.customdata || [];
@@ -2734,7 +3156,27 @@ function showPointFromPt(pt) {{
       lines.push('RA=' + parseFloat(ra).toFixed(4) + '  Dec=' + (dec>=0?'+':'') + parseFloat(dec).toFixed(4));
     if (gm !== null && isFinite(gm)) lines.push('G=' + parseFloat(gm).toFixed(2));
     if (prob !== null && prob !== undefined && isFinite(prob))
-      lines.push('XGB P(gal)=' + (1.0 - parseFloat(prob)).toPrecision(4));
+      lines.push('XGB P(gal)=' + parseFloat(prob).toPrecision(4));
+    if (sid) lines.push('id=' + sid);
+    showPoint(sid, lines.join('\\n'));
+  }} else if (isGaiaHilat) {{
+    var cd  = pt.customdata || [];
+    var sid  = cd[0] ? String(cd[0]) : '';
+    var prob = (cd[1] !== undefined && cd[1] !== null) ? cd[1] : null;
+    var ra   = (cd[2] !== undefined && cd[2] !== null) ? cd[2] : null;
+    var dec  = (cd[3] !== undefined && cd[3] !== null) ? cd[3] : null;
+    var gm   = (cd[4] !== undefined && cd[4] !== null) ? cd[4] : null;
+    var _ghM = nm.match(/^gxhl_(star|gal) C(\\d+)$/);
+    var _ghLabel = nm.replace(/\\s+\\(n=.*\\)/, '');
+    if (_ghM) {{
+      _ghLabel = (_ghM[1]==='star' ? 'Gaia XGB HL Star' : 'Gaia XGB HL Galaxy') + '  C' + _ghM[2];
+    }}
+    var lines = [_ghLabel];
+    if (ra !== null && dec !== null)
+      lines.push('RA=' + parseFloat(ra).toFixed(4) + '  Dec=' + (dec>=0?'+':'') + parseFloat(dec).toFixed(4));
+    if (gm !== null && isFinite(gm)) lines.push('G=' + parseFloat(gm).toFixed(2));
+    if (prob !== null && prob !== undefined && isFinite(prob))
+      lines.push('XGB P(gal)=' + parseFloat(prob).toPrecision(4));
     if (sid) lines.push('id=' + sid);
     showPoint(sid, lines.join('\\n'));
   }} else if (isQ1) {{
@@ -2850,6 +3292,129 @@ applyZAxis(_currentZ);
     print(f"  -> {out}  ({n_cached} cutouts embedded)")
 
 
+
+def _density_bin_edges(q1_emb: np.ndarray, n_bins: int = 100):
+    """Return fixed bin edges spanning Q1 UMAP range + 0.5 margin."""
+    x_edges = np.linspace(q1_emb[:, 0].min() - 0.5, q1_emb[:, 0].max() + 0.5, n_bins + 1)
+    y_edges = np.linspace(q1_emb[:, 1].min() - 0.5, q1_emb[:, 1].max() + 0.5, n_bins + 1)
+    return x_edges, y_edges
+
+
+def _build_density_hists(
+    q1_emb: np.ndarray,
+    df_allphz: pd.DataFrame | None,
+    df_desi: pd.DataFrame | None,
+    ero_reg_emb: np.ndarray | None, ero_reg_sids: np.ndarray | None,
+    ero_rebal_emb: np.ndarray | None, ero_rebal_sids: np.ndarray | None,
+    sid_to_group: dict | None,
+    gaia_xgb_emb: np.ndarray | None, gaia_xgb_gal_prob: np.ndarray | None,
+    gaia_hilat_emb: np.ndarray | None, gaia_hilat_gal_prob: np.ndarray | None,
+    ero_desi_emb: np.ndarray | None, ero_desi_cat: np.ndarray | None,
+    gal_thresh: float = 0.5,
+    n_bins: int = 100,
+) -> dict:
+    """Build per-category histogram counts for each overlay from full (pre-subsample) data.
+
+    Returns dict ready for JSON: {
+        "bins": {"xmin": ..., "xmax": ..., "ymin": ..., "ymax": ..., "n": int},
+        "overlays": { overlay_name: { category_key: [flat counts], ... }, ... }
+    }
+    """
+    x_edges, y_edges = _density_bin_edges(q1_emb, n_bins)
+    result: dict = {
+        "bins": {
+            "xmin": round(float(x_edges[0]), 4),
+            "xmax": round(float(x_edges[-1]), 4),
+            "ymin": round(float(y_edges[0]), 4),
+            "ymax": round(float(y_edges[-1]), 4),
+            "n": n_bins,
+        },
+        "overlays": {},
+    }
+
+    def _hist(emb_2d):
+        H, _, _ = np.histogram2d(emb_2d[:, 0], emb_2d[:, 1], bins=[x_edges, y_edges])
+        return [int(v) for v in H.ravel()]
+
+    # Q1 base (self-density, no categories)
+    result["overlays"]["q1"] = {"all": _hist(q1_emb)}
+
+    # All PHZ — per phz value
+    if df_allphz is not None and "umap1" in df_allphz.columns:
+        cats = {}
+        for v in sorted(df_allphz["phz"].unique()):
+            m = df_allphz["phz"] == v
+            if m.sum() == 0:
+                continue
+            pts = df_allphz.loc[m, ["umap1", "umap2"]].values
+            cats[str(int(v))] = _hist(pts)
+        result["overlays"]["allphz"] = cats
+
+    # DESI — per phz value
+    if df_desi is not None and "umap1" in df_desi.columns:
+        cats = {}
+        for v in sorted(df_desi["phz"].unique()):
+            m = df_desi["phz"] == v
+            if m.sum() == 0:
+                continue
+            pts = df_desi.loc[m, ["umap1", "umap2"]].values
+            cats[str(int(v))] = _hist(pts)
+        result["overlays"]["desi"] = cats
+
+    # ERO regular — per group
+    if ero_reg_emb is not None and ero_reg_sids is not None and sid_to_group:
+        cats = {}
+        groups = np.array([sid_to_group.get(sid, None) for sid in ero_reg_sids])
+        for g in sorted(set(groups) - {None}):
+            m = groups == g
+            if m.sum() == 0:
+                continue
+            cats[g] = _hist(ero_reg_emb[m])
+        result["overlays"]["ero"] = cats
+
+    # ERO rebalanced — per group
+    if ero_rebal_emb is not None and ero_rebal_sids is not None and sid_to_group:
+        cats = {}
+        groups = np.array([sid_to_group.get(sid, None) for sid in ero_rebal_sids])
+        for g in sorted(set(groups) - {None}):
+            m = groups == g
+            if m.sum() == 0:
+                continue
+            cats[g] = _hist(ero_rebal_emb[m])
+        result["overlays"]["ero_rebal"] = cats
+
+    # Gaia XGB — star / galaxy
+    if gaia_xgb_emb is not None and gaia_xgb_gal_prob is not None:
+        m_gal = gaia_xgb_gal_prob >= gal_thresh
+        result["overlays"]["gaia_xgb"] = {
+            "star": _hist(gaia_xgb_emb[~m_gal]),
+            "gal":  _hist(gaia_xgb_emb[m_gal]),
+        }
+
+    # Gaia XGB high-lat — star / galaxy
+    if gaia_hilat_emb is not None and gaia_hilat_gal_prob is not None:
+        m_gal = gaia_hilat_gal_prob >= gal_thresh
+        result["overlays"]["gaia_hilat"] = {
+            "star": _hist(gaia_hilat_emb[~m_gal]),
+            "gal":  _hist(gaia_hilat_emb[m_gal]),
+        }
+
+    # ERO DESI — per cat value
+    if ero_desi_emb is not None and ero_desi_cat is not None:
+        cats = {}
+        for cv in sorted(set(ero_desi_cat)):
+            m = ero_desi_cat == cv
+            if m.sum() == 0:
+                continue
+            cats[str(int(cv))] = _hist(ero_desi_emb[m])
+        result["overlays"]["ero_desi"] = cats
+
+    n_overlays = len(result["overlays"])
+    n_cats = sum(len(v) for v in result["overlays"].values())
+    print(f"  Built density histograms: {n_overlays} overlays, {n_cats} categories, {n_bins}×{n_bins} bins")
+    return result
+
+
 def _nn_map_ero_features_onto_q1(
     q1_emb: np.ndarray,
     ero_emb: np.ndarray,
@@ -2889,8 +3454,8 @@ def _nn_map_ero_features_onto_q1(
         mapped[:, j] = ero_features[valid][idx.ravel(), j]
         # Range from original ERO distribution (matches static plot)
         src = ero_features[valid, j]
-        vmin = round(float(np.percentile(src, 2)),  4)
-        vmax = round(float(np.percentile(src, 98)), 4)
+        vmin = round(float(np.percentile(src, 1)),  4)
+        vmax = round(float(np.percentile(src, 99)), 4)
         if vmin == vmax:
             vmin, vmax = float(src.min()), float(src.max())
         ero_feat_ranges[f"euclid_ero::{ero_feature_names[j]}"] = [vmin, vmax]
@@ -3014,8 +3579,10 @@ def main() -> int:
     )
     parser.add_argument("--3d", dest="make_3d", action="store_true",
                         help="Regenerate HTML from saved CSVs (no DB query).")
-    parser.add_argument("--max-points", type=int, default=500,
-                        help="Max points per phz class (default: 500).")
+    parser.add_argument("--max-points", type=int, default=5000,
+                        help="Max total overlay points for All PHZ (default: 5000). "
+                             "Classes with <500 sources are kept in full; "
+                             "remaining budget is split proportionally.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -3074,7 +3641,7 @@ def main() -> int:
             print(f"ERROR: {allphz_path} not found. Run without --3d first.")
             return 1
 
-        print("\n[4] Loading saved allphz projected data...")
+        print("\n[4a] Loading saved allphz projected data...")
         df_allphz = pd.read_csv(allphz_path)
         df_allphz["phz"] = df_allphz["phz"].astype(int)
         if "cluster" not in df_allphz.columns:
@@ -3085,7 +3652,7 @@ def main() -> int:
         df_desi = None
         desi_path = PROJECTED_DIR / "q1_desi_projected.csv"
         if desi_path.exists():
-            print("\n[4b] Loading saved DESI projected data...")
+            print("\n[4b] Loading saved DESI data...")
             df_desi = pd.read_csv(desi_path)
             df_desi["phz"] = df_desi["phz"].astype(int)
             if "cluster" not in df_desi.columns:
@@ -3093,7 +3660,7 @@ def main() -> int:
                     df_desi[["umap1","umap2"]].values, q1_emb, q1_labels)
             print(f"  {len(df_desi):,} DESI sources")
 
-        print("\n[4c] Loading ERO projected data...")
+        print("\n[4c] Loading ERO data...")
         ero_regular_emb = ero_regular_y = ero_regular_gmag = ero_regular_features = None
         ero_rebal_emb   = ero_rebal_y   = ero_rebal_gmag   = ero_rebal_features   = None
         ero_reg_sids = ero_rebal_sids = None
@@ -3127,20 +3694,20 @@ def main() -> int:
         else:
             print("  No ero_rebal_projected.csv — run without --3d first.")
 
-        print("\n[4d] Loading ERO group assignments + extra data...")
+        print("\n[4d] Loading ERO groups + extra data...")
         sid_to_group = load_ero_group_map()
         ero_reg_extra = load_ero_extra_data_from_npz(
             ARRAYS_DIR / "ero_indiv.npz", ero_reg_sids) if ero_reg_sids is not None else {}
         ero_rebal_extra = load_ero_extra_data_from_npz(
             ARRAYS_DIR / "ero_indiv_rebalanced.npz", ero_rebal_sids) if ero_rebal_sids is not None else {}
 
-        print("\n[4e] Loading Gaia XGB projected data...")
-        gaia_xgb_emb = gaia_xgb_star_prob = gaia_xgb_sids = gaia_xgb_gmag = None
+        print("\n[4e] Loading Gaia XGB data...")
+        gaia_xgb_emb = gaia_xgb_gal_prob = gaia_xgb_sids = gaia_xgb_gmag = None
         gaia_xgb_ra = gaia_xgb_dec = None
         if GAIA_XGB_CSV.exists():
             df_gxgb          = pd.read_csv(GAIA_XGB_CSV)
             gaia_xgb_emb     = df_gxgb[["umap1", "umap2"]].values
-            gaia_xgb_star_prob = df_gxgb["star_prob"].values.astype(float)
+            gaia_xgb_gal_prob = df_gxgb["gal_prob"].values.astype(float)
             gaia_xgb_sids    = df_gxgb["source_id"].astype(str).values
             gaia_xgb_gmag    = df_gxgb["phot_g_mean_mag"].values.astype(float) \
                                if "phot_g_mean_mag" in df_gxgb.columns else None
@@ -3149,12 +3716,81 @@ def main() -> int:
             gaia_xgb_dec     = df_gxgb["dec"].values.astype(float) \
                                if "dec" in df_gxgb.columns else None
             print(f"  {len(gaia_xgb_emb):,} Gaia XGB sources  "
-                  f"(stars={(gaia_xgb_star_prob >= STAR_THRESH).sum():,}  "
-                  f"galaxies={(gaia_xgb_star_prob < STAR_THRESH).sum():,})")
+                  f"(galaxies={(gaia_xgb_gal_prob >= GAL_THRESH).sum():,}  "
+                  f"stars={(gaia_xgb_gal_prob < GAL_THRESH).sum():,})")
+            # Save full data for density histograms before subsampling
+            _gaia_xgb_full_emb  = gaia_xgb_emb.copy()
+            _gaia_xgb_full_gprob = gaia_xgb_gal_prob.copy()
+            # Subsample Gaia XGB to ~10k density-preserving
+            _gxgb_cap = 10_000
+            if len(gaia_xgb_emb) > _gxgb_cap:
+                _gi = _random_subsample_idx(len(gaia_xgb_emb), _gxgb_cap, args.seed)
+                gaia_xgb_emb       = gaia_xgb_emb[_gi]
+                gaia_xgb_gal_prob = gaia_xgb_gal_prob[_gi]
+                gaia_xgb_sids      = gaia_xgb_sids[_gi]
+                if gaia_xgb_gmag is not None: gaia_xgb_gmag = gaia_xgb_gmag[_gi]
+                if gaia_xgb_ra   is not None: gaia_xgb_ra   = gaia_xgb_ra[_gi]
+                if gaia_xgb_dec  is not None: gaia_xgb_dec  = gaia_xgb_dec[_gi]
+                print(f"  Subsampled to {_gxgb_cap:,} (density-preserving)")
         else:
+            _gaia_xgb_full_emb = _gaia_xgb_full_gprob = None
             print(f"  {GAIA_XGB_CSV.name} not found — Gaia XGB overlay disabled.")
 
-        print("\n[5] Loading cutout thumbnails and contact sheets...")
+        # ── High-lat subset ──
+        gaia_hilat_emb = gaia_hilat_gal_prob = gaia_hilat_sids = gaia_hilat_gmag = None
+        gaia_hilat_ra = gaia_hilat_dec = None
+        if GAIA_HILAT_CSV.exists():
+            df_hilat = pd.read_csv(GAIA_HILAT_CSV)
+        elif GAIA_XGB_CSV.exists():
+            df_gxgb_full = pd.read_csv(GAIA_XGB_CSV)
+            df_hilat = _filter_gaia_xgb_hilat(df_gxgb_full)
+        else:
+            df_hilat = None
+        if df_hilat is not None and len(df_hilat) > 0:
+            gaia_hilat_emb       = df_hilat[["umap1", "umap2"]].values
+            gaia_hilat_gal_prob = df_hilat["gal_prob"].values.astype(float)
+            gaia_hilat_sids      = df_hilat["source_id"].astype(str).values
+            gaia_hilat_gmag      = df_hilat["phot_g_mean_mag"].values.astype(float) \
+                                   if "phot_g_mean_mag" in df_hilat.columns else None
+            gaia_hilat_ra        = df_hilat["ra"].values.astype(float) \
+                                   if "ra" in df_hilat.columns else None
+            gaia_hilat_dec       = df_hilat["dec"].values.astype(float) \
+                                   if "dec" in df_hilat.columns else None
+            _gaia_hilat_full_emb   = gaia_hilat_emb.copy()
+            _gaia_hilat_full_gprob = gaia_hilat_gal_prob.copy()
+            _ghl_cap = 10_000
+            if len(gaia_hilat_emb) > _ghl_cap:
+                _ghi = _random_subsample_idx(len(gaia_hilat_emb), _ghl_cap, args.seed)
+                gaia_hilat_emb       = gaia_hilat_emb[_ghi]
+                gaia_hilat_gal_prob = gaia_hilat_gal_prob[_ghi]
+                gaia_hilat_sids      = gaia_hilat_sids[_ghi]
+                if gaia_hilat_gmag is not None: gaia_hilat_gmag = gaia_hilat_gmag[_ghi]
+                if gaia_hilat_ra   is not None: gaia_hilat_ra   = gaia_hilat_ra[_ghi]
+                if gaia_hilat_dec  is not None: gaia_hilat_dec  = gaia_hilat_dec[_ghi]
+                print(f"  High-lat: subsampled to {_ghl_cap:,}")
+            print(f"  High-lat: {len(gaia_hilat_emb):,} sources  "
+                  f"(|b|>10, |ecl_lat|>45)  "
+                  f"(galaxies={(gaia_hilat_gal_prob >= GAL_THRESH).sum():,}  "
+                  f"stars={(gaia_hilat_gal_prob < GAL_THRESH).sum():,})")
+        else:
+            _gaia_hilat_full_emb = _gaia_hilat_full_gprob = None
+            print("  High-lat: no sources pass latitude cuts or CSV not found.")
+
+        # ── Build per-category density histograms (full pre-subsample data) ──
+        print("\n[4f] Building per-category density histograms...")
+        _density_hist = _build_density_hists(
+            q1_emb, df_allphz, df_desi,
+            ero_regular_emb, ero_reg_sids,
+            ero_rebal_emb, ero_rebal_sids,
+            sid_to_group,
+            _gaia_xgb_full_emb, _gaia_xgb_full_gprob,
+            _gaia_hilat_full_emb, _gaia_hilat_full_gprob,
+            ero_desi_emb=None,   # loaded later at [5g]
+            ero_desi_cat=None,
+            gal_thresh=GAL_THRESH,
+        )
+
+        print("\n[5a] Loading cutout thumbnails and contact sheets...")
         cutout_cache  = load_cutout_cache(CUTOUTS_DIR)
         contact_sheet_cache, sheet_counts, sheet_extra = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
         desi_contact_sheet_cache, desi_sheet_counts, desi_sheet_extra = load_contact_sheet_cache_desi(DESI_CUTOUTS_DIR)
@@ -3167,16 +3803,11 @@ def main() -> int:
             ero_cutout_cache_data.update(_ero_desi_cutouts)
 
         if args.max_points is not None:
-            print(f"\n  Applying --max-points {args.max_points}...")
-            cutout_sids = set(cutout_cache.keys()); parts = []
-            for v in PHZ_LABELS:
-                sub = df_allphz[df_allphz["phz"]==v]
-                if not len(sub): continue
-                if len(sub) > args.max_points:
-                    print(f"  phz={v}:")
-                    sub = _subsample_keep_cutouts(sub, cutout_sids, args.max_points, args.seed)
-                parts.append(sub)
-            df_allphz = pd.concat(parts, ignore_index=True) if parts else df_allphz
+            print(f"\n  Applying --max-points {args.max_points} (hybrid density-preserving)...")
+            cutout_sids = set(cutout_cache.keys())
+            df_allphz = _subsample_hybrid(
+                df_allphz, "phz", PHZ_LABELS, cutout_sids,
+                max_total=args.max_points, floor=500, seed=args.seed)
 
         _ero_feat_ranges: dict = {}
         if ero_regular_emb is not None and ero_regular_features is not None and ero_feature_names:
@@ -3185,7 +3816,7 @@ def main() -> int:
                 ero_feature_names, q1_features, feature_names or [],
             )
 
-        print("\n[5e] Loading Q1 Z arrays (model P(gal) + PHZ P(gal))...")
+        print("\n[5b] Loading Q1 Z arrays (model P(gal) + PHZ P(gal))...")
         q1_model_pgal = q1_phz_pgal = None
         if q1_sids is not None and q1_features_base is not None:
             q1_model_pgal, q1_phz_pgal = _load_q1_z_arrays(
@@ -3197,18 +3828,43 @@ def main() -> int:
                 _fill_col(df_desi,   "phz_pgal", sid_to_phz_pgal)
 
         # XGB inference on all PHZ/DESI sources for 100% model_pgal coverage
-        print("\n[5e2] Computing XGB P(gal) for all overlay sources...")
+        print("\n[5c] Computing XGB P(gal) for all overlay sources...")
         if df_allphz is not None:
             df_allphz["model_pgal"] = _compute_model_pgal_for_df(df_allphz)
         if df_desi is not None:
             df_desi["model_pgal"] = _compute_model_pgal_for_df(df_desi)
 
-        print("\n[5f] Loading ERO model P(gal)...")
+        print("\n[5d] Loading ERO model P(gal)...")
         ero_reg_pgal   = _load_ero_pgal(ero_reg_sids)   if ero_reg_sids   is not None else None
         ero_rebal_pgal = _load_ero_pgal(ero_rebal_sids) if ero_rebal_sids is not None else None
 
+        # Subsample ERO overlays to ~10k density-preserving
+        _ero_cap = 10_000
+        if ero_regular_emb is not None and len(ero_regular_emb) > _ero_cap:
+            _ei = _random_subsample_idx(len(ero_regular_emb), _ero_cap, args.seed)
+            ero_regular_emb = ero_regular_emb[_ei]
+            if ero_regular_y is not None: ero_regular_y = ero_regular_y[_ei]
+            if ero_regular_gmag is not None: ero_regular_gmag = ero_regular_gmag[_ei]
+            if ero_regular_features is not None: ero_regular_features = ero_regular_features[_ei]
+            if ero_reg_sids is not None: ero_reg_sids = ero_reg_sids[_ei]
+            if ero_reg_extra:
+                ero_reg_extra = {k: v[_ei] for k, v in ero_reg_extra.items()}
+            if ero_reg_pgal is not None: ero_reg_pgal = ero_reg_pgal[_ei]
+            print(f"  ERO regular subsampled to {_ero_cap:,} (density-preserving)")
+        if ero_rebal_emb is not None and len(ero_rebal_emb) > _ero_cap:
+            _ei = _random_subsample_idx(len(ero_rebal_emb), _ero_cap, args.seed)
+            ero_rebal_emb = ero_rebal_emb[_ei]
+            if ero_rebal_y is not None: ero_rebal_y = ero_rebal_y[_ei]
+            if ero_rebal_gmag is not None: ero_rebal_gmag = ero_rebal_gmag[_ei]
+            if ero_rebal_features is not None: ero_rebal_features = ero_rebal_features[_ei]
+            if ero_rebal_sids is not None: ero_rebal_sids = ero_rebal_sids[_ei]
+            if ero_rebal_extra:
+                ero_rebal_extra = {k: v[_ei] for k, v in ero_rebal_extra.items()}
+            if ero_rebal_pgal is not None: ero_rebal_pgal = ero_rebal_pgal[_ei]
+            print(f"  ERO rebalanced subsampled to {_ero_cap:,} (density-preserving)")
+
         # ── ERO-DESI overlay ──────────────────────────────────────────────────
-        print("\n[5g] Loading ERO-DESI data...")
+        print("\n[5e] Loading ERO-DESI data...")
         ero_desi_emb = ero_desi_cat = ero_desi_model_pgal = ero_desi_gmag = None
         ero_desi_spectype = ero_desi_z = ero_desi_class_star = ero_desi_sids = None
         ero_desi_ra = ero_desi_dec = None
@@ -3286,6 +3942,19 @@ def main() -> int:
         else:
             print("  ero_desi.npz not found — ERO-DESI overlay disabled.")
 
+        # Add ERO-DESI density (loaded after initial density build)
+        if ero_desi_emb is not None and ero_desi_cat is not None:
+            x_edges, y_edges = _density_bin_edges(q1_emb, 100)
+            ed_cats = {}
+            for cv in sorted(set(ero_desi_cat)):
+                m = ero_desi_cat == cv
+                if m.sum() == 0:
+                    continue
+                H, _, _ = np.histogram2d(ero_desi_emb[m, 0], ero_desi_emb[m, 1],
+                                         bins=[x_edges, y_edges])
+                ed_cats[str(int(cv))] = [int(v) for v in H.ravel()]
+            _density_hist["overlays"]["ero_desi"] = ed_cats
+
         print("\n[6] Generating 3D HTML...")
         plot_umap_3d_plotly(
             q1_emb, q1_labels, q1_gmag, df_allphz, OUTPUT_DIR,
@@ -3310,7 +3979,7 @@ def main() -> int:
             ero_sheet_counts=ero_sheet_counts_data,
             ero_sheet_extra=ero_sheet_extra,
             ero_cutout_cache=ero_cutout_cache_data,
-            gaia_xgb_emb=gaia_xgb_emb, gaia_xgb_star_prob=gaia_xgb_star_prob,
+            gaia_xgb_emb=gaia_xgb_emb, gaia_xgb_gal_prob=gaia_xgb_gal_prob,
             gaia_xgb_sids=gaia_xgb_sids, gaia_xgb_gmag=gaia_xgb_gmag,
             q1_model_pgal=q1_model_pgal, q1_phz_pgal=q1_phz_pgal,
             ero_reg_pgal=ero_reg_pgal, ero_rebal_pgal=ero_rebal_pgal,
@@ -3326,6 +3995,10 @@ def main() -> int:
             ero_desi_sheet_extra=ero_desi_sheet_extra,
             ero_desi_sids=ero_desi_sids,
             gaia_xgb_ra=gaia_xgb_ra, gaia_xgb_dec=gaia_xgb_dec,
+            gaia_hilat_emb=gaia_hilat_emb, gaia_hilat_gal_prob=gaia_hilat_gal_prob,
+            gaia_hilat_sids=gaia_hilat_sids, gaia_hilat_gmag=gaia_hilat_gmag,
+            gaia_hilat_ra=gaia_hilat_ra, gaia_hilat_dec=gaia_hilat_dec,
+            density_hist_data=_density_hist,
         )
         return 0
 
@@ -3425,80 +4098,8 @@ def main() -> int:
     ero_rebal_extra = load_ero_extra_data_from_npz(
         ARRAYS_DIR / "ero_indiv_rebalanced.npz", ero_rebal_sids) if ero_rebal_sids is not None else {}
 
-    print("\n[6] Loading cutout thumbnails and contact sheets...")
-    cutout_cache  = load_cutout_cache(CUTOUTS_DIR)
-    contact_sheet_cache, sheet_counts, sheet_extra = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
-    desi_contact_sheet_cache, desi_sheet_counts, desi_sheet_extra = load_contact_sheet_cache_desi(DESI_CUTOUTS_DIR)
-    ero_desi_cs_cache, ero_desi_cs_counts, ero_desi_sheet_extra = load_contact_sheet_cache_ero_desi(ERO_DESI_CUTOUTS_DIR)
-    ero_contact_sheet_cache, ero_sheet_counts_data, ero_sheet_extra = load_contact_sheet_cache_ero(ERO_CUTOUTS_DIR)
-    ero_cutout_cache_data = load_cutout_cache_ero(ERO_CUTOUTS_DIR)
-    # Also load ERO-DESI individual cutouts (keyed by source_id)
-    _ero_desi_cutouts = load_cutout_cache_ero(ERO_DESI_CUTOUTS_DIR)
-    if _ero_desi_cutouts:
-        ero_cutout_cache_data.update(_ero_desi_cutouts)
-
-    if args.max_points is not None:
-        print(f"\n  Applying --max-points {args.max_points}...")
-        cutout_sids = set(cutout_cache.keys()); parts = []
-        for v in PHZ_LABELS:
-            sub = df_allphz[df_allphz["phz"]==v]
-            if not len(sub): continue
-            if len(sub) > args.max_points:
-                print(f"  phz={v}:")
-                sub = _subsample_keep_cutouts(sub, cutout_sids, args.max_points, args.seed)
-            parts.append(sub)
-        df_allphz = pd.concat(parts, ignore_index=True) if parts else df_allphz
-
-    print("\n[6b] Loading Gaia XGB projected data...")
-    gaia_xgb_emb = gaia_xgb_star_prob = gaia_xgb_sids = gaia_xgb_gmag = None
-    gaia_xgb_ra = gaia_xgb_dec = None
-    if GAIA_XGB_CSV.exists():
-        df_gxgb            = pd.read_csv(GAIA_XGB_CSV)
-        gaia_xgb_emb       = df_gxgb[["umap1", "umap2"]].values
-        gaia_xgb_star_prob = df_gxgb["star_prob"].values.astype(float)
-        gaia_xgb_sids      = df_gxgb["source_id"].astype(str).values
-        gaia_xgb_gmag      = df_gxgb["phot_g_mean_mag"].values.astype(float) \
-                             if "phot_g_mean_mag" in df_gxgb.columns else None
-        gaia_xgb_ra        = df_gxgb["ra"].values.astype(float) \
-                             if "ra" in df_gxgb.columns else None
-        gaia_xgb_dec       = df_gxgb["dec"].values.astype(float) \
-                             if "dec" in df_gxgb.columns else None
-        print(f"  {len(gaia_xgb_emb):,} Gaia XGB sources  "
-              f"(stars={(gaia_xgb_star_prob >= STAR_THRESH).sum():,}  "
-              f"galaxies={(gaia_xgb_star_prob < STAR_THRESH).sum():,})")
-    else:
-        print(f"  {GAIA_XGB_CSV.name} not found — Gaia XGB overlay disabled.")
-
-    _ero_feat_ranges: dict = {}
-    if ero_regular_emb is not None and ero_regular_features is not None and ero_feature_names:
-        q1_features, feature_names, _ero_feat_ranges = _nn_map_ero_features_onto_q1(
-            q1_emb, ero_regular_emb, ero_regular_features,
-            ero_feature_names, q1_features, feature_names or [],
-        )
-
-    print("\n[6c] Computing Q1 Z arrays (model P(gal) + PHZ P(gal))...")
-    q1_model_pgal = q1_phz_pgal = None
-    if q1_sids is not None and q1_features_base is not None:
-        q1_model_pgal, q1_phz_pgal = _load_q1_z_arrays(q1_sids, q1_features_base)
-        # Fill PHZ pgal gaps from Q1 cache
-        if q1_phz_pgal is not None:
-            sid_to_phz_pgal = dict(zip(q1_sids, q1_phz_pgal))
-            _fill_col(df_allphz, "phz_pgal", sid_to_phz_pgal)
-            _fill_col(df_desi,   "phz_pgal", sid_to_phz_pgal)
-
-    # XGB inference on all PHZ/DESI sources for 100% model_pgal coverage
-    print("\n[6c2] Computing XGB P(gal) for all overlay sources...")
-    if df_allphz is not None:
-        df_allphz["model_pgal"] = _compute_model_pgal_for_df(df_allphz)
-    if df_desi is not None:
-        df_desi["model_pgal"] = _compute_model_pgal_for_df(df_desi)
-
-    print("\n[6d] Loading ERO model P(gal)...")
-    ero_reg_pgal   = _load_ero_pgal(ero_reg_sids)   if ero_reg_sids   is not None else None
-    ero_rebal_pgal = _load_ero_pgal(ero_rebal_sids) if ero_rebal_sids is not None else None
-
     # ── ERO-DESI overlay ─────────────────────────────────────────────────────
-    print("\n[6e] Projecting ERO-DESI sources...")
+    print("\n[5e] Projecting ERO-DESI sources...")
     ero_desi_emb = ero_desi_cat = ero_desi_model_pgal = ero_desi_gmag = None
     ero_desi_spectype = ero_desi_z = ero_desi_class_star = ero_desi_sids = None
     ero_desi_ra = ero_desi_dec = None
@@ -3557,6 +4158,175 @@ def main() -> int:
     else:
         print("  ero_desi.npz not found — ERO-DESI overlay disabled.")
 
+    print("\n[6] Loading cutout thumbnails and contact sheets...")
+    cutout_cache  = load_cutout_cache(CUTOUTS_DIR)
+    contact_sheet_cache, sheet_counts, sheet_extra = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
+    desi_contact_sheet_cache, desi_sheet_counts, desi_sheet_extra = load_contact_sheet_cache_desi(DESI_CUTOUTS_DIR)
+    ero_desi_cs_cache, ero_desi_cs_counts, ero_desi_sheet_extra = load_contact_sheet_cache_ero_desi(ERO_DESI_CUTOUTS_DIR)
+    ero_contact_sheet_cache, ero_sheet_counts_data, ero_sheet_extra = load_contact_sheet_cache_ero(ERO_CUTOUTS_DIR)
+    ero_cutout_cache_data = load_cutout_cache_ero(ERO_CUTOUTS_DIR)
+    # Also load ERO-DESI individual cutouts (keyed by source_id)
+    _ero_desi_cutouts = load_cutout_cache_ero(ERO_DESI_CUTOUTS_DIR)
+    if _ero_desi_cutouts:
+        ero_cutout_cache_data.update(_ero_desi_cutouts)
+
+    # Save full allphz/desi for density histograms (before subsampling)
+    _df_allphz_full = df_allphz.copy() if df_allphz is not None else None
+    _df_desi_full   = df_desi.copy()   if df_desi is not None else None
+
+    if args.max_points is not None:
+        print(f"\n  Applying --max-points {args.max_points} (hybrid density-preserving)...")
+        cutout_sids = set(cutout_cache.keys())
+        df_allphz = _subsample_hybrid(
+            df_allphz, "phz", PHZ_LABELS, cutout_sids,
+            max_total=args.max_points, floor=500, seed=args.seed)
+
+    print("\n[6b] Loading Gaia XGB projected data...")
+    gaia_xgb_emb = gaia_xgb_gal_prob = gaia_xgb_sids = gaia_xgb_gmag = None
+    gaia_xgb_ra = gaia_xgb_dec = None
+    if GAIA_XGB_CSV.exists():
+        df_gxgb            = pd.read_csv(GAIA_XGB_CSV)
+        gaia_xgb_emb       = df_gxgb[["umap1", "umap2"]].values
+        gaia_xgb_gal_prob = df_gxgb["gal_prob"].values.astype(float)
+        gaia_xgb_sids      = df_gxgb["source_id"].astype(str).values
+        gaia_xgb_gmag      = df_gxgb["phot_g_mean_mag"].values.astype(float) \
+                             if "phot_g_mean_mag" in df_gxgb.columns else None
+        gaia_xgb_ra        = df_gxgb["ra"].values.astype(float) \
+                             if "ra" in df_gxgb.columns else None
+        gaia_xgb_dec       = df_gxgb["dec"].values.astype(float) \
+                             if "dec" in df_gxgb.columns else None
+        print(f"  {len(gaia_xgb_emb):,} Gaia XGB sources  "
+              f"(galaxies={(gaia_xgb_gal_prob >= GAL_THRESH).sum():,}  "
+              f"stars={(gaia_xgb_gal_prob < GAL_THRESH).sum():,})")
+        _gaia_xgb_full_emb  = gaia_xgb_emb.copy()
+        _gaia_xgb_full_gprob = gaia_xgb_gal_prob.copy()
+        # Subsample Gaia XGB to ~10k density-preserving
+        _gxgb_cap = 10_000
+        if len(gaia_xgb_emb) > _gxgb_cap:
+            _gi = _random_subsample_idx(len(gaia_xgb_emb), _gxgb_cap, args.seed)
+            gaia_xgb_emb       = gaia_xgb_emb[_gi]
+            gaia_xgb_gal_prob = gaia_xgb_gal_prob[_gi]
+            gaia_xgb_sids      = gaia_xgb_sids[_gi]
+            if gaia_xgb_gmag is not None: gaia_xgb_gmag = gaia_xgb_gmag[_gi]
+            if gaia_xgb_ra   is not None: gaia_xgb_ra   = gaia_xgb_ra[_gi]
+            if gaia_xgb_dec  is not None: gaia_xgb_dec  = gaia_xgb_dec[_gi]
+            print(f"  Subsampled to {_gxgb_cap:,} (density-preserving)")
+    else:
+        _gaia_xgb_full_emb = _gaia_xgb_full_gprob = None
+        print(f"  {GAIA_XGB_CSV.name} not found — Gaia XGB overlay disabled.")
+
+    # ── High-lat subset ──
+    gaia_hilat_emb = gaia_hilat_gal_prob = gaia_hilat_sids = gaia_hilat_gmag = None
+    gaia_hilat_ra = gaia_hilat_dec = None
+    if GAIA_HILAT_CSV.exists():
+        df_hilat = pd.read_csv(GAIA_HILAT_CSV)
+    elif GAIA_XGB_CSV.exists():
+        df_gxgb_full = pd.read_csv(GAIA_XGB_CSV)
+        df_hilat = _filter_gaia_xgb_hilat(df_gxgb_full)
+    else:
+        df_hilat = None
+    if df_hilat is not None and len(df_hilat) > 0:
+        gaia_hilat_emb       = df_hilat[["umap1", "umap2"]].values
+        gaia_hilat_gal_prob = df_hilat["gal_prob"].values.astype(float)
+        gaia_hilat_sids      = df_hilat["source_id"].astype(str).values
+        gaia_hilat_gmag      = df_hilat["phot_g_mean_mag"].values.astype(float) \
+                               if "phot_g_mean_mag" in df_hilat.columns else None
+        gaia_hilat_ra        = df_hilat["ra"].values.astype(float) \
+                               if "ra" in df_hilat.columns else None
+        gaia_hilat_dec       = df_hilat["dec"].values.astype(float) \
+                               if "dec" in df_hilat.columns else None
+        _gaia_hilat_full_emb   = gaia_hilat_emb.copy()
+        _gaia_hilat_full_gprob = gaia_hilat_gal_prob.copy()
+        _ghl_cap = 10_000
+        if len(gaia_hilat_emb) > _ghl_cap:
+            _ghi = _random_subsample_idx(len(gaia_hilat_emb), _ghl_cap, args.seed)
+            gaia_hilat_emb       = gaia_hilat_emb[_ghi]
+            gaia_hilat_gal_prob = gaia_hilat_gal_prob[_ghi]
+            gaia_hilat_sids      = gaia_hilat_sids[_ghi]
+            if gaia_hilat_gmag is not None: gaia_hilat_gmag = gaia_hilat_gmag[_ghi]
+            if gaia_hilat_ra   is not None: gaia_hilat_ra   = gaia_hilat_ra[_ghi]
+            if gaia_hilat_dec  is not None: gaia_hilat_dec  = gaia_hilat_dec[_ghi]
+            print(f"  High-lat: subsampled to {_ghl_cap:,}")
+        print(f"  High-lat: {len(gaia_hilat_emb):,} sources  "
+              f"(|b|>10, |ecl_lat|>45)  "
+              f"(galaxies={(gaia_hilat_gal_prob >= GAL_THRESH).sum():,}  "
+              f"stars={(gaia_hilat_gal_prob < GAL_THRESH).sum():,})")
+    else:
+        _gaia_hilat_full_emb = _gaia_hilat_full_gprob = None
+        print("  High-lat: no sources pass latitude cuts or CSV not found.")
+
+    _ero_feat_ranges: dict = {}
+    if ero_regular_emb is not None and ero_regular_features is not None and ero_feature_names:
+        q1_features, feature_names, _ero_feat_ranges = _nn_map_ero_features_onto_q1(
+            q1_emb, ero_regular_emb, ero_regular_features,
+            ero_feature_names, q1_features, feature_names or [],
+        )
+
+    print("\n[6c] Computing Q1 Z arrays (model P(gal) + PHZ P(gal))...")
+    q1_model_pgal = q1_phz_pgal = None
+    if q1_sids is not None and q1_features_base is not None:
+        q1_model_pgal, q1_phz_pgal = _load_q1_z_arrays(q1_sids, q1_features_base)
+        # Fill PHZ pgal gaps from Q1 cache
+        if q1_phz_pgal is not None:
+            sid_to_phz_pgal = dict(zip(q1_sids, q1_phz_pgal))
+            _fill_col(df_allphz, "phz_pgal", sid_to_phz_pgal)
+            _fill_col(df_desi,   "phz_pgal", sid_to_phz_pgal)
+
+    # XGB inference on all PHZ/DESI sources for 100% model_pgal coverage
+    print("\n[6c2] Computing XGB P(gal) for all overlay sources...")
+    if df_allphz is not None:
+        df_allphz["model_pgal"] = _compute_model_pgal_for_df(df_allphz)
+    if df_desi is not None:
+        df_desi["model_pgal"] = _compute_model_pgal_for_df(df_desi)
+
+    print("\n[6d] Loading ERO model P(gal)...")
+    ero_reg_pgal   = _load_ero_pgal(ero_reg_sids)   if ero_reg_sids   is not None else None
+    ero_rebal_pgal = _load_ero_pgal(ero_rebal_sids) if ero_rebal_sids is not None else None
+
+    # Save full ERO data for density histograms (before subsampling)
+    _ero_reg_full_emb  = ero_regular_emb.copy() if ero_regular_emb is not None else None
+    _ero_reg_full_sids = ero_reg_sids.copy()    if ero_reg_sids is not None else None
+    _ero_rebal_full_emb  = ero_rebal_emb.copy() if ero_rebal_emb is not None else None
+    _ero_rebal_full_sids = ero_rebal_sids.copy() if ero_rebal_sids is not None else None
+
+    # Subsample ERO overlays to ~10k density-preserving
+    _ero_cap = 10_000
+    if ero_regular_emb is not None and len(ero_regular_emb) > _ero_cap:
+        _ei = _random_subsample_idx(len(ero_regular_emb), _ero_cap, args.seed)
+        ero_regular_emb = ero_regular_emb[_ei]
+        if ero_regular_y is not None: ero_regular_y = ero_regular_y[_ei]
+        if ero_regular_gmag is not None: ero_regular_gmag = ero_regular_gmag[_ei]
+        if ero_regular_features is not None: ero_regular_features = ero_regular_features[_ei]
+        if ero_reg_sids is not None: ero_reg_sids = ero_reg_sids[_ei]
+        if ero_reg_extra:
+            ero_reg_extra = {k: v[_ei] for k, v in ero_reg_extra.items()}
+        if ero_reg_pgal is not None: ero_reg_pgal = ero_reg_pgal[_ei]
+        print(f"  ERO regular subsampled to {_ero_cap:,} (density-preserving)")
+    if ero_rebal_emb is not None and len(ero_rebal_emb) > _ero_cap:
+        _ei = _random_subsample_idx(len(ero_rebal_emb), _ero_cap, args.seed)
+        ero_rebal_emb = ero_rebal_emb[_ei]
+        if ero_rebal_y is not None: ero_rebal_y = ero_rebal_y[_ei]
+        if ero_rebal_gmag is not None: ero_rebal_gmag = ero_rebal_gmag[_ei]
+        if ero_rebal_features is not None: ero_rebal_features = ero_rebal_features[_ei]
+        if ero_rebal_sids is not None: ero_rebal_sids = ero_rebal_sids[_ei]
+        if ero_rebal_extra:
+            ero_rebal_extra = {k: v[_ei] for k, v in ero_rebal_extra.items()}
+        if ero_rebal_pgal is not None: ero_rebal_pgal = ero_rebal_pgal[_ei]
+        print(f"  ERO rebalanced subsampled to {_ero_cap:,} (density-preserving)")
+
+    # ── Build per-category density histograms (full pre-subsample data) ──
+    print("\n[6e] Building per-category density histograms...")
+    _density_hist = _build_density_hists(
+        q1_emb, _df_allphz_full, _df_desi_full,
+        _ero_reg_full_emb, _ero_reg_full_sids,
+        _ero_rebal_full_emb, _ero_rebal_full_sids,
+        sid_to_group,
+        _gaia_xgb_full_emb, _gaia_xgb_full_gprob,
+        _gaia_hilat_full_emb, _gaia_hilat_full_gprob,
+        ero_desi_emb=ero_desi_emb, ero_desi_cat=ero_desi_cat,
+        gal_thresh=GAL_THRESH,
+    )
+
     print("\n[7] Generating interactive 3D HTML...")
     plot_umap_3d_plotly(
         q1_emb, q1_labels, q1_gmag, df_allphz, OUTPUT_DIR,
@@ -3581,7 +4351,7 @@ def main() -> int:
         ero_reg_extra=ero_reg_extra, ero_rebal_extra=ero_rebal_extra,
         sid_to_group=sid_to_group,
         ero_cutout_cache=ero_cutout_cache_data,
-        gaia_xgb_emb=gaia_xgb_emb, gaia_xgb_star_prob=gaia_xgb_star_prob,
+        gaia_xgb_emb=gaia_xgb_emb, gaia_xgb_gal_prob=gaia_xgb_gal_prob,
         gaia_xgb_sids=gaia_xgb_sids, gaia_xgb_gmag=gaia_xgb_gmag,
         q1_model_pgal=q1_model_pgal, q1_phz_pgal=q1_phz_pgal,
         ero_reg_pgal=ero_reg_pgal, ero_rebal_pgal=ero_rebal_pgal,
@@ -3597,6 +4367,10 @@ def main() -> int:
         ero_desi_sheet_extra=ero_desi_sheet_extra,
         ero_desi_sids=ero_desi_sids,
         gaia_xgb_ra=gaia_xgb_ra, gaia_xgb_dec=gaia_xgb_dec,
+        gaia_hilat_emb=gaia_hilat_emb, gaia_hilat_gal_prob=gaia_hilat_gal_prob,
+        gaia_hilat_sids=gaia_hilat_sids, gaia_hilat_gmag=gaia_hilat_gmag,
+        gaia_hilat_ra=gaia_hilat_ra, gaia_hilat_dec=gaia_hilat_dec,
+        density_hist_data=_density_hist,
     )
 
     print(f"\nDone. Output: {OUTPUT_DIR / 'q1_3d.html'}")

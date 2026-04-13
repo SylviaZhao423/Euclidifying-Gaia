@@ -74,7 +74,7 @@ def plot_q1_features(embedding, X_raw, y, output_dir,
         ax_bot = fig.add_subplot(gs[_gs_bot(feat_row), col])
 
         vals = X_raw[:, fi].astype(float)
-        lo, hi = np.nanpercentile(vals, 2), np.nanpercentile(vals, 98)
+        lo, hi = np.nanpercentile(vals, 1), np.nanpercentile(vals, 99)
         vals_clipped = np.clip(vals, lo, hi)
 
         for ax, mask, label in [

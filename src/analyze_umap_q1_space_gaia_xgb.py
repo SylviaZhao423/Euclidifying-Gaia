@@ -11,8 +11,8 @@ Pipeline:
   5. Plot 4-panel figure:
        Col 0: Q1 cluster map (reference background)
        Col 1: All Gaia — coloured by XGBoost star probability
-       Col 2: Predicted stars  (star_prob ≥ 0.5)
-       Col 3: Predicted galaxies (star_prob < 0.5)
+       Col 2: Predicted stars  (P(gal) < 0.5)
+       Col 3: Predicted galaxies (P(gal) ≥ 0.5)
 
 Reads:
   output/umap/arrays/q1_indiv.npz
@@ -62,12 +62,13 @@ CLUSTER_COLORS = [
     "#7f7f7f", "#bcbd22",
 ]
 
-STAR_THRESH = 0.5   # XGBoost star probability threshold
+GAL_THRESH = 0.5   # XGBoost galaxy probability threshold
 
 
 # ── DB query ──────────────────────────────────────────────────────────────────
 
-def query_gaia_subset(username: str, n_sample: int) -> pd.DataFrame:
+def query_gaia_subset(username: str, n_sample: int,
+                      extra_where: str = "") -> pd.DataFrame:
     """Query a random Gaia DR3 subset with the UMAP/XGBoost feature columns.
 
     bp_g, g_rp, corrected_bp_rp_excess, pm_significance, position_error are
@@ -101,19 +102,35 @@ def query_gaia_subset(username: str, n_sample: int) -> pd.DataFrame:
              *(1.0 - ra_dec_corr*ra_dec_corr)) AS position_error
     """
 
+    # Use random_index < threshold for efficient uniform random sampling.
+    # First pass: estimate yield from a small probe, then scale up.
+    # Full-sky mag cut keeps ~67%; hilat filters keep ~7.7% of that.
+    # Oversample generously, then trim to n_sample.
+    if extra_where:
+        ri_threshold = int(n_sample * 15)   # ~7.7% yield → ×15 gives ~5.8× headroom
+    else:
+        ri_threshold = int(n_sample * 3)    # ~67% yield → ×3 gives ~2× headroom
+    where_clause = (f"WHERE random_index < {ri_threshold}"
+                    f" AND phot_g_mean_mag >= {MAG_CUT}"
+                    f" AND phot_g_mean_mag IS NOT NULL")
+    if extra_where:
+        where_clause += f" AND {extra_where}"
+
     conn  = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
     query = f"""
         SELECT
             source_id,
             ra, dec,
+            b, ecl_lat,
             phot_g_mean_mag,
             {raw_select}
-        FROM gaia_dr3.gaia_source TABLESAMPLE SYSTEM(1)
-        WHERE phot_g_mean_mag >= {MAG_CUT}
-          AND phot_g_mean_mag IS NOT NULL
+        FROM gaia_dr3.gaia_source
+        {where_clause}
+        ORDER BY random_index
         LIMIT {n_sample}
     """
-    print(f"  Querying ~{n_sample:,} random Gaia DR3 sources (G ≥ {MAG_CUT})...")
+    label = "high-lat " if extra_where else ""
+    print(f"  Querying ~{n_sample:,} {label}Gaia DR3 sources (G ≥ {MAG_CUT})...")
     df = pd.read_sql_query(query, conn)
     conn.close()
 
@@ -126,7 +143,8 @@ def query_gaia_subset(username: str, n_sample: int) -> pd.DataFrame:
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 
-def plot(q1_emb, q1_labels, gaia_emb, star_prob, output_dir, n_gaia):
+def plot(q1_emb, q1_labels, gaia_emb, gal_prob, output_dir, n_gaia,
+         suffix="", title_extra=""):
     cluster_ids = sorted(set(q1_labels[q1_labels >= 0]))
 
     # Shared axis limits
@@ -181,12 +199,12 @@ def plot(q1_emb, q1_labels, gaia_emb, star_prob, output_dir, n_gaia):
     idx = rng.choice(len(gaia_emb), min(MAX_PTS, len(gaia_emb)), replace=False)
     sc  = ax.scatter(
         gaia_emb[idx, 0], gaia_emb[idx, 1],
-        c=star_prob[idx], cmap="RdYlBu",
+        c=gal_prob[idx], cmap="RdYlBu",
         vmin=0, vmax=1, s=5, alpha=0.7,
         linewidths=0, rasterized=True,
     )
     cb = fig.colorbar(sc, ax=ax, pad=0.02, fraction=0.046)
-    cb.set_label("XGBoost star prob", fontsize=7)
+    cb.set_label("XGBoost P(gal)", fontsize=7)
     cb.ax.tick_params(labelsize=7)
     _style(ax, f"Gaia random subset — all  (n={n_gaia:,})")
 
@@ -195,32 +213,33 @@ def plot(q1_emb, q1_labels, gaia_emb, star_prob, output_dir, n_gaia):
     pts = _sample(q1_emb, np.ones(len(q1_emb), dtype=bool))
     ax.scatter(pts[:, 0], pts[:, 1], c="lightgrey", s=2, alpha=0.15,
                linewidths=0, rasterized=True)
-    m_star = star_prob >= STAR_THRESH
+    m_star = gal_prob < GAL_THRESH
     pts_s  = _sample(gaia_emb, m_star)
     n_star = m_star.sum()
     ax.scatter(pts_s[:, 0], pts_s[:, 1], c="#EF9A9A", s=5, alpha=0.6,
                linewidths=0, rasterized=True)
-    _style(ax, f"Predicted stars  (n={n_star:,},  prob ≥ {STAR_THRESH})")
+    _style(ax, f"Predicted stars  (n={n_star:,},  P(gal) < {GAL_THRESH})")
 
     # ── Panel 3: Predicted galaxies ───────────────────────────────────────────
     ax = axes[3]
     pts = _sample(q1_emb, np.ones(len(q1_emb), dtype=bool))
     ax.scatter(pts[:, 0], pts[:, 1], c="lightgrey", s=2, alpha=0.15,
                linewidths=0, rasterized=True)
-    m_gal  = star_prob < STAR_THRESH
+    m_gal  = gal_prob >= GAL_THRESH
     pts_g  = _sample(gaia_emb, m_gal)
     n_gal  = m_gal.sum()
     ax.scatter(pts_g[:, 0], pts_g[:, 1], c="#90CAF9", s=5, alpha=0.6,
                linewidths=0, rasterized=True)
-    _style(ax, f"Predicted galaxies  (n={n_gal:,},  prob < {STAR_THRESH})")
+    _style(ax, f"Predicted galaxies  (n={n_gal:,},  P(gal) ≥ {GAL_THRESH})")
 
     fig.suptitle(
         f"Random Gaia DR3 subset projected into Q1 UMAP space — Q1 XGBoost predictions\n"
-        f"(G ≥ {MAG_CUT}  |  Q1 mean/std normalisation  |  Q1 reducer.transform())",
+        f"(G ≥ {MAG_CUT}  |  Q1 mean/std normalisation  |  Q1 reducer.transform()"
+        f"{title_extra})",
         fontsize=11, fontweight="bold", y=1.01,
     )
 
-    out = output_dir / "q1_space_gaia_xgb.png"
+    out = output_dir / f"q1_space_gaia_xgb{suffix}.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  -> Saved: {out}")
@@ -234,6 +253,9 @@ def main() -> int:
                         help="Skip DB query; re-plot from saved CSV.")
     parser.add_argument("--n-sample", type=int, default=50_000,
                         help="Number of random Gaia sources to query (default: 50000).")
+    parser.add_argument("--hilat", action="store_true",
+                        help="Query high-latitude subset (|b|>10, |ecl_lat|>45). "
+                             "Saves to xgb_gaia_hilat_projected.csv.")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -261,7 +283,12 @@ def main() -> int:
     print(f"  Loaded: {MODEL_PATH}")
 
     # ── 3. Load or query Gaia subset ──────────────────────────────────────────
-    csv_path = ARRAYS_DIR / "xgb_gaia_projected.csv"
+    if args.hilat:
+        csv_path = ARRAYS_DIR / "xgb_gaia_hilat_projected.csv"
+        extra_where = "ABS(b) > 10 AND ABS(ecl_lat) > 45"
+    else:
+        csv_path = ARRAYS_DIR / "xgb_gaia_projected.csv"
+        extra_where = ""
 
     if args.csv:
         if not csv_path.exists():
@@ -274,8 +301,9 @@ def main() -> int:
         if not username:
             print("ERROR: PGUSER not set.")
             return 1
-        print("\n[3] Querying random Gaia DR3 subset...")
-        df = query_gaia_subset(username, args.n_sample)
+        label = "high-lat " if args.hilat else ""
+        print(f"\n[3] Querying {label}random Gaia DR3 subset...")
+        df = query_gaia_subset(username, args.n_sample, extra_where=extra_where)
         df["source_id"] = df["source_id"].astype(str)
 
         # ── 4. Project into Q1 UMAP space ─────────────────────────────────────
@@ -292,25 +320,29 @@ def main() -> int:
         dmat      = xgb.DMatrix(X_scaled, feature_names=SELECTED_GAIA_PARAMETERS)
         raw_pred  = bst.predict(dmat)
         # XGBClassifier saved via get_booster() returns raw probabilities for
-        # the positive class (GALAXY=1). Star prob = 1 - galaxy_prob.
-        star_prob = 1.0 - raw_pred
-        print(f"  Predicted stars (prob ≥ {STAR_THRESH}): {(star_prob >= STAR_THRESH).sum():,}")
-        print(f"  Predicted galaxies:                      {(star_prob <  STAR_THRESH).sum():,}")
+        # the positive class (GALAXY=1).
+        gal_prob = raw_pred
+        print(f"  Predicted galaxies (P(gal) ≥ {GAL_THRESH}): {(gal_prob >= GAL_THRESH).sum():,}")
+        print(f"  Predicted stars    (P(gal) < {GAL_THRESH}): {(gal_prob <  GAL_THRESH).sum():,}")
 
         df["umap1"]     = gaia_emb[:, 0]
         df["umap2"]     = gaia_emb[:, 1]
-        df["star_prob"] = star_prob
+        df["gal_prob"] = gal_prob
         df.to_csv(csv_path, index=False)
         print(f"  Saved → {csv_path}")
 
     # Load from CSV if --csv
     if args.csv:
         gaia_emb  = df[["umap1", "umap2"]].values
-        star_prob = df["star_prob"].values
+        gal_prob = df["gal_prob"].values
 
     # ── 6. Plot ───────────────────────────────────────────────────────────────
     print("\n[6] Plotting...")
-    plot(q1_emb, q1_labels, gaia_emb, star_prob, OUTPUT_DIR, n_gaia=len(df))
+    if args.hilat:
+        plot(q1_emb, q1_labels, gaia_emb, gal_prob, OUTPUT_DIR, n_gaia=len(df),
+             suffix="_hilat", title_extra="  |  |b|>10, |ecl_lat|>45")
+    else:
+        plot(q1_emb, q1_labels, gaia_emb, gal_prob, OUTPUT_DIR, n_gaia=len(df))
 
     return 0
 
