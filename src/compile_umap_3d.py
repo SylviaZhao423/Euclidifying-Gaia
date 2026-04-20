@@ -40,12 +40,12 @@ Writes:
   output/umap/arrays/projected/ero_regular_projected.csv
   output/umap/arrays/projected/ero_rebal_projected.csv
   output/umap/arrays/projected/ero_desi_projected.csv
-  output/umap/q1_individual/q1_3d.html
+  output/umap/q1_individual/3d_umap.html
 
 Usage:
-  python src/analyze_umap_q1_3d.py
-  python src/analyze_umap_q1_3d.py --3d
-  python src/analyze_umap_q1_3d.py --3d --max-points 2000
+  python src/compile_umap_3d.py
+  python src/compile_umap_3d.py --reproject
+  python src/compile_umap_3d.py --max-points 2000
 """
 
 from __future__ import annotations
@@ -558,6 +558,21 @@ def _fill_col(df: pd.DataFrame | None, col: str, sid_map: dict) -> None:
         df.loc[df[col].isna(), col] = mapped[df[col].isna()]
 
 
+def _load_gaia_features_from_npz(npz_path: Path, target_sids: np.ndarray) -> np.ndarray:
+    """Load X_raw (Gaia features) from npz, aligned to target_sids by source_id."""
+    npz = np.load(npz_path, allow_pickle=True)
+    npz_sids = npz["source_ids"].astype(str)
+    X_raw = npz["X_raw"].astype(float)
+    sid_to_idx = {s: i for i, s in enumerate(npz_sids)}
+    idx = np.array([sid_to_idx.get(str(s), -1) for s in target_sids])
+    result = np.full((len(target_sids), X_raw.shape[1]), np.nan)
+    valid = idx >= 0
+    result[valid] = X_raw[idx[valid]]
+    n_matched = int(valid.sum())
+    print(f"  Gaia features: {n_matched:,} / {len(target_sids):,} matched from {npz_path.name}")
+    return result
+
+
 def _subsample_keep_cutouts(df, cutout_sids, max_points, seed=42):
     has_cutout = df["source_id"].astype(float).astype(str).isin(cutout_sids)
     df_with    = df[has_cutout]
@@ -669,7 +684,7 @@ def _project_ero(npz_path: Path, q1_mean, q1_std, reducer) -> tuple[np.ndarray, 
     std_safe = np.where(q1_std > 0, q1_std, 1.0)
     X_scaled = (X_raw - q1_mean) / std_safe
     X_scaled = np.where(np.isfinite(X_scaled), X_scaled, 0.0)
-    emb      = reducer.transform(X_scaled)
+    emb      = reducer.transform(X_scaled).astype(np.float64)
     return emb, y, sids
 
 
@@ -679,7 +694,8 @@ def _build_ero_traces(emb, y, gmag, features, feature_names, prefix, traces,
                       sids=None, sid_to_group=None, label_prefix="",
                       cluster_labels=None, q1_cluster_ids=None,
                       model_pgal=None,
-                      ero_ra=None, ero_dec=None, ero_class_star=None):
+                      ero_ra=None, ero_dec=None, ero_class_star=None,
+                      gaia_features=None):
     """Add ERO overlay traces as per-cluster sub-traces + legend-only dummy traces.
 
     Layout appended to `traces`:
@@ -687,7 +703,7 @@ def _build_ero_traces(emb, y, gmag, features, feature_names, prefix, traces,
       [n_dummy .. end]  : sub-traces per group×cluster (showlegend=False,
                           named ``ero_{prefix}_grp={group} C{k}``)
 
-    Returns (added_groups, n_dummy, n_sub, sub_z_gmag, sub_z_model_pgal).
+    Returns (added_groups, n_dummy, n_sub, sub_z_gmag, sub_z_model_pgal, sub_z_feat).
     """
     import plotly.graph_objects as go
     added_groups: list[str] = []
@@ -710,7 +726,7 @@ def _build_ero_traces(emb, y, gmag, features, feature_names, prefix, traces,
         traces.append(go.Scatter3d(
             x=[None], y=[None], z=[None],
             mode="markers",
-            marker=dict(size=5, color=color, opacity=0.95,
+            marker=dict(size=4, color=color, opacity=0.95,
                         line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
             name=display_name,
             showlegend=True,
@@ -724,6 +740,7 @@ def _build_ero_traces(emb, y, gmag, features, feature_names, prefix, traces,
     n_sub = 0
     sub_z_gmag: list[list] = []
     sub_z_model_pgal: list[list] = []
+    sub_z_feat: dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
 
     for group in added_groups:
         m_grp = group_masks[group]
@@ -764,7 +781,7 @@ def _build_ero_traces(emb, y, gmag, features, feature_names, prefix, traces,
             traces.append(go.Scatter3d(
                 x=emb[mk, 0], y=emb[mk, 1], z=z_ero,
                 mode="markers",
-                marker=dict(size=5, color=color, opacity=0.95,
+                marker=dict(size=4, color=color, opacity=0.95,
                             line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
                 name=f"ero_{prefix}_grp={group} C{k}",
                 customdata=cd,
@@ -779,9 +796,16 @@ def _build_ero_traces(emb, y, gmag, features, feature_names, prefix, traces,
                 )
             else:
                 sub_z_model_pgal.append([None] * n_pts)
+            for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+                if gaia_features is not None:
+                    vals = gaia_features[mk, fi]
+                    sub_z_feat[fn].append(
+                        [round(float(v), 4) if np.isfinite(v) else None for v in vals])
+                else:
+                    sub_z_feat[fn].append([None] * n_pts)
             n_sub += 1
 
-    return added_groups, n_dummy, n_sub, sub_z_gmag, sub_z_model_pgal
+    return added_groups, n_dummy, n_sub, sub_z_gmag, sub_z_model_pgal, sub_z_feat
 
 
 def plot_umap_3d_plotly(
@@ -840,6 +864,10 @@ def plot_umap_3d_plotly(
     gaia_hilat_sids=None, gaia_hilat_gmag=None,
     gaia_hilat_ra=None, gaia_hilat_dec=None,
     density_hist_data=None,   # pre-built per-category histogram dict from _build_density_hists
+    # Gaia features for z-axis (14 cols, aligned to source order)
+    ero_reg_gaia_features=None, ero_rebal_gaia_features=None,
+    gaia_xgb_gaia_features=None, gaia_hilat_gaia_features=None,
+    ero_desi_gaia_features=None,
 ):
     try:
         import plotly.graph_objects as go
@@ -898,6 +926,14 @@ def plot_umap_3d_plotly(
     _gaia_z_model_pgal: list = []
     _ero_desi_z_gmag      : list = []
     _ero_desi_z_model_pgal: list = []
+    # Per-Gaia-feature z-arrays (dict of lists, one list per feature)
+    _q1_z_feat:         dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
+    _phz_sub_z_feat:    dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
+    _ero_reg_z_feat:    dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
+    _ero_rebal_z_feat:  dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
+    _gaia_z_feat:       dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
+    _gaia_hilat_z_feat: dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
+    _ero_desi_z_feat:   dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
 
     def _q1_z_model(mask):
         if q1_model_pgal is not None:
@@ -926,6 +962,8 @@ def plot_umap_3d_plotly(
         _q1_z_gmag.append(z_noise.tolist())
         _m = _q1_z_model(noise_mask); _q1_z_model_pgal.append(_m if _m is not None else z_noise.tolist())
         _p = _q1_z_phz(noise_mask);   _q1_z_phz_pgal.append(_p if _p is not None else z_noise.tolist())
+        for fn in SELECTED_GAIA_PARAMETERS:
+            _q1_z_feat[fn].append([1.45] * int(noise_mask.sum()))
     for k in cluster_ids:
         m   = q1_labels == k
         z_k = np.zeros(m.sum())
@@ -939,6 +977,8 @@ def plot_umap_3d_plotly(
         _q1_z_gmag.append(z_k.tolist())
         _m = _q1_z_model(m); _q1_z_model_pgal.append(_m if _m is not None else z_k.tolist())
         _p = _q1_z_phz(m);   _q1_z_phz_pgal.append(_p if _p is not None else z_k.tolist())
+        for fn in SELECTED_GAIA_PARAMETERS:
+            _q1_z_feat[fn].append([1.45] * int(m.sum()))
 
     # ── PHZ overlay ───────────────────────────────────────────────────────────
     phz_arr      = df_allphz["phz"].values       if df_allphz is not None else np.array([])
@@ -958,7 +998,7 @@ def plot_umap_3d_plotly(
     for v, (lbl, col, sym) in PHZ_LABELS.items():
         m_v = phz_arr == v
         if not m_v.any(): continue
-        mkr = dict(size=5, color=col, symbol=sym, opacity=0.95,
+        mkr = dict(size=4, color=col, symbol=sym, opacity=0.95,
                    line=dict(width=0.2, color="rgba(255,255,255,0.25)"))
         traces.append(go.Scatter3d(
             x=[float("nan")], y=[float("nan")], z=[float("nan")],
@@ -1015,13 +1055,21 @@ def plot_umap_3d_plotly(
                 [float(x) if np.isfinite(x) else None for x in _phz_model_col[mk]]
                 if _phz_model_col is not None else [None] * int(mk.sum())
             )
+            # Per-Gaia-feature z-arrays
+            for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+                if df_allphz is not None and fn in df_allphz.columns:
+                    vals = df_allphz[fn].values.astype(float)[mk]
+                    _phz_sub_z_feat[fn].append(
+                        [round(float(x), 4) if np.isfinite(x) else None for x in vals])
+                else:
+                    _phz_sub_z_feat[fn].append([None] * int(mk.sum()))
 
     # ── DESI overlay ──────────────────────────────────────────────────────────
     n_pre_desi = len(traces)
     for v, (lbl, col, sym) in DESI_CATEGORY_LABELS.items():
         m_v = desi_arr == v
         if not m_v.any(): continue
-        mkr = dict(size=5, color=col, symbol=sym, opacity=0.95,
+        mkr = dict(size=4, color=col, symbol=sym, opacity=0.95,
                    line=dict(width=0.2, color="rgba(255,255,255,0.25)"))
         traces.append(go.Scatter3d(
             x=[float("nan")], y=[float("nan")], z=[float("nan")],
@@ -1082,6 +1130,14 @@ def plot_umap_3d_plotly(
                 [float(x) if np.isfinite(x) else None for x in _desi_model_col[mk]]
                 if _desi_model_col is not None else [None] * int(mk.sum())
             )
+            # Per-Gaia-feature z-arrays (DESI shares PHZ tracking lists)
+            for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+                if df_desi is not None and fn in df_desi.columns:
+                    vals = df_desi[fn].values.astype(float)[mk]
+                    _phz_sub_z_feat[fn].append(
+                        [round(float(x), 4) if np.isfinite(x) else None for x in vals])
+                else:
+                    _phz_sub_z_feat[fn].append([None] * int(mk.sum()))
 
     # ── ERO overlays (regular + rebalanced, both hidden by default) ───────────
     # Each call appends n_dummy legend traces then n_sub data sub-traces.
@@ -1100,7 +1156,7 @@ def plot_umap_3d_plotly(
     n_ero_reg_dummy = 0
     n_ero_reg_sub   = 0
     if ero_regular_emb is not None and ero_regular_y is not None:
-        reg_groups, n_ero_reg_dummy, n_ero_reg_sub, _ero_reg_z_gmag, _ero_reg_z_model_pgal = \
+        reg_groups, n_ero_reg_dummy, n_ero_reg_sub, _ero_reg_z_gmag, _ero_reg_z_model_pgal, _ero_reg_z_feat = \
             _build_ero_traces(
                 ero_regular_emb, ero_regular_y, ero_regular_gmag,
                 ero_regular_features, ero_feature_names, "ero", traces,
@@ -1110,6 +1166,7 @@ def plot_umap_3d_plotly(
                 ero_ra=_ero_reg_extra.get("ra"),
                 ero_dec=_ero_reg_extra.get("dec"),
                 ero_class_star=_ero_reg_extra.get("class_star"),
+                gaia_features=ero_reg_gaia_features,
             )
         for offset, grp in enumerate(reg_groups):
             ero_trace_groups[str(n_pre_ero_regular + offset)] = grp
@@ -1119,7 +1176,7 @@ def plot_umap_3d_plotly(
     n_ero_rebal_dummy = 0
     n_ero_rebal_sub   = 0
     if ero_rebal_emb is not None and ero_rebal_y is not None:
-        rebal_groups, n_ero_rebal_dummy, n_ero_rebal_sub, _ero_rebal_z_gmag, _ero_rebal_z_model_pgal = \
+        rebal_groups, n_ero_rebal_dummy, n_ero_rebal_sub, _ero_rebal_z_gmag, _ero_rebal_z_model_pgal, _ero_rebal_z_feat = \
             _build_ero_traces(
                 ero_rebal_emb, ero_rebal_y, ero_rebal_gmag,
                 ero_rebal_features, ero_feature_names, "eror", traces,
@@ -1130,12 +1187,14 @@ def plot_umap_3d_plotly(
                 ero_ra=_ero_rebal_extra.get("ra"),
                 ero_dec=_ero_rebal_extra.get("dec"),
                 ero_class_star=_ero_rebal_extra.get("class_star"),
+                gaia_features=ero_rebal_gaia_features,
             )
         for offset, grp in enumerate(rebal_groups):
             ero_trace_groups[str(n_pre_ero_rebal + offset)] = grp
     n_ero_rebal_sub_start = n_pre_ero_rebal + n_ero_rebal_dummy
 
     # ── Gaia XGB overlay (legend + sub-traces per category×cluster) ──────────
+    _GAIA_MK_SIZE = 3  # smaller markers for 50k Gaia sources
     n_pre_gaia_xgb     = len(traces)
     n_gaia_xgb_legend  = 0
     _gaia_xgb_cl = (assign_to_clusters(gaia_xgb_emb, q1_emb, q1_labels)
@@ -1155,7 +1214,7 @@ def plot_umap_3d_plotly(
             # Legend trace
             traces.append(go.Scatter3d(
                 x=[None], y=[None], z=[None], mode="markers",
-                marker=dict(size=5, color=color, opacity=0.95,
+                marker=dict(size=_GAIA_MK_SIZE, color=color, opacity=0.95,
                             line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
                 name=lbl, showlegend=True, visible=False,
             ))
@@ -1189,7 +1248,7 @@ def plot_umap_3d_plotly(
                 traces.append(go.Scatter3d(
                     x=gaia_xgb_emb[mk, 0], y=gaia_xgb_emb[mk, 1], z=z_g,
                     mode="markers",
-                    marker=dict(size=5, color=color, opacity=0.95,
+                    marker=dict(size=_GAIA_MK_SIZE, color=color, opacity=0.95,
                                 line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
                     name=f"gxgb_{short} C{k}",
                     hovertemplate=f"RA=%{{customdata[2]:.4f}}<br>Dec=%{{customdata[3]:+.4f}}<br>G=%{{customdata[4]:.2f}}<extra>{lbl.split('(')[0].strip()}</extra>",
@@ -1197,6 +1256,13 @@ def plot_umap_3d_plotly(
                 ))
                 _gaia_z_gmag.append(z_g.tolist())
                 _gaia_z_model_pgal.append([round(float(v), 4) for v in gaia_pgal[mk]])
+                for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+                    if gaia_xgb_gaia_features is not None:
+                        vals = gaia_xgb_gaia_features[mk, fi]
+                        _gaia_z_feat[fn].append(
+                            [round(float(v), 4) if np.isfinite(v) else None for v in vals])
+                    else:
+                        _gaia_z_feat[fn].append([None] * n_pts)
                 n_gaia_xgb_sub += 1
 
     # ── Gaia XGB high-lat overlay (legend + sub-traces, same structure) ──────
@@ -1220,7 +1286,7 @@ def plot_umap_3d_plotly(
                 continue
             traces.append(go.Scatter3d(
                 x=[None], y=[None], z=[None], mode="markers",
-                marker=dict(size=5, color=color, opacity=0.95,
+                marker=dict(size=_GAIA_MK_SIZE, color=color, opacity=0.95,
                             line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
                 name=lbl, showlegend=True, visible=False,
             ))
@@ -1253,7 +1319,7 @@ def plot_umap_3d_plotly(
                 traces.append(go.Scatter3d(
                     x=gaia_hilat_emb[mk, 0], y=gaia_hilat_emb[mk, 1], z=z_g,
                     mode="markers",
-                    marker=dict(size=5, color=color, opacity=0.95,
+                    marker=dict(size=_GAIA_MK_SIZE, color=color, opacity=0.95,
                                 line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
                     name=f"gxhl_{short} C{k}",
                     hovertemplate=f"RA=%{{customdata[2]:.4f}}<br>Dec=%{{customdata[3]:+.4f}}<br>G=%{{customdata[4]:.2f}}<extra>{lbl.split('(')[0].strip()}</extra>",
@@ -1261,6 +1327,13 @@ def plot_umap_3d_plotly(
                 ))
                 _gaia_hilat_z_gmag.append(z_g.tolist())
                 _gaia_hilat_z_model_pgal.append([round(float(v), 4) for v in hilat_pgal[mk]])
+                for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+                    if gaia_hilat_gaia_features is not None:
+                        vals = gaia_hilat_gaia_features[mk, fi]
+                        _gaia_hilat_z_feat[fn].append(
+                            [round(float(v), 4) if np.isfinite(v) else None for v in vals])
+                    else:
+                        _gaia_hilat_z_feat[fn].append([None] * n_pts)
                 n_gaia_hilat_sub += 1
 
     # ── ERO-DESI overlay (sub-traces per cluster, like PHZ) ──────────────────
@@ -1279,7 +1352,7 @@ def plot_umap_3d_plotly(
             # Legend trace (no data — just shows in legend)
             traces.append(go.Scatter3d(
                 x=[None], y=[None], z=[None], mode="markers",
-                marker=dict(size=5, color=color, opacity=0.95,
+                marker=dict(size=4, color=color, opacity=0.95,
                             line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
                 name=f"{lbl}  (n={n_pts:,})",
                 showlegend=True, visible=False,
@@ -1322,7 +1395,7 @@ def plot_umap_3d_plotly(
                 traces.append(go.Scatter3d(
                     x=ero_desi_emb[mk, 0], y=ero_desi_emb[mk, 1], z=z_ed,
                     mode="markers",
-                    marker=dict(size=5, color=color, opacity=0.95,
+                    marker=dict(size=4, color=color, opacity=0.95,
                                 line=dict(width=0.2, color="rgba(255,255,255,0.25)")),
                     name=f"ed_cat={cat_val} C{k}",
                     customdata=cd, showlegend=False, visible=False,
@@ -1332,6 +1405,13 @@ def plot_umap_3d_plotly(
                 _ero_desi_z_model_pgal.append(
                     [round(float(v), 4) if np.isfinite(v) else None for v in pgal]
                 )
+                for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+                    if ero_desi_gaia_features is not None:
+                        vals = ero_desi_gaia_features[mk, fi]
+                        _ero_desi_z_feat[fn].append(
+                            [round(float(v), 4) if np.isfinite(v) else None for v in vals])
+                    else:
+                        _ero_desi_z_feat[fn].append([None] * n_pts)
                 n_ero_desi_sub += 1
 
     # Compute which Q1 clusters each ERO-DESI cat_value populates
@@ -1386,7 +1466,7 @@ def plot_umap_3d_plotly(
             xaxis=dict(**_ax, title="UMAP 1", autorange=False, range=_xr),
             yaxis=dict(**_ax, title="UMAP 2", autorange=False, range=_yr),
             zaxis=dict(**_ax, title="G mag",
-                       **dict(autorange=False, range=_zr) if _zr else dict(autorange="reversed")),
+                       autorange=False, range=[-0.05, 1.45]),
         ),
         uirevision="locked",
         legend=dict(bgcolor="rgba(12,12,12,0.9)", bordercolor="#222", borderwidth=1,
@@ -1453,27 +1533,88 @@ def plot_umap_3d_plotly(
     ero_desi_cluster_coverage_json = json.dumps(_ero_desi_cluster_coverage)
     ero_desi_trace_cat_json        = json.dumps(_ero_desi_trace_cat)
     n_base_traces            = (1 if noise_mask.any() else 0) + len(cluster_ids)
+    # ── Normalise G-mag z arrays to [0, 1] so the z-axis stays fixed ────────
+    _all_gmag_vals: list[float] = []
+    for _zlist in (_phz_sub_z_gmag, _ero_reg_z_gmag, _ero_rebal_z_gmag,
+                   _gaia_z_gmag, _gaia_hilat_z_gmag, _ero_desi_z_gmag):
+        for _arr in _zlist:
+            _all_gmag_vals.extend(v for v in _arr if v is not None)
+    if q1_gmag is not None:
+        _all_gmag_vals.extend(float(v) for v in q1_gmag[np.isfinite(q1_gmag)])
+    if _all_gmag_vals:
+        _gmag_lo = min(_all_gmag_vals)
+        _gmag_hi = max(_all_gmag_vals)
+    else:
+        _gmag_lo, _gmag_hi = 17.0, 22.0
+    _gmag_span = _gmag_hi - _gmag_lo if _gmag_hi > _gmag_lo else 1.0
+
+    def _norm_gmag_z(arr_list):
+        return [[round((v - _gmag_lo) / _gmag_span, 4) if v is not None else None
+                 for v in arr] for arr in arr_list]
+
+    _phz_sub_z_gmag   = _norm_gmag_z(_phz_sub_z_gmag)
+    _ero_reg_z_gmag   = _norm_gmag_z(_ero_reg_z_gmag)
+    _ero_rebal_z_gmag = _norm_gmag_z(_ero_rebal_z_gmag)
+    _gaia_z_gmag      = _norm_gmag_z(_gaia_z_gmag)
+    _gaia_hilat_z_gmag = _norm_gmag_z(_gaia_hilat_z_gmag)
+    _ero_desi_z_gmag  = _norm_gmag_z(_ero_desi_z_gmag)
+    # Q1 base always at z=1.45 regardless of z-axis mode
+    _q1_z_gmag = [[1.45] * len(arr) for arr in _q1_z_gmag]
+
+    # ── Normalise Gaia feature z arrays to [0, 1] ────────────────────────────
+    _overlay_feat_dicts = [_phz_sub_z_feat, _ero_reg_z_feat, _ero_rebal_z_feat,
+                           _gaia_z_feat, _gaia_hilat_z_feat, _ero_desi_z_feat]
+    _feat_norm: dict[str, list[float]] = {}
+    for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+        all_vals: list[float] = []
+        for zdict in _overlay_feat_dicts:
+            for _arr in zdict[fn]:
+                all_vals.extend(v for v in _arr if v is not None)
+        if q1_features is not None:
+            col = q1_features[:, fi]
+            all_vals.extend(float(v) for v in col[np.isfinite(col)])
+        if all_vals:
+            f_lo, f_hi = min(all_vals), max(all_vals)
+        else:
+            f_lo, f_hi = 0.0, 1.0
+        _feat_norm[fn] = [round(f_lo, 4), round(f_hi, 4)]
+        f_span = f_hi - f_lo if f_hi > f_lo else 1.0
+        for zdict in _overlay_feat_dicts:
+            zdict[fn] = [[round((v - f_lo) / f_span, 4) if v is not None else None
+                          for v in arr] for arr in zdict[fn]]
+        _q1_z_feat[fn] = [[1.45] * len(a) for a in _q1_z_feat[fn]]
+
     # Z-axis arrays (per-trace, in trace order within each group)
-    q1_base_z_json     = json.dumps({
-        # null when q1_gmag unavailable — JS detects this and uses flat z=0 + autorange.
-        "g_mag":      _q1_z_gmag if q1_gmag is not None else None,
-        "model_pgal": _q1_z_model_pgal,
-        "phz_pgal":   _q1_z_phz_pgal,
-    })
-    phz_sub_z_json     = json.dumps({"g_mag":       _phz_sub_z_gmag,
-                                     "phz_pgal":    _phz_sub_z_phz_pgal,
-                                     "model_pgal":  _phz_sub_z_model_pgal})
-    ero_reg_z_json     = json.dumps({"g_mag":      _ero_reg_z_gmag,
-                                     "model_pgal": _ero_reg_z_model_pgal})
-    ero_rebal_z_json   = json.dumps({"g_mag":      _ero_rebal_z_gmag,
-                                     "model_pgal": _ero_rebal_z_model_pgal})
-    gaia_xgb_z_json    = json.dumps({"g_mag":      _gaia_z_gmag,
-                                     "model_pgal": _gaia_z_model_pgal})
-    gaia_hilat_z_json  = json.dumps({"g_mag":      _gaia_hilat_z_gmag,
-                                     "model_pgal": _gaia_hilat_z_model_pgal})
-    ero_desi_z_json    = json.dumps({"g_mag":      _ero_desi_z_gmag,
-                                     "model_pgal": _ero_desi_z_model_pgal})
-    gmag_z_range_json  = json.dumps(_zr if _zr else [25, 17])
+    _q1_z_dict: dict = {"g_mag": _q1_z_gmag, "model_pgal": _q1_z_model_pgal, "phz_pgal": _q1_z_phz_pgal}
+    _q1_z_dict.update(_q1_z_feat)
+    q1_base_z_json = json.dumps(_q1_z_dict)
+
+    _phz_z_dict: dict = {"g_mag": _phz_sub_z_gmag, "phz_pgal": _phz_sub_z_phz_pgal, "model_pgal": _phz_sub_z_model_pgal}
+    _phz_z_dict.update(_phz_sub_z_feat)
+    phz_sub_z_json = json.dumps(_phz_z_dict)
+
+    _ero_reg_z_dict: dict = {"g_mag": _ero_reg_z_gmag, "model_pgal": _ero_reg_z_model_pgal}
+    _ero_reg_z_dict.update(_ero_reg_z_feat)
+    ero_reg_z_json = json.dumps(_ero_reg_z_dict)
+
+    _ero_rebal_z_dict: dict = {"g_mag": _ero_rebal_z_gmag, "model_pgal": _ero_rebal_z_model_pgal}
+    _ero_rebal_z_dict.update(_ero_rebal_z_feat)
+    ero_rebal_z_json = json.dumps(_ero_rebal_z_dict)
+
+    _gaia_z_dict: dict = {"g_mag": _gaia_z_gmag, "model_pgal": _gaia_z_model_pgal}
+    _gaia_z_dict.update(_gaia_z_feat)
+    gaia_xgb_z_json = json.dumps(_gaia_z_dict)
+
+    _gaia_hilat_z_dict: dict = {"g_mag": _gaia_hilat_z_gmag, "model_pgal": _gaia_hilat_z_model_pgal}
+    _gaia_hilat_z_dict.update(_gaia_hilat_z_feat)
+    gaia_hilat_z_json = json.dumps(_gaia_hilat_z_dict)
+
+    _ero_desi_z_dict: dict = {"g_mag": _ero_desi_z_gmag, "model_pgal": _ero_desi_z_model_pgal}
+    _ero_desi_z_dict.update(_ero_desi_z_feat)
+    ero_desi_z_json = json.dumps(_ero_desi_z_dict)
+
+    gmag_norm_json     = json.dumps([round(_gmag_lo, 2), round(_gmag_hi, 2)])
+    feat_norm_json     = json.dumps(_feat_norm)
     density_hist_json  = json.dumps(density_hist_data or {})
 
     # Q1 base point UMAP coordinates (stored separately from Plotly traces for
@@ -1493,6 +1634,12 @@ def plot_umap_3d_plotly(
     q1_base_coords_json = json.dumps(_q1_base_coords)
 
 
+    # Z-axis Gaia feature options
+    gaia_z_opts = "\n".join(
+        f'        <option value="{fn}">{fn}</option>'
+        for fn in SELECTED_GAIA_PARAMETERS
+    )
+
     # Colour dropdown HTML with optgroups
     gaia_opts = "\n".join(
         f'        <option value="{fn}">{fn}</option>'
@@ -1506,7 +1653,7 @@ def plot_umap_3d_plotly(
                 f'        <option value="{fn}">{fn.replace("euclid_q1::","")}</option>'
                 for fn in q1_eu
             )
-            q1_euclid_optgroup = f'      <optgroup label="Euclid Q1">\n{inner}\n      </optgroup>'
+            q1_euclid_optgroup = f'      <optgroup label="— Euclid Q1 features —">\n{inner}\n      </optgroup>'
     ero_mapped_optgroup = ""
     if feature_names:
         ero_mapped = [fn for fn in feature_names if fn.startswith("euclid_ero::")]
@@ -1622,6 +1769,7 @@ def plot_umap_3d_plotly(
   }}
   #overlay-select:focus, #z-select:focus {{ outline: none; border-color: #333; }}
   #overlay-select option, #z-select option {{ background: #111; }}
+  #z-select optgroup {{ background: #111; color: #666; }}
 </style>
 </head>
 <body>
@@ -1630,7 +1778,7 @@ def plot_umap_3d_plotly(
 <div id="sidebar">
   <div id="sidebar-header">
     <div id="sidebar-eyebrow">Euclid Q1 · UMAP</div>
-    <div id="sidebar-hint">hover a point · click to pin</div>
+    <div id="sidebar-hint">hover a point · double-click to pin</div>
   </div>
   <div id="overlay-bar">
     <span id="overlay-label">Overlay</span>
@@ -1650,14 +1798,17 @@ def plot_umap_3d_plotly(
       <option value="g_mag">G magnitude</option>
       <option value="phz_pgal">PHZ P(gal)</option>
       <option value="model_pgal">XGB P(gal)</option>
+      <optgroup label="— Gaia features —">
+{gaia_z_opts}
+      </optgroup>
     </select>
   </div>
   <div id="color-mode-bar">
-    <span id="color-mode-label">Colour</span>
+    <span id="color-mode-label">Q1 BASE</span>
     <select id="color-mode-select">
       <option value="clusters">clusters</option>
       <option value="umap_density">UMAP density</option>
-      <optgroup label="── Gaia ──">
+      <optgroup label="— Gaia features —">
 {gaia_opts}
       </optgroup>
 {q1_euclid_optgroup}
@@ -1736,7 +1887,8 @@ var ERO_REBAL_Z = {ero_rebal_z_json};
 var GAIA_XGB_Z  = {gaia_xgb_z_json};
 var GAIA_HILAT_Z = {gaia_hilat_z_json};
 var ERO_DESI_Z  = {ero_desi_z_json};
-var GMAG_Z_RANGE = {gmag_z_range_json};
+var GMAG_NORM = {gmag_norm_json};  /* [min, max] for G-mag tick labels */
+var FEAT_NORM = {feat_norm_json};  /* {{feat_name: [min, max]}} for Gaia feature tick labels */
 
 var cluster_sheets = {{}};
 Object.keys(contact_sheets).forEach(function(v) {{
@@ -2782,7 +2934,7 @@ var _currentZ = 'g_mag';
 function applyZAxis(opt) {{
   _currentZ = opt;
   var zTitles = {{'g_mag':'G magnitude','model_pgal':'XGB P(gal)','phz_pgal':'PHZ P(gal)'}};
-  var zTitle  = zTitles[opt] || 'G magnitude';
+  var zTitle  = zTitles[opt] || (FEAT_NORM[opt] ? opt : 'G magnitude');
 
   /* Save current camera so the view stays stable across z-axis changes */
   var cam = null;
@@ -2790,9 +2942,7 @@ function applyZAxis(opt) {{
     cam = JSON.parse(JSON.stringify(plotDiv.layout.scene.camera));
   }}
 
-  var q1HasGmag = (Q1_BASE_Z['g_mag'] !== null);
-  var q1Idx     = _q1BaseIndices();
-  var isProb    = (opt !== 'g_mag');
+  var q1Idx = _q1BaseIndices();
 
   function _q1FlatZ(zVal) {{
     var ref = Q1_BASE_Z['g_mag'] || Q1_BASE_Z['model_pgal'] || Q1_BASE_Z['phz_pgal'];
@@ -2802,25 +2952,10 @@ function applyZAxis(opt) {{
 
   var rIdx = [], rZ = [];
 
-  /* Q1 base z-values:
-     - G-mag mode: actual G-mag z if available, otherwise flat at z=0
-     - Probability mode: flat sentinel at z=1.45 (above [0,1] data range) */
-  if (isProb) {{
-    var q1Z = _q1FlatZ(1.45);
-    if (q1Z && q1Idx.length === q1Z.length) {{
-      q1Idx.forEach(function(i,j) {{ rIdx.push(i); rZ.push(q1Z[j]); }});
-    }}
-  }} else {{
-    /* G-mag mode: use actual G-mag z if available, otherwise flat at z=0 */
-    var q1Src = Q1_BASE_Z['g_mag'];
-    if (q1Src && q1Idx.length === q1Src.length) {{
-      q1Idx.forEach(function(i,j) {{ rIdx.push(i); rZ.push(q1Src[j]); }});
-    }} else {{
-      var q1Z = _q1FlatZ(0);
-      if (q1Z && q1Idx.length === q1Z.length) {{
-        q1Idx.forEach(function(i,j) {{ rIdx.push(i); rZ.push(q1Z[j]); }});
-      }}
-    }}
+  /* Q1 base always at z=1.45 regardless of z-axis mode */
+  var q1Z = _q1FlatZ(1.45);
+  if (q1Z && q1Idx.length === q1Z.length) {{
+    q1Idx.forEach(function(i,j) {{ rIdx.push(i); rZ.push(q1Z[j]); }});
   }}
 
   /* PHZ + DESI sub-traces */
@@ -2873,20 +3008,34 @@ function applyZAxis(opt) {{
     }}
   }}
 
-  /* Z axis range:
-     - Probability mode: [-0.05, 1.45], non-reversed (0 at bottom, 1 at top, base at 1.45)
-     - G-mag + data:     GMAG_Z_RANGE (reversed)
-     - G-mag, no data:   autorange reversed (flat at z=0) */
+  /* Z axis: always fixed range [-0.05, 1.45].
+     Data values occupy [0, 1], Q1 base sits at z=1.45.
+     Tick labels map back to original values. */
   var relayoutArgs = {{'scene.zaxis.title.text': zTitle}};
-  if (isProb) {{
-    relayoutArgs['scene.zaxis.range']     = [-0.05, 1.45];
-    relayoutArgs['scene.zaxis.autorange'] = false;
-  }} else if (q1HasGmag) {{
-    relayoutArgs['scene.zaxis.range']     = GMAG_Z_RANGE;
-    relayoutArgs['scene.zaxis.autorange'] = false;
+  relayoutArgs['scene.zaxis.range']     = [-0.05, 1.45];
+  relayoutArgs['scene.zaxis.autorange'] = false;
+
+  /* Tick labels: map normalised [0,1] back to original values */
+  var tpos = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+  var tvals = tpos.slice();
+  tvals.push(1.45);
+  var ttexts;
+  if (opt === 'g_mag') {{
+    ttexts = tpos.map(function(t) {{
+      return (GMAG_NORM[0] + t * (GMAG_NORM[1] - GMAG_NORM[0])).toFixed(1);
+    }});
+  }} else if (FEAT_NORM[opt]) {{
+    var fnorm = FEAT_NORM[opt];
+    ttexts = tpos.map(function(t) {{
+      var v = fnorm[0] + t * (fnorm[1] - fnorm[0]);
+      return Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(4);
+    }});
   }} else {{
-    relayoutArgs['scene.zaxis.autorange'] = 'reversed';
+    ttexts = tpos.map(function(t) {{ return t.toFixed(1); }});
   }}
+  ttexts.push('Q1');
+  relayoutArgs['scene.zaxis.tickvals'] = tvals;
+  relayoutArgs['scene.zaxis.ticktext'] = ttexts;
 
   /* Preserve camera + aspect ratio */
   if (cam) relayoutArgs['scene.camera'] = cam;
@@ -3238,9 +3387,16 @@ plotDiv.on('plotly_hover', function(data) {{ if(pinned)return; showPointFromPt(d
 plotDiv.on('plotly_unhover', function() {{
   if(pinned)return; img.style.display='none'; infoDiv.textContent=''; noCutout.textContent='';
 }});
+var _lastClickTime=0, _lastClickPt=null, _dblClickMs=400;
 plotDiv.on('plotly_click', function(data) {{
   if(!data.points||!data.points.length)return;
-  showPointFromPt(data.points[0]); pinned=true; pinBtn.textContent='Unpin'; pinBtn.classList.add('pinned');
+  var now=Date.now(), pt=data.points[0];
+  if(now-_lastClickTime<_dblClickMs && _lastClickPt && _lastClickPt.pointIndex===pt.pointIndex && _lastClickPt.curveNumber===pt.curveNumber) {{
+    showPointFromPt(pt); pinned=true; pinBtn.textContent='Unpin'; pinBtn.classList.add('pinned');
+    _lastClickTime=0; _lastClickPt=null;
+  }} else {{
+    _lastClickTime=now; _lastClickPt=pt;
+  }}
 }});
 
 /* ── Resize ── */
@@ -3287,7 +3443,7 @@ applyZAxis(_currentZ);
 </body>
 </html>"""
 
-    out = output_dir / "q1_3d.html"
+    out = output_dir / "3d_umap.html"
     out.write_text(html, encoding="utf-8")
     print(f"  -> {out}  ({n_cached} cutouts embedded)")
 
@@ -3577,8 +3733,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Interactive 3D UMAP with Euclid feature coloring and ERO overlays"
     )
-    parser.add_argument("--3d", dest="make_3d", action="store_true",
-                        help="Regenerate HTML from saved CSVs (no DB query).")
+    parser.add_argument("--reproject", action="store_true",
+                        help="Force re-projection from raw npz files even if projected CSVs exist.")
     parser.add_argument("--max-points", type=int, default=5000,
                         help="Max total overlay points for All PHZ (default: 5000). "
                              "Classes with <500 sources are kept in full; "
@@ -3635,478 +3791,184 @@ def main() -> int:
 
     ero_features_csv = ARRAYS_DIR / "ero_features.csv"
 
-    if args.make_3d:
-        # ── --3d mode ─────────────────────────────────────────────────────────
-        if not allphz_path.exists():
-            print(f"ERROR: {allphz_path} not found. Run without --3d first.")
-            return 1
-
-        print("\n[4a] Loading saved allphz projected data...")
-        df_allphz = pd.read_csv(allphz_path)
-        df_allphz["phz"] = df_allphz["phz"].astype(int)
-        if "cluster" not in df_allphz.columns:
-            df_allphz["cluster"] = assign_to_clusters(
-                df_allphz[["umap1","umap2"]].values, q1_emb, q1_labels)
-        print(f"  {len(df_allphz):,} sources")
-
-        df_desi = None
-        desi_path = PROJECTED_DIR / "q1_desi_projected.csv"
-        if desi_path.exists():
-            print("\n[4b] Loading saved DESI data...")
-            df_desi = pd.read_csv(desi_path)
-            df_desi["phz"] = df_desi["phz"].astype(int)
-            if "cluster" not in df_desi.columns:
-                df_desi["cluster"] = assign_to_clusters(
-                    df_desi[["umap1","umap2"]].values, q1_emb, q1_labels)
-            print(f"  {len(df_desi):,} DESI sources")
-
-        print("\n[4c] Loading ERO data...")
-        ero_regular_emb = ero_regular_y = ero_regular_gmag = ero_regular_features = None
-        ero_rebal_emb   = ero_rebal_y   = ero_rebal_gmag   = ero_rebal_features   = None
-        ero_reg_sids = ero_rebal_sids = None
-        ero_feature_names = []
-
-        if ero_reg_path.exists():
-            df_ero_reg      = pd.read_csv(ero_reg_path)
-            ero_regular_emb = df_ero_reg[["umap1","umap2"]].values
-            ero_regular_y   = df_ero_reg["y"].values.astype(int)
-            ero_reg_sids    = df_ero_reg["source_id"].astype(str).values
-            ero_regular_gmag = df_ero_reg["phot_g_mean_mag"].values.astype(float) \
-                               if "phot_g_mean_mag" in df_ero_reg.columns else None
-            print(f"  ERO regular: {len(ero_regular_emb):,} sources")
-            ero_regular_features, ero_feature_names, _ = load_ero_feats(ero_features_csv, ero_reg_sids)
-        else:
-            print("  No ero_regular_projected.csv — run without --3d first.")
-
-        if ero_rebal_path.exists():
-            df_ero_rebal   = pd.read_csv(ero_rebal_path)
-            ero_rebal_emb  = df_ero_rebal[["umap1","umap2"]].values
-            ero_rebal_y    = df_ero_rebal["y"].values.astype(int)
-            ero_rebal_sids = df_ero_rebal["source_id"].astype(str).values
-            ero_rebal_gmag = df_ero_rebal["phot_g_mean_mag"].values.astype(float) \
-                             if "phot_g_mean_mag" in df_ero_rebal.columns else None
-            print(f"  ERO rebalanced: {len(ero_rebal_emb):,} sources")
-            ero_rebal_features, fn2, _ = load_ero_feats(ero_features_csv, ero_rebal_sids)
-            if not ero_feature_names:
-                ero_feature_names = fn2
-            elif ero_rebal_features is not None and fn2 != ero_feature_names:
-                ero_rebal_features = _align_features(ero_rebal_features, fn2, ero_feature_names)
-        else:
-            print("  No ero_rebal_projected.csv — run without --3d first.")
-
-        print("\n[4d] Loading ERO groups + extra data...")
-        sid_to_group = load_ero_group_map()
-        ero_reg_extra = load_ero_extra_data_from_npz(
-            ARRAYS_DIR / "ero_indiv.npz", ero_reg_sids) if ero_reg_sids is not None else {}
-        ero_rebal_extra = load_ero_extra_data_from_npz(
-            ARRAYS_DIR / "ero_indiv_rebalanced.npz", ero_rebal_sids) if ero_rebal_sids is not None else {}
-
-        print("\n[4e] Loading Gaia XGB data...")
-        gaia_xgb_emb = gaia_xgb_gal_prob = gaia_xgb_sids = gaia_xgb_gmag = None
-        gaia_xgb_ra = gaia_xgb_dec = None
-        if GAIA_XGB_CSV.exists():
-            df_gxgb          = pd.read_csv(GAIA_XGB_CSV)
-            gaia_xgb_emb     = df_gxgb[["umap1", "umap2"]].values
-            gaia_xgb_gal_prob = df_gxgb["gal_prob"].values.astype(float)
-            gaia_xgb_sids    = df_gxgb["source_id"].astype(str).values
-            gaia_xgb_gmag    = df_gxgb["phot_g_mean_mag"].values.astype(float) \
-                               if "phot_g_mean_mag" in df_gxgb.columns else None
-            gaia_xgb_ra      = df_gxgb["ra"].values.astype(float) \
-                               if "ra" in df_gxgb.columns else None
-            gaia_xgb_dec     = df_gxgb["dec"].values.astype(float) \
-                               if "dec" in df_gxgb.columns else None
-            print(f"  {len(gaia_xgb_emb):,} Gaia XGB sources  "
-                  f"(galaxies={(gaia_xgb_gal_prob >= GAL_THRESH).sum():,}  "
-                  f"stars={(gaia_xgb_gal_prob < GAL_THRESH).sum():,})")
-            # Save full data for density histograms before subsampling
-            _gaia_xgb_full_emb  = gaia_xgb_emb.copy()
-            _gaia_xgb_full_gprob = gaia_xgb_gal_prob.copy()
-            # Subsample Gaia XGB to ~10k density-preserving
-            _gxgb_cap = 10_000
-            if len(gaia_xgb_emb) > _gxgb_cap:
-                _gi = _random_subsample_idx(len(gaia_xgb_emb), _gxgb_cap, args.seed)
-                gaia_xgb_emb       = gaia_xgb_emb[_gi]
-                gaia_xgb_gal_prob = gaia_xgb_gal_prob[_gi]
-                gaia_xgb_sids      = gaia_xgb_sids[_gi]
-                if gaia_xgb_gmag is not None: gaia_xgb_gmag = gaia_xgb_gmag[_gi]
-                if gaia_xgb_ra   is not None: gaia_xgb_ra   = gaia_xgb_ra[_gi]
-                if gaia_xgb_dec  is not None: gaia_xgb_dec  = gaia_xgb_dec[_gi]
-                print(f"  Subsampled to {_gxgb_cap:,} (density-preserving)")
-        else:
-            _gaia_xgb_full_emb = _gaia_xgb_full_gprob = None
-            print(f"  {GAIA_XGB_CSV.name} not found — Gaia XGB overlay disabled.")
-
-        # ── High-lat subset ──
-        gaia_hilat_emb = gaia_hilat_gal_prob = gaia_hilat_sids = gaia_hilat_gmag = None
-        gaia_hilat_ra = gaia_hilat_dec = None
-        if GAIA_HILAT_CSV.exists():
-            df_hilat = pd.read_csv(GAIA_HILAT_CSV)
-        elif GAIA_XGB_CSV.exists():
-            df_gxgb_full = pd.read_csv(GAIA_XGB_CSV)
-            df_hilat = _filter_gaia_xgb_hilat(df_gxgb_full)
-        else:
-            df_hilat = None
-        if df_hilat is not None and len(df_hilat) > 0:
-            gaia_hilat_emb       = df_hilat[["umap1", "umap2"]].values
-            gaia_hilat_gal_prob = df_hilat["gal_prob"].values.astype(float)
-            gaia_hilat_sids      = df_hilat["source_id"].astype(str).values
-            gaia_hilat_gmag      = df_hilat["phot_g_mean_mag"].values.astype(float) \
-                                   if "phot_g_mean_mag" in df_hilat.columns else None
-            gaia_hilat_ra        = df_hilat["ra"].values.astype(float) \
-                                   if "ra" in df_hilat.columns else None
-            gaia_hilat_dec       = df_hilat["dec"].values.astype(float) \
-                                   if "dec" in df_hilat.columns else None
-            _gaia_hilat_full_emb   = gaia_hilat_emb.copy()
-            _gaia_hilat_full_gprob = gaia_hilat_gal_prob.copy()
-            _ghl_cap = 10_000
-            if len(gaia_hilat_emb) > _ghl_cap:
-                _ghi = _random_subsample_idx(len(gaia_hilat_emb), _ghl_cap, args.seed)
-                gaia_hilat_emb       = gaia_hilat_emb[_ghi]
-                gaia_hilat_gal_prob = gaia_hilat_gal_prob[_ghi]
-                gaia_hilat_sids      = gaia_hilat_sids[_ghi]
-                if gaia_hilat_gmag is not None: gaia_hilat_gmag = gaia_hilat_gmag[_ghi]
-                if gaia_hilat_ra   is not None: gaia_hilat_ra   = gaia_hilat_ra[_ghi]
-                if gaia_hilat_dec  is not None: gaia_hilat_dec  = gaia_hilat_dec[_ghi]
-                print(f"  High-lat: subsampled to {_ghl_cap:,}")
-            print(f"  High-lat: {len(gaia_hilat_emb):,} sources  "
-                  f"(|b|>10, |ecl_lat|>45)  "
-                  f"(galaxies={(gaia_hilat_gal_prob >= GAL_THRESH).sum():,}  "
-                  f"stars={(gaia_hilat_gal_prob < GAL_THRESH).sum():,})")
-        else:
-            _gaia_hilat_full_emb = _gaia_hilat_full_gprob = None
-            print("  High-lat: no sources pass latitude cuts or CSV not found.")
-
-        # ── Build per-category density histograms (full pre-subsample data) ──
-        print("\n[4f] Building per-category density histograms...")
-        _density_hist = _build_density_hists(
-            q1_emb, df_allphz, df_desi,
-            ero_regular_emb, ero_reg_sids,
-            ero_rebal_emb, ero_rebal_sids,
-            sid_to_group,
-            _gaia_xgb_full_emb, _gaia_xgb_full_gprob,
-            _gaia_hilat_full_emb, _gaia_hilat_full_gprob,
-            ero_desi_emb=None,   # loaded later at [5g]
-            ero_desi_cat=None,
-            gal_thresh=GAL_THRESH,
-        )
-
-        print("\n[5a] Loading cutout thumbnails and contact sheets...")
-        cutout_cache  = load_cutout_cache(CUTOUTS_DIR)
-        contact_sheet_cache, sheet_counts, sheet_extra = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
-        desi_contact_sheet_cache, desi_sheet_counts, desi_sheet_extra = load_contact_sheet_cache_desi(DESI_CUTOUTS_DIR)
-        ero_desi_cs_cache, ero_desi_cs_counts, ero_desi_sheet_extra = load_contact_sheet_cache_ero_desi(ERO_DESI_CUTOUTS_DIR)
-        ero_contact_sheet_cache, ero_sheet_counts_data, ero_sheet_extra = load_contact_sheet_cache_ero(ERO_CUTOUTS_DIR)
-        ero_cutout_cache_data = load_cutout_cache_ero(ERO_CUTOUTS_DIR)
-        # Also load ERO-DESI individual cutouts (keyed by source_id)
-        _ero_desi_cutouts = load_cutout_cache_ero(ERO_DESI_CUTOUTS_DIR)
-        if _ero_desi_cutouts:
-            ero_cutout_cache_data.update(_ero_desi_cutouts)
-
-        if args.max_points is not None:
-            print(f"\n  Applying --max-points {args.max_points} (hybrid density-preserving)...")
-            cutout_sids = set(cutout_cache.keys())
-            df_allphz = _subsample_hybrid(
-                df_allphz, "phz", PHZ_LABELS, cutout_sids,
-                max_total=args.max_points, floor=500, seed=args.seed)
-
-        _ero_feat_ranges: dict = {}
-        if ero_regular_emb is not None and ero_regular_features is not None and ero_feature_names:
-            q1_features, feature_names, _ero_feat_ranges = _nn_map_ero_features_onto_q1(
-                q1_emb, ero_regular_emb, ero_regular_features,
-                ero_feature_names, q1_features, feature_names or [],
-            )
-
-        print("\n[5b] Loading Q1 Z arrays (model P(gal) + PHZ P(gal))...")
-        q1_model_pgal = q1_phz_pgal = None
-        if q1_sids is not None and q1_features_base is not None:
-            q1_model_pgal, q1_phz_pgal = _load_q1_z_arrays(
-                q1_sids, q1_features_base)
-            # Fill PHZ pgal gaps from Q1 cache
-            if q1_phz_pgal is not None:
-                sid_to_phz_pgal = dict(zip(q1_sids, q1_phz_pgal))
-                _fill_col(df_allphz, "phz_pgal", sid_to_phz_pgal)
-                _fill_col(df_desi,   "phz_pgal", sid_to_phz_pgal)
-
-        # XGB inference on all PHZ/DESI sources for 100% model_pgal coverage
-        print("\n[5c] Computing XGB P(gal) for all overlay sources...")
-        if df_allphz is not None:
-            df_allphz["model_pgal"] = _compute_model_pgal_for_df(df_allphz)
-        if df_desi is not None:
-            df_desi["model_pgal"] = _compute_model_pgal_for_df(df_desi)
-
-        print("\n[5d] Loading ERO model P(gal)...")
-        ero_reg_pgal   = _load_ero_pgal(ero_reg_sids)   if ero_reg_sids   is not None else None
-        ero_rebal_pgal = _load_ero_pgal(ero_rebal_sids) if ero_rebal_sids is not None else None
-
-        # Subsample ERO overlays to ~10k density-preserving
-        _ero_cap = 10_000
-        if ero_regular_emb is not None and len(ero_regular_emb) > _ero_cap:
-            _ei = _random_subsample_idx(len(ero_regular_emb), _ero_cap, args.seed)
-            ero_regular_emb = ero_regular_emb[_ei]
-            if ero_regular_y is not None: ero_regular_y = ero_regular_y[_ei]
-            if ero_regular_gmag is not None: ero_regular_gmag = ero_regular_gmag[_ei]
-            if ero_regular_features is not None: ero_regular_features = ero_regular_features[_ei]
-            if ero_reg_sids is not None: ero_reg_sids = ero_reg_sids[_ei]
-            if ero_reg_extra:
-                ero_reg_extra = {k: v[_ei] for k, v in ero_reg_extra.items()}
-            if ero_reg_pgal is not None: ero_reg_pgal = ero_reg_pgal[_ei]
-            print(f"  ERO regular subsampled to {_ero_cap:,} (density-preserving)")
-        if ero_rebal_emb is not None and len(ero_rebal_emb) > _ero_cap:
-            _ei = _random_subsample_idx(len(ero_rebal_emb), _ero_cap, args.seed)
-            ero_rebal_emb = ero_rebal_emb[_ei]
-            if ero_rebal_y is not None: ero_rebal_y = ero_rebal_y[_ei]
-            if ero_rebal_gmag is not None: ero_rebal_gmag = ero_rebal_gmag[_ei]
-            if ero_rebal_features is not None: ero_rebal_features = ero_rebal_features[_ei]
-            if ero_rebal_sids is not None: ero_rebal_sids = ero_rebal_sids[_ei]
-            if ero_rebal_extra:
-                ero_rebal_extra = {k: v[_ei] for k, v in ero_rebal_extra.items()}
-            if ero_rebal_pgal is not None: ero_rebal_pgal = ero_rebal_pgal[_ei]
-            print(f"  ERO rebalanced subsampled to {_ero_cap:,} (density-preserving)")
-
-        # ── ERO-DESI overlay ──────────────────────────────────────────────────
-        print("\n[5e] Loading ERO-DESI data...")
-        ero_desi_emb = ero_desi_cat = ero_desi_model_pgal = ero_desi_gmag = None
-        ero_desi_spectype = ero_desi_z = ero_desi_class_star = ero_desi_sids = None
-        ero_desi_ra = ero_desi_dec = None
-        ero_desi_csv = PROJECTED_DIR / "ero_desi_projected.csv"
-        ero_desi_npz = ARRAYS_DIR / "ero_desi.npz"
-        if ero_desi_csv.exists():
-            df_ed = pd.read_csv(ero_desi_csv)
-            ero_desi_emb        = df_ed[["umap1", "umap2"]].values
-            ero_desi_cat        = df_ed["cat_value"].values.astype(int)
-            ero_desi_model_pgal = df_ed["model_pgal"].values.astype(float) \
-                                  if "model_pgal" in df_ed.columns else None
-            ero_desi_gmag       = df_ed["phot_g_mean_mag"].values.astype(float) \
-                                  if "phot_g_mean_mag" in df_ed.columns else None
-            ero_desi_spectype   = df_ed["spectype"].values.astype(str) \
-                                  if "spectype" in df_ed.columns else None
-            ero_desi_z          = df_ed["desi_z"].values.astype(float) \
-                                  if "desi_z" in df_ed.columns else None
-            ero_desi_class_star = df_ed["class_star"].values.astype(float) \
-                                  if "class_star" in df_ed.columns else None
-            ero_desi_sids       = df_ed["source_id"].values.astype(str) \
-                                  if "source_id" in df_ed.columns else None
-            ero_desi_ra         = df_ed["ra"].values.astype(float) \
-                                  if "ra" in df_ed.columns else None
-            ero_desi_dec        = df_ed["dec"].values.astype(float) \
-                                  if "dec" in df_ed.columns else None
-            print(f"  {len(df_ed):,} ERO-DESI sources  "
-                  f"(cat=2: {(ero_desi_cat==2).sum():,},  cat=3: {(ero_desi_cat==3).sum():,})")
-        elif ero_desi_npz.exists():
-            # Project on the fly — load reducer + mean/std
-            print("  Projecting ERO-DESI on the fly...")
-            _q1_mean = q1["mean"]; _q1_std = q1["std"]
-            _std_safe = np.where(_q1_std > 0, _q1_std, 1.0)
-            _reducer = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
-            ed_npz = np.load(ero_desi_npz, allow_pickle=True)
-            ed_X   = ed_npz["X_features"].astype(float)
-            ero_desi_cat = ed_npz["cat_value"].astype(int)
-            ero_desi_gmag = ed_npz["phot_g_mean_mag"].astype(float) \
-                            if "phot_g_mean_mag" in ed_npz else None
-            ero_desi_spectype = ed_npz["spectype"].astype(str) \
-                                if "spectype" in ed_npz else None
-            ero_desi_z = ed_npz["desi_z"].astype(float) \
-                         if "desi_z" in ed_npz else None
-            ero_desi_class_star = ed_npz["class_star"].astype(float) \
-                                  if "class_star" in ed_npz else None
-            ero_desi_sids = ed_npz["source_ids"].astype(str) \
-                            if "source_ids" in ed_npz else None
-            ero_desi_ra = ed_npz["ra"].astype(float) \
-                          if "ra" in ed_npz else None
-            ero_desi_dec = ed_npz["dec"].astype(float) \
-                           if "dec" in ed_npz else None
-            ed_scaled = (ed_X - _q1_mean) / _std_safe
-            ed_scaled = np.where(np.isfinite(ed_scaled), ed_scaled, 0.0)
-            ero_desi_emb = _reducer.transform(ed_scaled)
-            df_ed_xgb = pd.DataFrame(ed_X, columns=SELECTED_GAIA_PARAMETERS)
-            ero_desi_model_pgal = _compute_model_pgal_for_df(df_ed_xgb)
-            # Save for next --3d run
-            save_dict = {
-                "umap1": ero_desi_emb[:, 0], "umap2": ero_desi_emb[:, 1],
-                "cat_value": ero_desi_cat, "model_pgal": ero_desi_model_pgal,
-            }
-            if ero_desi_gmag is not None:
-                save_dict["phot_g_mean_mag"] = ero_desi_gmag
-            if ero_desi_spectype is not None:
-                save_dict["spectype"] = ero_desi_spectype
-            if ero_desi_z is not None:
-                save_dict["desi_z"] = ero_desi_z
-            if ero_desi_class_star is not None:
-                save_dict["class_star"] = ero_desi_class_star
-            if ero_desi_ra is not None:
-                save_dict["ra"] = ero_desi_ra
-            if ero_desi_dec is not None:
-                save_dict["dec"] = ero_desi_dec
-            pd.DataFrame(save_dict).to_csv(ero_desi_csv, index=False)
-            print(f"  {len(ero_desi_cat):,} ERO-DESI sources projected → {ero_desi_csv}")
-        else:
-            print("  ero_desi.npz not found — ERO-DESI overlay disabled.")
-
-        # Add ERO-DESI density (loaded after initial density build)
-        if ero_desi_emb is not None and ero_desi_cat is not None:
-            x_edges, y_edges = _density_bin_edges(q1_emb, 100)
-            ed_cats = {}
-            for cv in sorted(set(ero_desi_cat)):
-                m = ero_desi_cat == cv
-                if m.sum() == 0:
-                    continue
-                H, _, _ = np.histogram2d(ero_desi_emb[m, 0], ero_desi_emb[m, 1],
-                                         bins=[x_edges, y_edges])
-                ed_cats[str(int(cv))] = [int(v) for v in H.ravel()]
-            _density_hist["overlays"]["ero_desi"] = ed_cats
-
-        print("\n[6] Generating 3D HTML...")
-        plot_umap_3d_plotly(
-            q1_emb, q1_labels, q1_gmag, df_allphz, OUTPUT_DIR,
-            cutout_cache=cutout_cache,
-            contact_sheet_cache=contact_sheet_cache, sheet_counts=sheet_counts,
-            sheet_extra=sheet_extra,
-            q1_features=q1_features, feature_names=feature_names,
-            feature_ranges_override=_ero_feat_ranges,
-            df_desi=df_desi,
-            desi_contact_sheet_cache=desi_contact_sheet_cache,
-            desi_sheet_counts=desi_sheet_counts,
-            desi_sheet_extra=desi_sheet_extra,
-            ero_regular_emb=ero_regular_emb, ero_regular_y=ero_regular_y,
-            ero_regular_gmag=ero_regular_gmag, ero_regular_features=ero_regular_features,
-            ero_rebal_emb=ero_rebal_emb, ero_rebal_y=ero_rebal_y,
-            ero_rebal_gmag=ero_rebal_gmag, ero_rebal_features=ero_rebal_features,
-            ero_feature_names=ero_feature_names,
-            ero_reg_sids=ero_reg_sids, ero_rebal_sids=ero_rebal_sids,
-            ero_reg_extra=ero_reg_extra, ero_rebal_extra=ero_rebal_extra,
-            sid_to_group=sid_to_group,
-            ero_contact_sheet_cache=ero_contact_sheet_cache,
-            ero_sheet_counts=ero_sheet_counts_data,
-            ero_sheet_extra=ero_sheet_extra,
-            ero_cutout_cache=ero_cutout_cache_data,
-            gaia_xgb_emb=gaia_xgb_emb, gaia_xgb_gal_prob=gaia_xgb_gal_prob,
-            gaia_xgb_sids=gaia_xgb_sids, gaia_xgb_gmag=gaia_xgb_gmag,
-            q1_model_pgal=q1_model_pgal, q1_phz_pgal=q1_phz_pgal,
-            ero_reg_pgal=ero_reg_pgal, ero_rebal_pgal=ero_rebal_pgal,
-            ero_desi_emb=ero_desi_emb, ero_desi_cat=ero_desi_cat,
-            ero_desi_model_pgal=ero_desi_model_pgal,
-            ero_desi_gmag=ero_desi_gmag,
-            ero_desi_spectype=ero_desi_spectype,
-            ero_desi_z=ero_desi_z,
-            ero_desi_class_star=ero_desi_class_star,
-            ero_desi_ra=ero_desi_ra, ero_desi_dec=ero_desi_dec,
-            ero_desi_contact_sheet_cache=ero_desi_cs_cache,
-            ero_desi_sheet_counts=ero_desi_cs_counts,
-            ero_desi_sheet_extra=ero_desi_sheet_extra,
-            ero_desi_sids=ero_desi_sids,
-            gaia_xgb_ra=gaia_xgb_ra, gaia_xgb_dec=gaia_xgb_dec,
-            gaia_hilat_emb=gaia_hilat_emb, gaia_hilat_gal_prob=gaia_hilat_gal_prob,
-            gaia_hilat_sids=gaia_hilat_sids, gaia_hilat_gmag=gaia_hilat_gmag,
-            gaia_hilat_ra=gaia_hilat_ra, gaia_hilat_dec=gaia_hilat_dec,
-            density_hist_data=_density_hist,
-        )
-        return 0
-
-    # ── Default mode: load npz + project + save ────────────────────────────────
+    # ── Step A: UMAP reducer (lazy load) ─────────────────────────────────────
     q1_mean  = q1["mean"]
     q1_std   = q1["std"]
-    reducer  = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
     std_safe = np.where(q1_std > 0, q1_std, 1.0)
+    reducer = None  # loaded on demand
 
-    print("\n[4] Loading all phz sources from npz...")
-    df_allphz = load_allphz_from_npz()
+    def _get_reducer():
+        nonlocal reducer
+        if reducer is None:
+            reducer = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
+        return reducer
 
-    print("\n[4b] Loading DESI sources from npz...")
+    # ── Step B: allphz ────────────────────────────────────────────────────────
+    if allphz_path.exists() and not args.reproject:
+        print("\n[4a] Loading saved allphz projected data...")
+        df_allphz = pd.read_csv(allphz_path, float_precision="round_trip")
+        df_allphz["phz"] = df_allphz["phz"].astype(int)
+    else:
+        print("\n[4a] Loading + projecting allphz from npz...")
+        df_allphz = load_allphz_from_npz()
+        X = df_allphz[SELECTED_GAIA_PARAMETERS].values.astype(float)
+        X_scaled = np.where(np.isfinite((X - q1_mean) / std_safe),
+                            (X - q1_mean) / std_safe, 0.0)
+        emb = _get_reducer().transform(X_scaled).astype(np.float64)
+        df_allphz = df_allphz.copy()
+        df_allphz["umap1"] = emb[:, 0]
+        df_allphz["umap2"] = emb[:, 1]
+        df_allphz["cluster"] = assign_to_clusters(emb, q1_emb, q1_labels)
+        df_allphz.to_csv(allphz_path, index=False, float_format="%.17g")
+        print(f"  Saved → {allphz_path}")
+    if "cluster" not in df_allphz.columns:
+        df_allphz["cluster"] = assign_to_clusters(
+            df_allphz[["umap1", "umap2"]].values, q1_emb, q1_labels)
+    print(f"  {len(df_allphz):,} sources")
+
+    # ── Step C: DESI ──────────────────────────────────────────────────────────
     df_desi = None
-    try:
-        df_desi = load_desi_from_npz()
-    except Exception as e:
-        print(f"  DESI load failed: {e} — DESI overlay disabled.")
-
-    print("\n[5] Projecting allphz into UMAP space...")
-    X = df_allphz[SELECTED_GAIA_PARAMETERS].values.astype(float)
-    X_scaled  = np.where(np.isfinite((X - q1_mean)/std_safe), (X - q1_mean)/std_safe, 0.0)
-    emb       = reducer.transform(X_scaled)
-    df_allphz = df_allphz.copy()
-    df_allphz["umap1"] = emb[:, 0]; df_allphz["umap2"] = emb[:, 1]
-    df_allphz["cluster"] = assign_to_clusters(emb, q1_emb, q1_labels)
-    df_allphz.to_csv(allphz_path, index=False)
-    print(f"  Saved → {allphz_path}")
-
+    desi_path = PROJECTED_DIR / "q1_desi_projected.csv"
+    if desi_path.exists() and not args.reproject:
+        print("\n[4b] Loading saved DESI data...")
+        df_desi = pd.read_csv(desi_path, float_precision="round_trip")
+        df_desi["phz"] = df_desi["phz"].astype(int)
+    else:
+        print("\n[4b] Loading + projecting DESI from npz...")
+        try:
+            df_desi = load_desi_from_npz()
+            X_d = df_desi[SELECTED_GAIA_PARAMETERS].values.astype(float)
+            X_d_scaled = np.where(np.isfinite((X_d - q1_mean) / std_safe),
+                                  (X_d - q1_mean) / std_safe, 0.0)
+            emb_d = _get_reducer().transform(X_d_scaled).astype(np.float64)
+            df_desi = df_desi.copy()
+            df_desi["umap1"] = emb_d[:, 0]
+            df_desi["umap2"] = emb_d[:, 1]
+            df_desi["cluster"] = assign_to_clusters(emb_d, q1_emb, q1_labels)
+            df_desi.to_csv(desi_path, index=False, float_format="%.17g")
+            print(f"  Saved → {desi_path}")
+        except Exception as e:
+            print(f"  DESI load failed: {e} — DESI overlay disabled.")
+    if df_desi is not None and "cluster" not in df_desi.columns:
+        df_desi["cluster"] = assign_to_clusters(
+            df_desi[["umap1", "umap2"]].values, q1_emb, q1_labels)
     if df_desi is not None:
-        print("\n[5b] Projecting DESI sources...")
-        X_d        = df_desi[SELECTED_GAIA_PARAMETERS].values.astype(float)
-        X_d_scaled = np.where(np.isfinite((X_d-q1_mean)/std_safe), (X_d-q1_mean)/std_safe, 0.0)
-        emb_d      = reducer.transform(X_d_scaled)
-        df_desi    = df_desi.copy()
-        df_desi["umap1"] = emb_d[:, 0]; df_desi["umap2"] = emb_d[:, 1]
-        df_desi["cluster"] = assign_to_clusters(emb_d, q1_emb, q1_labels)
-        desi_path = PROJECTED_DIR / "q1_desi_projected.csv"
-        df_desi.to_csv(desi_path, index=False)
-        print(f"  Saved → {desi_path}")
+        print(f"  {len(df_desi):,} DESI sources")
 
-    # ── ERO projection ────────────────────────────────────────────────────────
+    # ── Step D: ERO regular + rebalanced ──────────────────────────────────────
+    print("\n[4c] Loading ERO data...")
     ero_regular_emb = ero_regular_y = ero_regular_gmag = ero_regular_features = None
     ero_rebal_emb   = ero_rebal_y   = ero_rebal_gmag   = ero_rebal_features   = None
     ero_reg_sids = ero_rebal_sids = None
     ero_feature_names = []
-    _fn_rebal: list[str] = []
-
     ero_npz_regular = ARRAYS_DIR / "ero_indiv.npz"
     ero_npz_rebal   = ARRAYS_DIR / "ero_indiv_rebalanced.npz"
+    _fn_rebal: list[str] = []
 
-    for tag, npz_path, out_path in [
-        ("ERO regular",     ero_npz_regular, ero_reg_path),
-        ("ERO rebalanced",  ero_npz_rebal,   ero_rebal_path),
+    for tag, npz_path, csv_path in [
+        ("ERO regular",    ero_npz_regular, ero_reg_path),
+        ("ERO rebalanced", ero_npz_rebal,   ero_rebal_path),
     ]:
-        if not npz_path.exists():
-            print(f"\n  {npz_path.name} not found — {tag} overlay disabled.")
-            continue
-        print(f"\n[5c/{tag}] Projecting {tag} into Q1 UMAP space...")
-        emb_ero, y_ero, sids_ero = _project_ero(npz_path, q1_mean, std_safe, reducer)
-        print(f"  {len(emb_ero):,} sources  (STAR={(y_ero==0).sum():,}  GAL={(y_ero==1).sum():,})")
+        emb_ero = y_ero = sids_ero = gmag_ero = feats_ero = None
+        fn: list[str] = []
 
-        print(f"  Loading ERO VIS features...")
-        feats_ero, fn, gmag_ero = load_ero_feats(ero_features_csv, sids_ero)
+        if csv_path.exists() and not args.reproject:
+            df_ero = pd.read_csv(csv_path, float_precision="round_trip")
+            emb_ero  = df_ero[["umap1", "umap2"]].values
+            y_ero    = df_ero["y"].values.astype(int)
+            sids_ero = df_ero["source_id"].astype(str).values
+            gmag_ero = df_ero["phot_g_mean_mag"].values.astype(float) \
+                       if "phot_g_mean_mag" in df_ero.columns else None
+            print(f"  {tag}: {len(emb_ero):,} sources (from CSV)")
+        elif npz_path.exists():
+            print(f"  Projecting {tag} into Q1 UMAP space...")
+            emb_ero, y_ero, sids_ero = _project_ero(
+                npz_path, q1_mean, std_safe, _get_reducer())
+            print(f"  {len(emb_ero):,} sources  "
+                  f"(STAR={(y_ero==0).sum():,}  GAL={(y_ero==1).sum():,})")
+            # Save CSV
+            df_ero_save = pd.DataFrame({
+                "source_id": sids_ero, "y": y_ero,
+                "umap1": emb_ero[:, 0], "umap2": emb_ero[:, 1],
+            })
+            # gmag will come from load_ero_feats below
+            feats_ero, fn, gmag_ero = load_ero_feats(ero_features_csv, sids_ero)
+            if gmag_ero is not None:
+                df_ero_save["phot_g_mean_mag"] = gmag_ero
+            df_ero_save.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved → {csv_path}")
+        else:
+            print(f"  {npz_path.name} not found — {tag} overlay disabled.")
+            continue
+
+        # Load features (if not already loaded during projection)
+        if feats_ero is None:
+            feats_ero, fn, gmag_from_feats = load_ero_feats(
+                ero_features_csv, sids_ero)
+            if gmag_ero is None:
+                gmag_ero = gmag_from_feats
         if not ero_feature_names:
             ero_feature_names = fn
 
-        df_ero_save = pd.DataFrame({
-            "source_id": sids_ero, "y": y_ero,
-            "umap1": emb_ero[:,0], "umap2": emb_ero[:,1],
-        })
-        if gmag_ero is not None:
-            df_ero_save["phot_g_mean_mag"] = gmag_ero
-        df_ero_save.to_csv(out_path, index=False)
-        print(f"  Saved → {out_path}")
-
+        # Assign to the right variables
         if tag == "ERO regular":
-            ero_regular_emb, ero_regular_y, ero_regular_gmag, ero_regular_features = \
-                emb_ero, y_ero, gmag_ero, feats_ero
+            ero_regular_emb, ero_regular_y = emb_ero, y_ero
+            ero_regular_gmag, ero_regular_features = gmag_ero, feats_ero
             ero_reg_sids = sids_ero
         else:
-            ero_rebal_emb, ero_rebal_y, ero_rebal_gmag, ero_rebal_features = \
-                emb_ero, y_ero, gmag_ero, feats_ero
+            ero_rebal_emb, ero_rebal_y = emb_ero, y_ero
+            ero_rebal_gmag, ero_rebal_features = gmag_ero, feats_ero
             ero_rebal_sids = sids_ero
             _fn_rebal = fn
 
     # Ensure rebalanced feature columns match regular (ero_feature_names) ordering
     if (ero_rebal_features is not None and ero_feature_names
-            and _fn_rebal != ero_feature_names):
-        ero_rebal_features = _align_features(ero_rebal_features, _fn_rebal, ero_feature_names)
+            and _fn_rebal and _fn_rebal != ero_feature_names):
+        ero_rebal_features = _align_features(
+            ero_rebal_features, _fn_rebal, ero_feature_names)
         print(f"  Aligned rebal features: {_fn_rebal} → {ero_feature_names}")
 
-    print("\n[5d] Loading ERO group assignments + extra data...")
+    # ── Step E: ERO groups + extra data ───────────────────────────────────────
+    print("\n[4d] Loading ERO groups + extra data...")
     sid_to_group = load_ero_group_map()
     ero_reg_extra = load_ero_extra_data_from_npz(
         ARRAYS_DIR / "ero_indiv.npz", ero_reg_sids) if ero_reg_sids is not None else {}
     ero_rebal_extra = load_ero_extra_data_from_npz(
         ARRAYS_DIR / "ero_indiv_rebalanced.npz", ero_rebal_sids) if ero_rebal_sids is not None else {}
 
-    # ── ERO-DESI overlay ─────────────────────────────────────────────────────
-    print("\n[5e] Projecting ERO-DESI sources...")
+    # ── Step F: ERO-DESI ──────────────────────────────────────────────────────
+    print("\n[4e] Loading ERO-DESI data...")
     ero_desi_emb = ero_desi_cat = ero_desi_model_pgal = ero_desi_gmag = None
     ero_desi_spectype = ero_desi_z = ero_desi_class_star = ero_desi_sids = None
     ero_desi_ra = ero_desi_dec = None
-    ero_desi_npz_path = ARRAYS_DIR / "ero_desi.npz"
-    ero_desi_csv_path = PROJECTED_DIR / "ero_desi_projected.csv"
-    if ero_desi_npz_path.exists():
-        ed_npz = np.load(ero_desi_npz_path, allow_pickle=True)
+    ero_desi_csv = PROJECTED_DIR / "ero_desi_projected.csv"
+    ero_desi_npz = ARRAYS_DIR / "ero_desi.npz"
+
+    if ero_desi_csv.exists() and not args.reproject:
+        df_ed = pd.read_csv(ero_desi_csv, float_precision="round_trip")
+        ero_desi_emb        = df_ed[["umap1", "umap2"]].values
+        ero_desi_cat        = df_ed["cat_value"].values.astype(int)
+        ero_desi_model_pgal = df_ed["model_pgal"].values.astype(float) \
+                              if "model_pgal" in df_ed.columns else None
+        ero_desi_gmag       = df_ed["phot_g_mean_mag"].values.astype(float) \
+                              if "phot_g_mean_mag" in df_ed.columns else None
+        ero_desi_spectype   = df_ed["spectype"].values.astype(str) \
+                              if "spectype" in df_ed.columns else None
+        ero_desi_z          = df_ed["desi_z"].values.astype(float) \
+                              if "desi_z" in df_ed.columns else None
+        ero_desi_class_star = df_ed["class_star"].values.astype(float) \
+                              if "class_star" in df_ed.columns else None
+        ero_desi_sids       = df_ed["source_id"].values.astype(str) \
+                              if "source_id" in df_ed.columns else None
+        ero_desi_ra         = df_ed["ra"].values.astype(float) \
+                              if "ra" in df_ed.columns else None
+        ero_desi_dec        = df_ed["dec"].values.astype(float) \
+                              if "dec" in df_ed.columns else None
+        print(f"  {len(df_ed):,} ERO-DESI sources  "
+              f"(cat=2: {(ero_desi_cat==2).sum():,},  cat=3: {(ero_desi_cat==3).sum():,})")
+    elif ero_desi_npz.exists():
+        print("  Projecting ERO-DESI on the fly...")
+        ed_npz = np.load(ero_desi_npz, allow_pickle=True)
         ed_X   = ed_npz["X_features"].astype(float)
         ed_cat = ed_npz["cat_value"].astype(int)
         ed_sids = ed_npz["source_ids"].astype(str) \
@@ -4126,13 +3988,13 @@ def main() -> int:
         # Standardise and project
         ed_scaled = (ed_X - q1_mean) / std_safe
         ed_scaled = np.where(np.isfinite(ed_scaled), ed_scaled, 0.0)
-        ero_desi_emb = reducer.transform(ed_scaled)
+        ero_desi_emb = _get_reducer().transform(ed_scaled).astype(np.float64)
         ero_desi_cat = ed_cat
         ero_desi_sids = ed_sids
         # XGB inference for model_pgal
         df_ed_for_xgb = pd.DataFrame(ed_X, columns=SELECTED_GAIA_PARAMETERS)
         ero_desi_model_pgal = _compute_model_pgal_for_df(df_ed_for_xgb)
-        # Save to CSV for --3d reuse
+        # Save CSV for future reuse
         save_dict = {
             "umap1": ero_desi_emb[:, 0], "umap2": ero_desi_emb[:, 1],
             "cat_value": ero_desi_cat, "model_pgal": ero_desi_model_pgal,
@@ -4151,37 +4013,15 @@ def main() -> int:
             save_dict["ra"] = ero_desi_ra
         if ero_desi_dec is not None:
             save_dict["dec"] = ero_desi_dec
-        pd.DataFrame(save_dict).to_csv(ero_desi_csv_path, index=False)
+        pd.DataFrame(save_dict).to_csv(ero_desi_csv, index=False, float_format="%.17g")
         print(f"  {len(ed_cat):,} ERO-DESI sources projected  "
               f"(cat=2: {(ed_cat==2).sum():,},  cat=3: {(ed_cat==3).sum():,})")
-        print(f"  Saved → {ero_desi_csv_path}")
+        print(f"  Saved → {ero_desi_csv}")
     else:
         print("  ero_desi.npz not found — ERO-DESI overlay disabled.")
 
-    print("\n[6] Loading cutout thumbnails and contact sheets...")
-    cutout_cache  = load_cutout_cache(CUTOUTS_DIR)
-    contact_sheet_cache, sheet_counts, sheet_extra = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
-    desi_contact_sheet_cache, desi_sheet_counts, desi_sheet_extra = load_contact_sheet_cache_desi(DESI_CUTOUTS_DIR)
-    ero_desi_cs_cache, ero_desi_cs_counts, ero_desi_sheet_extra = load_contact_sheet_cache_ero_desi(ERO_DESI_CUTOUTS_DIR)
-    ero_contact_sheet_cache, ero_sheet_counts_data, ero_sheet_extra = load_contact_sheet_cache_ero(ERO_CUTOUTS_DIR)
-    ero_cutout_cache_data = load_cutout_cache_ero(ERO_CUTOUTS_DIR)
-    # Also load ERO-DESI individual cutouts (keyed by source_id)
-    _ero_desi_cutouts = load_cutout_cache_ero(ERO_DESI_CUTOUTS_DIR)
-    if _ero_desi_cutouts:
-        ero_cutout_cache_data.update(_ero_desi_cutouts)
-
-    # Save full allphz/desi for density histograms (before subsampling)
-    _df_allphz_full = df_allphz.copy() if df_allphz is not None else None
-    _df_desi_full   = df_desi.copy()   if df_desi is not None else None
-
-    if args.max_points is not None:
-        print(f"\n  Applying --max-points {args.max_points} (hybrid density-preserving)...")
-        cutout_sids = set(cutout_cache.keys())
-        df_allphz = _subsample_hybrid(
-            df_allphz, "phz", PHZ_LABELS, cutout_sids,
-            max_total=args.max_points, floor=500, seed=args.seed)
-
-    print("\n[6b] Loading Gaia XGB projected data...")
+    # ── Step G: Gaia XGB ──────────────────────────────────────────────────────
+    print("\n[4f] Loading Gaia XGB data...")
     gaia_xgb_emb = gaia_xgb_gal_prob = gaia_xgb_sids = gaia_xgb_gmag = None
     gaia_xgb_ra = gaia_xgb_dec = None
     if GAIA_XGB_CSV.exists():
@@ -4198,10 +4038,11 @@ def main() -> int:
         print(f"  {len(gaia_xgb_emb):,} Gaia XGB sources  "
               f"(galaxies={(gaia_xgb_gal_prob >= GAL_THRESH).sum():,}  "
               f"stars={(gaia_xgb_gal_prob < GAL_THRESH).sum():,})")
+        # Save full data for density histograms before subsampling
         _gaia_xgb_full_emb  = gaia_xgb_emb.copy()
         _gaia_xgb_full_gprob = gaia_xgb_gal_prob.copy()
-        # Subsample Gaia XGB to ~10k density-preserving
-        _gxgb_cap = 10_000
+        # Use all 50k Gaia XGB sources (data is small relative to image blobs)
+        _gxgb_cap = 50_000
         if len(gaia_xgb_emb) > _gxgb_cap:
             _gi = _random_subsample_idx(len(gaia_xgb_emb), _gxgb_cap, args.seed)
             gaia_xgb_emb       = gaia_xgb_emb[_gi]
@@ -4215,7 +4056,7 @@ def main() -> int:
         _gaia_xgb_full_emb = _gaia_xgb_full_gprob = None
         print(f"  {GAIA_XGB_CSV.name} not found — Gaia XGB overlay disabled.")
 
-    # ── High-lat subset ──
+    # ── Step H: Gaia hilat ────────────────────────────────────────────────────
     gaia_hilat_emb = gaia_hilat_gal_prob = gaia_hilat_sids = gaia_hilat_gmag = None
     gaia_hilat_ra = gaia_hilat_dec = None
     if GAIA_HILAT_CSV.exists():
@@ -4237,7 +4078,7 @@ def main() -> int:
                                if "dec" in df_hilat.columns else None
         _gaia_hilat_full_emb   = gaia_hilat_emb.copy()
         _gaia_hilat_full_gprob = gaia_hilat_gal_prob.copy()
-        _ghl_cap = 10_000
+        _ghl_cap = 50_000
         if len(gaia_hilat_emb) > _ghl_cap:
             _ghi = _random_subsample_idx(len(gaia_hilat_emb), _ghl_cap, args.seed)
             gaia_hilat_emb       = gaia_hilat_emb[_ghi]
@@ -4255,39 +4096,34 @@ def main() -> int:
         _gaia_hilat_full_emb = _gaia_hilat_full_gprob = None
         print("  High-lat: no sources pass latitude cuts or CSV not found.")
 
-    _ero_feat_ranges: dict = {}
-    if ero_regular_emb is not None and ero_regular_features is not None and ero_feature_names:
-        q1_features, feature_names, _ero_feat_ranges = _nn_map_ero_features_onto_q1(
-            q1_emb, ero_regular_emb, ero_regular_features,
-            ero_feature_names, q1_features, feature_names or [],
-        )
+    # ── Step I: Cutouts ───────────────────────────────────────────────────────
+    print("\n[5a] Loading cutout thumbnails and contact sheets...")
+    cutout_cache  = load_cutout_cache(CUTOUTS_DIR)
+    contact_sheet_cache, sheet_counts, sheet_extra = load_contact_sheet_cache_allphz(CUTOUTS_DIR)
+    desi_contact_sheet_cache, desi_sheet_counts, desi_sheet_extra = load_contact_sheet_cache_desi(DESI_CUTOUTS_DIR)
+    ero_desi_cs_cache, ero_desi_cs_counts, ero_desi_sheet_extra = load_contact_sheet_cache_ero_desi(ERO_DESI_CUTOUTS_DIR)
+    ero_contact_sheet_cache, ero_sheet_counts_data, ero_sheet_extra = load_contact_sheet_cache_ero(ERO_CUTOUTS_DIR)
+    ero_cutout_cache_data = load_cutout_cache_ero(ERO_CUTOUTS_DIR)
+    # Also load ERO-DESI individual cutouts (keyed by source_id)
+    _ero_desi_cutouts = load_cutout_cache_ero(ERO_DESI_CUTOUTS_DIR)
+    if _ero_desi_cutouts:
+        ero_cutout_cache_data.update(_ero_desi_cutouts)
 
-    print("\n[6c] Computing Q1 Z arrays (model P(gal) + PHZ P(gal))...")
-    q1_model_pgal = q1_phz_pgal = None
-    if q1_sids is not None and q1_features_base is not None:
-        q1_model_pgal, q1_phz_pgal = _load_q1_z_arrays(q1_sids, q1_features_base)
-        # Fill PHZ pgal gaps from Q1 cache
-        if q1_phz_pgal is not None:
-            sid_to_phz_pgal = dict(zip(q1_sids, q1_phz_pgal))
-            _fill_col(df_allphz, "phz_pgal", sid_to_phz_pgal)
-            _fill_col(df_desi,   "phz_pgal", sid_to_phz_pgal)
+    # ── Step J: Save full copies for density hists, then subsample ────────────
+    _df_allphz_full = df_allphz.copy() if df_allphz is not None else None
+    _df_desi_full   = df_desi.copy()   if df_desi is not None else None
+    _ero_reg_full_emb    = ero_regular_emb.copy() if ero_regular_emb is not None else None
+    _ero_reg_full_sids   = ero_reg_sids.copy()    if ero_reg_sids is not None else None
+    _ero_rebal_full_emb  = ero_rebal_emb.copy()   if ero_rebal_emb is not None else None
+    _ero_rebal_full_sids = ero_rebal_sids.copy()   if ero_rebal_sids is not None else None
 
-    # XGB inference on all PHZ/DESI sources for 100% model_pgal coverage
-    print("\n[6c2] Computing XGB P(gal) for all overlay sources...")
-    if df_allphz is not None:
-        df_allphz["model_pgal"] = _compute_model_pgal_for_df(df_allphz)
-    if df_desi is not None:
-        df_desi["model_pgal"] = _compute_model_pgal_for_df(df_desi)
-
-    print("\n[6d] Loading ERO model P(gal)...")
-    ero_reg_pgal   = _load_ero_pgal(ero_reg_sids)   if ero_reg_sids   is not None else None
-    ero_rebal_pgal = _load_ero_pgal(ero_rebal_sids) if ero_rebal_sids is not None else None
-
-    # Save full ERO data for density histograms (before subsampling)
-    _ero_reg_full_emb  = ero_regular_emb.copy() if ero_regular_emb is not None else None
-    _ero_reg_full_sids = ero_reg_sids.copy()    if ero_reg_sids is not None else None
-    _ero_rebal_full_emb  = ero_rebal_emb.copy() if ero_rebal_emb is not None else None
-    _ero_rebal_full_sids = ero_rebal_sids.copy() if ero_rebal_sids is not None else None
+    # Subsample allphz
+    if args.max_points is not None:
+        print(f"\n  Applying --max-points {args.max_points} (hybrid density-preserving)...")
+        cutout_sids = set(cutout_cache.keys())
+        df_allphz = _subsample_hybrid(
+            df_allphz, "phz", PHZ_LABELS, cutout_sids,
+            max_total=args.max_points, floor=500, seed=args.seed)
 
     # Subsample ERO overlays to ~10k density-preserving
     _ero_cap = 10_000
@@ -4300,7 +4136,6 @@ def main() -> int:
         if ero_reg_sids is not None: ero_reg_sids = ero_reg_sids[_ei]
         if ero_reg_extra:
             ero_reg_extra = {k: v[_ei] for k, v in ero_reg_extra.items()}
-        if ero_reg_pgal is not None: ero_reg_pgal = ero_reg_pgal[_ei]
         print(f"  ERO regular subsampled to {_ero_cap:,} (density-preserving)")
     if ero_rebal_emb is not None and len(ero_rebal_emb) > _ero_cap:
         _ei = _random_subsample_idx(len(ero_rebal_emb), _ero_cap, args.seed)
@@ -4311,11 +4146,78 @@ def main() -> int:
         if ero_rebal_sids is not None: ero_rebal_sids = ero_rebal_sids[_ei]
         if ero_rebal_extra:
             ero_rebal_extra = {k: v[_ei] for k, v in ero_rebal_extra.items()}
-        if ero_rebal_pgal is not None: ero_rebal_pgal = ero_rebal_pgal[_ei]
         print(f"  ERO rebalanced subsampled to {_ero_cap:,} (density-preserving)")
 
-    # ── Build per-category density histograms (full pre-subsample data) ──
-    print("\n[6e] Building per-category density histograms...")
+    # ── Step J2: Load Gaia features for z-axis ──────────────────────────────
+    print("\n  Loading Gaia features for z-axis overlays...")
+    ero_reg_gaia_feats = ero_rebal_gaia_feats = None
+    if ero_reg_sids is not None and ero_npz_regular.exists():
+        ero_reg_gaia_feats = _load_gaia_features_from_npz(ero_npz_regular, ero_reg_sids)
+    if ero_rebal_sids is not None and ero_npz_rebal.exists():
+        ero_rebal_gaia_feats = _load_gaia_features_from_npz(ero_npz_rebal, ero_rebal_sids)
+
+    gaia_xgb_gaia_feats = gaia_hilat_gaia_feats = None
+    if gaia_xgb_emb is not None:
+        _gxgb_feat_cols = [c for c in SELECTED_GAIA_PARAMETERS if c in df_gxgb.columns]
+        if len(_gxgb_feat_cols) == len(SELECTED_GAIA_PARAMETERS):
+            gaia_xgb_gaia_feats = df_gxgb[list(SELECTED_GAIA_PARAMETERS)].values.astype(float)
+            if len(gaia_xgb_gaia_feats) > _gxgb_cap:
+                gaia_xgb_gaia_feats = gaia_xgb_gaia_feats[_gi]
+            print(f"  Gaia XGB features: {len(gaia_xgb_gaia_feats):,} sources, {len(SELECTED_GAIA_PARAMETERS)} features")
+    if gaia_hilat_emb is not None and df_hilat is not None:
+        _ghl_feat_cols = [c for c in SELECTED_GAIA_PARAMETERS if c in df_hilat.columns]
+        if len(_ghl_feat_cols) == len(SELECTED_GAIA_PARAMETERS):
+            gaia_hilat_gaia_feats = df_hilat[list(SELECTED_GAIA_PARAMETERS)].values.astype(float)
+            if len(gaia_hilat_gaia_feats) > _ghl_cap:
+                gaia_hilat_gaia_feats = gaia_hilat_gaia_feats[_ghi]
+            print(f"  Gaia hilat features: {len(gaia_hilat_gaia_feats):,} sources, {len(SELECTED_GAIA_PARAMETERS)} features")
+
+    ero_desi_gaia_feats = None
+    if ero_desi_emb is not None and ero_desi_npz.exists():
+        _ed_npz = np.load(ero_desi_npz, allow_pickle=True)
+        _ed_sids_npz = _ed_npz["source_ids"].astype(str) if "source_ids" in _ed_npz else None
+        if _ed_sids_npz is not None and "X_features" in _ed_npz:
+            _ed_X = _ed_npz["X_features"].astype(float)
+            _ed_sid_map = {s: i for i, s in enumerate(_ed_sids_npz)}
+            _ed_idx = np.array([_ed_sid_map.get(str(s), -1) for s in ero_desi_sids])
+            ero_desi_gaia_feats = np.full((len(ero_desi_sids), _ed_X.shape[1]), np.nan)
+            _ed_valid = _ed_idx >= 0
+            ero_desi_gaia_feats[_ed_valid] = _ed_X[_ed_idx[_ed_valid]]
+            print(f"  ERO-DESI features: {int(_ed_valid.sum()):,} / {len(ero_desi_sids):,} matched")
+
+    # ── Step K: ERO feature mapping ───────────────────────────────────────────
+    _ero_feat_ranges: dict = {}
+    if ero_regular_emb is not None and ero_regular_features is not None and ero_feature_names:
+        q1_features, feature_names, _ero_feat_ranges = _nn_map_ero_features_onto_q1(
+            q1_emb, ero_regular_emb, ero_regular_features,
+            ero_feature_names, q1_features, feature_names or [],
+        )
+
+    # ── Step L: Q1 Z arrays + XGB P(gal) + ERO P(gal) ────────────────────────
+    print("\n[5b] Loading Q1 Z arrays (model P(gal) + PHZ P(gal))...")
+    q1_model_pgal = q1_phz_pgal = None
+    if q1_sids is not None and q1_features_base is not None:
+        q1_model_pgal, q1_phz_pgal = _load_q1_z_arrays(
+            q1_sids, q1_features_base)
+        # Fill PHZ pgal gaps from Q1 cache
+        if q1_phz_pgal is not None:
+            sid_to_phz_pgal = dict(zip(q1_sids, q1_phz_pgal))
+            _fill_col(df_allphz, "phz_pgal", sid_to_phz_pgal)
+            _fill_col(df_desi,   "phz_pgal", sid_to_phz_pgal)
+
+    # XGB inference on all PHZ/DESI sources for 100% model_pgal coverage
+    print("\n[5c] Computing XGB P(gal) for all overlay sources...")
+    if df_allphz is not None:
+        df_allphz["model_pgal"] = _compute_model_pgal_for_df(df_allphz)
+    if df_desi is not None:
+        df_desi["model_pgal"] = _compute_model_pgal_for_df(df_desi)
+
+    print("\n[5d] Loading ERO model P(gal)...")
+    ero_reg_pgal   = _load_ero_pgal(ero_reg_sids)   if ero_reg_sids   is not None else None
+    ero_rebal_pgal = _load_ero_pgal(ero_rebal_sids) if ero_rebal_sids is not None else None
+
+    # ── Step M: Density histograms ────────────────────────────────────────────
+    print("\n[5e] Building per-category density histograms...")
     _density_hist = _build_density_hists(
         q1_emb, _df_allphz_full, _df_desi_full,
         _ero_reg_full_emb, _ero_reg_full_sids,
@@ -4327,7 +4229,8 @@ def main() -> int:
         gal_thresh=GAL_THRESH,
     )
 
-    print("\n[7] Generating interactive 3D HTML...")
+    # ── Step N: Generate HTML ─────────────────────────────────────────────────
+    print("\n[6] Generating interactive 3D HTML...")
     plot_umap_3d_plotly(
         q1_emb, q1_labels, q1_gmag, df_allphz, OUTPUT_DIR,
         cutout_cache=cutout_cache,
@@ -4371,9 +4274,14 @@ def main() -> int:
         gaia_hilat_sids=gaia_hilat_sids, gaia_hilat_gmag=gaia_hilat_gmag,
         gaia_hilat_ra=gaia_hilat_ra, gaia_hilat_dec=gaia_hilat_dec,
         density_hist_data=_density_hist,
+        ero_reg_gaia_features=ero_reg_gaia_feats,
+        ero_rebal_gaia_features=ero_rebal_gaia_feats,
+        gaia_xgb_gaia_features=gaia_xgb_gaia_feats,
+        gaia_hilat_gaia_features=gaia_hilat_gaia_feats,
+        ero_desi_gaia_features=ero_desi_gaia_feats,
     )
 
-    print(f"\nDone. Output: {OUTPUT_DIR / 'q1_3d.html'}")
+    print(f"\nDone. Output: {OUTPUT_DIR / '3d_umap.html'}")
     return 0
 
 

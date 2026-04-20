@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Post-process q1_3d.html: externalize embedded image data for web deployment.
+Post-process 3d_umap.html: externalize embedded image data for web deployment.
 
-Reads the monolithic q1_3d.html (~430 MB, mostly base64 cutout/contact-sheet
+Reads the monolithic 3d_umap.html (~430 MB, mostly base64 cutout/contact-sheet
 images) and produces a deployable directory:
 
     output/umap/q1_individual/web/
@@ -16,7 +16,7 @@ Image data is fetched on demand via relative URLs, so the directory can be
 served from any static host (GitHub Pages, Netlify, Cloudflare Pages, etc.).
 
 Usage:
-    python src/export_3d_web.py
+    python src/export_web_3d.py
     # then:  cd output/umap/q1_individual/web && python -m http.server 8000
 """
 
@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "q1_3d.html"
+INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "3d_umap.html"
 OUTDIR = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "web"
 
 # Loaded at startup (contact sheets for transposition + cutouts for hover).

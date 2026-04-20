@@ -98,7 +98,7 @@ def plot_ero_features(
     ero_y:     np.ndarray,   # 0=STAR, 1=GALAXY
     feat_vals: dict[str, np.ndarray],
     output_dir: Path,
-    filename:   str = "q1_space_erofeatures.png",
+    filename:   str = "q1_space_ero_erofeatures.png",
     xlim=None, ylim=None,
 ):
     features      = [f for f in ORDERED_FEATURES if f in feat_vals

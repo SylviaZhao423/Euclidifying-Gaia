@@ -7,7 +7,7 @@ CSS transform-based pan/zoom for instant, lag-free interaction.
 Data points are drawn on a canvas that transforms with the image.
 
 Usage:
-    python src/analyze_sky_umap_interactive.py
+    python src/compile_umap_sky.py
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import astropy.units as u
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-OUTPUT_DIR  = PROJECT_DIR / "output" / "umap"
+OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
 
 RANDOM_CSV = ARRAYS_DIR / "xgb_gaia_projected.csv"
 HILAT_CSV  = ARRAYS_DIR / "xgb_gaia_hilat_projected.csv"
@@ -261,11 +261,38 @@ def build_html(df, hilat_df=None, sky_b64=None, q1_base=None):
         if fn not in color_opts:
             color_opts[fn] = fn
     color_opts = {k: v for k, v in color_opts.items() if k in df.columns}
+    gaia_keys = [k for k in color_opts if k not in ("gal_prob", "phot_g_mean_mag")]
 
     data = _prepare_data(df, color_opts)
     hilat_data_json = "null"
     if hilat_df is not None:
         hilat_data_json = json.dumps(_prepare_data(hilat_df, color_opts))
+
+    # Pre-compute 1st/99th percentile ranges for overlay features
+    overlay_ranges = {}
+    for col_name in color_opts:
+        if col_name in df.columns:
+            vals = pd.to_numeric(df[col_name], errors="coerce").values
+            finite = vals[np.isfinite(vals)]
+            if len(finite):
+                overlay_ranges[col_name] = [
+                    round(float(np.percentile(finite, 1)), 4),
+                    round(float(np.percentile(finite, 99)), 4),
+                ]
+    overlay_ranges_json = json.dumps(overlay_ranges)
+
+    # True min/max for z-axis normalisation (maps data to [0,1])
+    z_ranges = {}
+    for col_name in color_opts:
+        if col_name in df.columns:
+            vals = pd.to_numeric(df[col_name], errors="coerce").values
+            finite = vals[np.isfinite(vals)]
+            if len(finite):
+                z_ranges[col_name] = [
+                    round(float(finite.min()), 4),
+                    round(float(finite.max()), 4),
+                ]
+    z_ranges_json = json.dumps(z_ranges)
 
     n = len(df)
     q1_fields_js = json.dumps(_prepare_fields(Q1_FIELDS))
@@ -278,13 +305,8 @@ def build_html(df, hilat_df=None, sky_b64=None, q1_base=None):
     q1_base_json = json.dumps(q1_base["clusters"]) if q1_base else "null"
     q1_base_feats = json.dumps(q1_base["feature_names"]) if q1_base else "[]"
     q1_feat_ranges_json = json.dumps(q1_base.get("feat_ranges", {})) if q1_base else "{}"
-    # Build Q1 base color options: clusters + Gaia features (raw names)
+    # Build Q1 base color options: clusters only
     q1_color_opts = {"clusters": "clusters"}
-    if q1_base and "feature_names" in q1_base:
-        for fn in q1_base["feature_names"]:
-            q1_color_opts[fn] = fn
-        if "phot_g_mean_mag" not in q1_base["feature_names"]:
-            q1_color_opts["phot_g_mean_mag"] = "phot_g_mean_mag"
 
     # WCS constants for the shader
     crpx0, crpx1 = IMG_CRPIX
@@ -311,22 +333,30 @@ body {{
 #controls-row1 {{ display:flex; align-items:flex-start; gap:10px; }}
 .cbar-group {{ display:flex; flex-direction:column; gap:2px; }}
 .cbar-top {{ display:flex; align-items:center; gap:4px; }}
-#overlay-cbar-wrap, #base-cbar-wrap {{ display:flex; align-items:center; gap:4px; padding-left:2px; }}
-#overlay-cbar-gradient, #base-cbar-gradient {{ width:130px; height:8px; border-radius:2px; border:1px solid #2a2a2a; }}
-#overlay-cbar-min, #overlay-cbar-max,
-#base-cbar-min, #base-cbar-max {{ color:#555; font-size:9px; font-family:"SF Mono",Menlo,Consolas,monospace; }}
-#controls label {{ color:#777; font-size:11px; }}
+#overlay-cbar-side {{
+  position:absolute; right:24px; top:50%; transform:translateY(-50%);
+  display:flex; flex-direction:column; align-items:center;
+  height:45%; pointer-events:none; z-index:10;
+}}
+#overlay-cbar-gradient {{
+  width:14px; flex:1; border-radius:3px; border:1px solid #2a2a2a;
+}}
+#overlay-cbar-min, #overlay-cbar-max {{
+  color:#999; font-size:9px; font-family:"SF Mono",Menlo,Consolas,monospace;
+  padding:2px 0; text-shadow:0 0 4px #000, 0 0 2px #000;
+}}
+#controls label {{ color:#777; font-size:9px; }}
 .controls-right {{ margin-left:auto; display:flex; gap:10px; align-items:flex-start; padding-top:3px; }}
 #controls select, #controls input[type=range] {{
   background:#111; color:#ccc; border:1px solid #333;
-  border-radius:3px; padding:3px 6px; font-size:11px; cursor:pointer;
+  border-radius:3px; padding:2px 5px; font-size:9px; cursor:pointer;
 }}
 #controls button {{
   background:#1a1a1a; color:#aaa; border:1px solid #333;
   border-radius:3px; padding:3px 10px; font-size:11px; cursor:pointer;
 }}
 #controls button:hover {{ background:#282828; color:#ddd; }}
-h1 {{ font-size:13px; font-weight:600; color:#ddd; white-space:nowrap; margin-top:2px; }}
+h1 {{ font-size:16px; font-weight:600; color:#ddd; white-space:nowrap; margin-top:1px; }}
 #panels {{ display:flex; flex:1; min-height:0; }}
 #sky-viewport {{
   flex:1.2; min-width:0; position:relative; overflow:hidden;
@@ -340,7 +370,8 @@ h1 {{ font-size:13px; font-weight:600; color:#ddd; white-space:nowrap; margin-to
   position:absolute; top:0; left:0; width:100%; height:100%;
   pointer-events:none;
 }}
-#umap-container {{ flex:1; min-width:0; }}
+#umap-wrap {{ flex:1; min-width:0; position:relative; }}
+#umap-container {{ width:100%; height:100%; }}
 #stats-panel {{
   padding:8px 16px; background:#0c0c0c; border-top:1px solid #181818;
   font-size:12px; color:#888; flex-shrink:0; min-height:40px;
@@ -351,12 +382,26 @@ h1 {{ font-size:13px; font-weight:600; color:#ddd; white-space:nowrap; margin-to
 #stats-panel b {{ color:#ccc; }}
 .stat-label {{ color:#666; }}
 .hint {{ color:#555; font-size:11px; font-style:italic; }}
-#fov-info {{ color:#666; font-size:10px; margin-left:4px; }}
+#clear-sel-btn {{
+  background:#1a1a1a; color:#aaa; border:1px solid #333; border-radius:3px;
+  padding:1px 7px; font-size:10px; cursor:pointer; flex-shrink:0;
+}}
+#clear-sel-btn:hover {{ background:#282828; color:#ddd; }}
 /* Minimap */
-#minimap {{
-  position:absolute; bottom:10px; right:10px; width:180px; height:90px;
-  border:1px solid #333; border-radius:3px; overflow:hidden; z-index:20;
+#minimap-wrap {{
+  position:absolute; bottom:10px; right:10px; z-index:20;
+  width:180px; height:90px;
+  border:1px solid #333; border-radius:3px; overflow:hidden;
   box-shadow:0 2px 10px rgba(0,0,0,0.8); background:#000;
+}}
+#fov-info {{
+  position:absolute; top:4px; left:5px; z-index:5;
+  color:#ccc; font-size:9px; font-family:"SF Mono",Menlo,Consolas,monospace;
+  white-space:nowrap; pointer-events:none;
+  text-shadow:0 0 4px #000, 0 0 2px #000;
+}}
+#minimap {{
+  width:100%; height:100%;
 }}
 #minimap img {{
   width:100%; height:100%; object-fit:contain; display:block;
@@ -372,8 +417,6 @@ h1 {{ font-size:13px; font-weight:600; color:#ddd; white-space:nowrap; margin-to
 <div id="controls">
   <div id="controls-row1">
     <h1>Sky + UMAP Explorer</h1>
-    <button id="clear-sel-btn" style="padding:2px 8px;cursor:pointer;font-size:11px;">Clear Selection</button>
-    <span id="fov-info"></span>
     <span class="controls-right">
       <span class="cbar-group">
         <span class="cbar-top"><label>DATASET</label>
@@ -386,20 +429,7 @@ h1 {{ font-size:13px; font-weight:600; color:#ddd; white-space:nowrap; margin-to
         <span class="cbar-top"><label>Z AXIS</label><select id="z-select"></select></span>
       </span>
       <span class="cbar-group">
-        <span class="cbar-top"><label>BASE</label><select id="base-color-select"></select></span>
-        <div id="base-cbar-wrap">
-          <span id="base-cbar-min">0.00</span>
-          <div id="base-cbar-gradient"></div>
-          <span id="base-cbar-max">1.00</span>
-        </div>
-      </span>
-      <span class="cbar-group">
         <span class="cbar-top"><label>OVERLAY</label><select id="color-select"></select></span>
-        <div id="overlay-cbar-wrap">
-          <span id="overlay-cbar-min">0.00</span>
-          <div id="overlay-cbar-gradient"></div>
-          <span id="overlay-cbar-max">1.00</span>
-        </div>
       </span>
     </span>
   </div>
@@ -409,12 +439,22 @@ h1 {{ font-size:13px; font-weight:600; color:#ddd; white-space:nowrap; margin-to
   <div id="sky-viewport">
     <canvas id="sky-gl"></canvas>
     <canvas id="source-canvas"></canvas>
-    <div id="minimap">
-      <img src="{sky_img_src}">
-      <canvas id="minimap-canvas"></canvas>
+    <div id="minimap-wrap">
+      <span id="fov-info"></span>
+      <div id="minimap">
+        <img src="{sky_img_src}">
+        <canvas id="minimap-canvas"></canvas>
+      </div>
     </div>
   </div>
-  <div id="umap-container"></div>
+  <div id="umap-wrap">
+    <div id="umap-container"></div>
+    <div id="overlay-cbar-side">
+      <span id="overlay-cbar-max">1.00</span>
+      <div id="overlay-cbar-gradient"></div>
+      <span id="overlay-cbar-min">0.00</span>
+    </div>
+  </div>
 </div>
 <div id="stats-panel">
   <span class="hint">{n:,} sources &middot; drag to pan, scroll to zoom, Cmd+drag to select, Shift+drag to move selection</span>
@@ -430,6 +470,7 @@ var DATASETS = {{
 }};
 var D = DATASETS.random;
 var COPTS = {json.dumps(color_opts)};
+var GAIA_KEYS = new Set({json.dumps(gaia_keys)});
 var Q1F = {q1_fields_js};
 var EROF = {ero_fields_js};
 var N = D.ra.length;
@@ -438,6 +479,8 @@ var PI = Math.PI, DEG = PI / 180;
 var Q1_BASE = {q1_base_json};
 var Q1_BASE_FEATS = {q1_base_feats};
 var Q1_FEAT_RANGES = {q1_feat_ranges_json};
+var OVERLAY_RANGES = {overlay_ranges_json};
+var Z_RANGES = {z_ranges_json};  /* true min/max per feature for z normalisation */
 var Q1_COLOR_OPTS = {json.dumps(q1_color_opts)};
 var CLUSTER_COLORS_JS = {json.dumps(CLUSTER_COLORS)};
 
@@ -449,15 +492,20 @@ var CDELT_X = {cd0}, CDELT_Y = {cd1};
 var datasetSel = document.getElementById('dataset-select');
 var colorSel = document.getElementById('color-select');
 var zSel = document.getElementById('z-select');
-var baseColorSel = document.getElementById('base-color-select');
+var _gaiaHeaderAdded = false;
 Object.keys(COPTS).forEach(function(k) {{
+  if (GAIA_KEYS.has(k) && !_gaiaHeaderAdded) {{
+    [colorSel, zSel].forEach(function(sel) {{
+      var sep = document.createElement('option');
+      sep.disabled = true; sep.textContent = '\u2014 Gaia features \u2014';
+      sep.style.color = '#888'; sep.style.fontStyle = 'italic';
+      sel.appendChild(sep);
+    }});
+    _gaiaHeaderAdded = true;
+  }}
   var o1 = document.createElement('option'); o1.value = k; o1.textContent = COPTS[k];
   var o2 = o1.cloneNode(true);
   colorSel.appendChild(o1); zSel.appendChild(o2);
-}});
-Object.keys(Q1_COLOR_OPTS).forEach(function(k) {{
-  var o = document.createElement('option'); o.value = k; o.textContent = Q1_COLOR_OPTS[k];
-  baseColorSel.appendChild(o);
 }});
 if (!DATASETS.hilat) {{
   datasetSel.querySelector('option[value="hilat"]').disabled = true;
@@ -466,19 +514,25 @@ if (!DATASETS.hilat) {{
 // ── Color mapping (RdYlBu_r) ──
 var curColor = 'gal_prob';
 var curBaseColor = 'clusters';
+var _cstops = [
+  [0,49,54,149],[0.1,69,117,180],[0.2,116,173,209],
+  [0.3,171,217,233],[0.4,224,243,248],[0.5,255,255,191],
+  [0.6,254,224,144],[0.7,253,174,97],[0.8,244,109,67],
+  [0.9,215,48,39],[1,165,0,38]
+];
 function valToRGB(v, mn, mx) {{
   var t = (v - mn) / (mx - mn); t = Math.max(0, Math.min(1, t));
-  var r, g, b;
-  if (t < 0.5) {{
-    var s = t * 2;
-    r = Math.round(49 + s * 206); g = Math.round(54 + s * 200); b = Math.round(149 - s * 100);
-  }} else {{
-    var s = (t - 0.5) * 2;
-    r = Math.round(255 - s * 40); g = Math.round(254 - s * 189); b = Math.round(49 + s * 5);
-  }}
+  var i = 0;
+  for (var j = 1; j < _cstops.length; j++) {{ if (_cstops[j][0] >= t) {{ i = j - 1; break; }} }}
+  var s0 = _cstops[i], s1 = _cstops[i + 1] || s0;
+  var f = (s1[0] === s0[0]) ? 0 : (t - s0[0]) / (s1[0] - s0[0]);
+  var r = Math.round(s0[1] + f * (s1[1] - s0[1]));
+  var g = Math.round(s0[2] + f * (s1[2] - s0[2]));
+  var b = Math.round(s0[3] + f * (s1[3] - s0[3]));
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }}
 function getColorBounds() {{
+  if (OVERLAY_RANGES && OVERLAY_RANGES[curColor]) return OVERLAY_RANGES[curColor];
   var arr = D[curColor], mn = Infinity, mx = -Infinity;
   for (var i = 0; i < N; i++) if (arr[i] !== null) {{
     if (arr[i] < mn) mn = arr[i]; if (arr[i] > mx) mx = arr[i];
@@ -1110,10 +1164,7 @@ function switchDataset(key) {{
   clearStats();
 }}
 
-// Clear Selection button
-var clearBtn = document.getElementById('clear-sel-btn');
 function doClearSelection() {{ selCircle = null; updateSelection(); }}
-clearBtn.addEventListener('click', doClearSelection);
 
 // ══════════════════════════════════════════════════════════════
 // PLOTLY 3D UMAP
@@ -1122,46 +1173,42 @@ var umapDiv = document.getElementById('umap-container');
 var curZ = 'gal_prob';
 var _umapReady = false;
 
-function getZArr(col) {{ return D[col].map(function(v) {{ return v !== null ? v : 0; }}); }}
+function getZArr(col) {{
+  var r = Z_RANGES[col], lo = r ? r[0] : 0, span = r ? (r[1] - r[0]) : 1;
+  if (span === 0) span = 1;
+  return D[col].map(function(v) {{
+    if (v === null) return 0;
+    return Math.max(0, Math.min(1, (v - lo) / span));
+  }});
+}}
 function getCBounds(col) {{
+  if (OVERLAY_RANGES && OVERLAY_RANGES[col]) return OVERLAY_RANGES[col];
   var arr = D[col], mn = Infinity, mx = -Infinity;
   for (var i = 0; i < N; i++) if (arr[i] !== null) {{
     if (arr[i] < mn) mn = arr[i]; if (arr[i] > mx) mx = arr[i];
   }}
   return [mn, mx];
 }}
-var CSCALES = {{
-  gal_prob: 'RdYlBu_r', phot_g_mean_mag: 'Viridis_r',
-  bp_g: 'Plasma', g_rp: 'Plasma',
-}};
-// CSS gradients for the custom horizontal colorbar (left=low, right=high)
-var CBAR_CSS = {{
-  gal_prob:        'linear-gradient(to right,#4575b4,#ffffbf,#d73027)',
-  phot_g_mean_mag: 'linear-gradient(to right,#fde725,#21908c,#440154)',
-  bp_g:            'linear-gradient(to right,#0d0887,#cc4778,#f0f921)',
-  g_rp:            'linear-gradient(to right,#0d0887,#cc4778,#f0f921)',
-}};
-var CBAR_CSS_DEFAULT = 'linear-gradient(to right,#4575b4,#ffffbf,#d73027)';
+// RdYlBu reversed: blue(low) → yellow(mid) → red(high), matching sky map valToRGB
+var CSCALE_RdYlBu_r = [
+  [0,'rgb(49,54,149)'],[0.1,'rgb(69,117,180)'],[0.2,'rgb(116,173,209)'],
+  [0.3,'rgb(171,217,233)'],[0.4,'rgb(224,243,248)'],
+  [0.5,'rgb(255,255,191)'],
+  [0.6,'rgb(254,224,144)'],[0.7,'rgb(253,174,97)'],
+  [0.8,'rgb(244,109,67)'],[0.9,'rgb(215,48,39)'],[1,'rgb(165,0,38)']
+];
+var CSCALES = {{}};
+// CSS gradient for the vertical colorbar (bottom=low, top=high)
+var CBAR_CSS_DEFAULT = 'linear-gradient(to top,#313695,#74add1,#ffffbf,#f46d43,#a50026)';
 var _fmt = function(v) {{ return Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0); }};
 function updateOverlayCbar() {{
   var cb2 = getCBounds(curColor);
-  var grad = CBAR_CSS[curColor] || CBAR_CSS_DEFAULT;
+  var grad = CBAR_CSS_DEFAULT;
   document.getElementById('overlay-cbar-gradient').style.background = grad;
   document.getElementById('overlay-cbar-min').textContent = _fmt(cb2[0]);
   document.getElementById('overlay-cbar-max').textContent = _fmt(cb2[1]);
 }}
 // BASE colorscale is always COLORSCALE_RDBU (RdBu), but only meaningful when not 'clusters'
-var BASE_CBAR_CSS = 'linear-gradient(to right,rgb(5,48,97),rgb(247,247,247),rgb(103,0,31))';
-function updateBaseCbar() {{
-  var isCluster = curBaseColor === 'clusters';
-  var wrap = document.getElementById('base-cbar-wrap');
-  if (isCluster) {{ wrap.style.visibility = 'hidden'; return; }}
-  wrap.style.visibility = 'visible';
-  var fb = q1BaseFeatureBounds(curBaseColor);
-  document.getElementById('base-cbar-gradient').style.background = BASE_CBAR_CSS;
-  document.getElementById('base-cbar-min').textContent = _fmt(fb[0]);
-  document.getElementById('base-cbar-max').textContent = _fmt(fb[1]);
-}}
 var COLORSCALE_RDBU = [
   [0,'rgb(5,48,97)'],[0.25,'rgb(33,102,172)'],
   [0.5,'rgb(247,247,247)'],
@@ -1172,20 +1219,15 @@ var umapLayout = {{
   scene: {{
     xaxis: {{title:'UMAP 1',color:'#555',gridcolor:'#1a1a1a',backgroundcolor:'#080808',showbackground:true}},
     yaxis: {{title:'UMAP 2',color:'#555',gridcolor:'#1a1a1a',backgroundcolor:'#080808',showbackground:true}},
-    zaxis: {{title:'P(gal)',color:'#555',gridcolor:'#1a1a1a',backgroundcolor:'#080808',showbackground:true}},
+    zaxis: {{title:'P(gal)',color:'#555',gridcolor:'#1a1a1a',backgroundcolor:'#080808',showbackground:true,
+      range:[-0.05,1.45], autorange:false}},
     bgcolor:'#080808',
   }},
   title: {{text:'3D UMAP', font:{{size:13, color:'#888'}}}},
   margin: {{l:0, r:0, t:35, b:0}},
 }};
 
-function q1BaseZVal() {{
-  // Put Q1 base above the data range for the current z-axis
-  var arr = getZArr(curZ);
-  var mx = -Infinity;
-  for (var i = 0; i < arr.length; i++) {{ if (arr[i] > mx) mx = arr[i]; }}
-  return mx + (mx - 0) * 0.15 + 0.1;  // 15% above max
-}}
+function q1BaseZVal() {{ return 1.45; }}
 
 function q1BaseFeatureBounds(feat) {{
   // Use pre-computed 1st/99th percentile ranges (matching q1_3d.html)
@@ -1262,7 +1304,7 @@ function initUMAP() {{
     type:'scatter3d', mode:'markers',
     x:D.u1, y:D.u2, z:getZArr(curZ),
     marker:{{ size:1.8, opacity:0.7,
-      color:D[curColor], colorscale:CSCALES[curColor]||'Viridis',
+      color:D[curColor], colorscale:CSCALE_RdYlBu_r,
       cmin:cb2[0], cmax:cb2[1],
       showscale:false,
     }},
@@ -1308,7 +1350,7 @@ function updateUMAPSizes() {{
       type:'scatter3d', mode:'markers',
       x:sx, y:sy, z:sz,
       marker:{{ size:1.8, opacity:0.7,
-        color:sc, colorscale:CSCALES[curColor]||'Viridis',
+        color:sc, colorscale:CSCALE_RdYlBu_r,
         cmin:cb2[0], cmax:cb2[1],
         showscale:false,
       }},
@@ -1319,7 +1361,7 @@ function updateUMAPSizes() {{
       type:'scatter3d', mode:'markers',
       x:D.u1, y:D.u2, z:zArr,
       marker:{{ size:1.8, opacity:0.7,
-        color:D[curColor], colorscale:CSCALES[curColor]||'Viridis',
+        color:D[curColor], colorscale:CSCALE_RdYlBu_r,
         cmin:cb2[0], cmax:cb2[1],
         showscale:false,
       }},
@@ -1335,42 +1377,56 @@ function updateUMAPSizes() {{
 
 initUMAP();
 updateOverlayCbar();
-updateBaseCbar();
+// Set initial z-axis tick labels
+(function() {{
+  var r = Z_RANGES[curZ], lo = r ? r[0] : 0, hi = r ? r[1] : 1;
+  var tpos = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+  var tvals = tpos.slice(); tvals.push(1.45);
+  var ttexts = tpos.map(function(t) {{
+    var v = lo + t * (hi - lo);
+    return Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(1);
+  }});
+  ttexts.push('Q1');
+  Plotly.relayout(umapDiv, {{
+    'scene.zaxis.tickvals': tvals, 'scene.zaxis.ticktext': ttexts,
+  }});
+}})();
 
 // The data trace is the LAST trace (after Q1 base traces)
 function dataTraceIdx() {{ return umapDiv.data ? umapDiv.data.length - 1 : 0; }}
 
 zSel.addEventListener('change', function() {{
   curZ = this.value;
-  // Update data trace z
+  // Update data trace z (normalised to [0,1])
   Plotly.restyle(umapDiv, {{z:[getZArr(curZ)]}}, [dataTraceIdx()]);
-  // Update Q1 base traces z to stay above the new data range
-  var zTop = q1BaseZVal();
-  var nBase = dataTraceIdx();  // number of base traces
-  for (var ti = 0; ti < nBase; ti++) {{
-    var n = umapDiv.data[ti].z.length;
-    var newZ = new Array(n); for(var j=0;j<n;j++) newZ[j]=zTop;
-    Plotly.restyle(umapDiv, {{z:[newZ]}}, [ti]);
-  }}
-  Plotly.relayout(umapDiv, {{'scene.zaxis.title':COPTS[curZ]||curZ}});
+  // Tick labels mapping [0,1] back to original values
+  var r = Z_RANGES[curZ], lo = r ? r[0] : 0, hi = r ? r[1] : 1;
+  var tpos = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+  var tvals = tpos.slice(); tvals.push(1.45);
+  var ttexts = tpos.map(function(t) {{
+    var v = lo + t * (hi - lo);
+    return Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(1);
+  }});
+  ttexts.push('Q1');
+  Plotly.relayout(umapDiv, {{
+    'scene.zaxis.title': COPTS[curZ]||curZ,
+    'scene.zaxis.range': [-0.05, 1.45],
+    'scene.zaxis.autorange': false,
+    'scene.zaxis.tickvals': tvals,
+    'scene.zaxis.ticktext': ttexts,
+  }});
 }});
 colorSel.addEventListener('change', function() {{
   curColor = this.value;
   drawSources();
   var cb2 = getCBounds(curColor);
   Plotly.restyle(umapDiv, {{
-    'marker.color':[D[curColor]], 'marker.colorscale':CSCALES[curColor]||'Viridis',
-    'marker.cmin':cb2[0], 'marker.cmax':cb2[1],
+    'marker.color':[D[curColor]], 'marker.colorscale':[CSCALE_RdYlBu_r],
+    'marker.cmin':[cb2[0]], 'marker.cmax':[cb2[1]],
   }}, [dataTraceIdx()]);
   updateOverlayCbar();
 }});
-datasetSel.addEventListener('change', function() {{ switchDataset(this.value); updateOverlayCbar(); updateBaseCbar(); }});
-baseColorSel.addEventListener('change', function() {{
-  curBaseColor = this.value;
-  initUMAP();
-  if (hasSelection) updateUMAPSizes();
-  updateBaseCbar();
-}});
+datasetSel.addEventListener('change', function() {{ switchDataset(this.value); updateOverlayCbar(); }});
 
 // ── Stats ──
 function updateStats(indices) {{
@@ -1393,7 +1449,9 @@ function updateStats(indices) {{
   if (!isNaN(mm)) p.push('<span class="stat-label">Mean G:</span> <b>'+mm.toFixed(2)+'</b>');
   p.push('<span class="stat-label">RA:</span> <b>['+Math.min.apply(null,ras).toFixed(1)+', '+Math.max.apply(null,ras).toFixed(1)+']</b>');
   p.push('<span class="stat-label">Dec:</span> <b>['+Math.min.apply(null,decs).toFixed(1)+', '+Math.max.apply(null,decs).toFixed(1)+']</b>');
-  document.getElementById('stats-panel').innerHTML=p.join(' &nbsp;&middot;&nbsp; ');
+  var panel = document.getElementById('stats-panel');
+  panel.innerHTML = '<button id="clear-sel-btn">&times; Clear</button> &nbsp;' + p.join(' &nbsp;&middot;&nbsp; ');
+  document.getElementById('clear-sel-btn').addEventListener('click', doClearSelection);
 }}
 function clearStats() {{
   document.getElementById('stats-panel').innerHTML='<span class="hint">{n:,} sources &middot; drag to pan, scroll to zoom, Cmd+drag to select, Shift+drag to move selection</span>';
@@ -1457,7 +1515,7 @@ def main() -> int:
     print("[4] Building HTML ...")
     html = build_html(df, hilat_df=hilat_df, sky_b64=sky_b64, q1_base=q1_base)
 
-    out_path = OUTPUT_DIR / "sky_umap_interactive.html"
+    out_path = OUTPUT_DIR / "sky_umap.html"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
     sz_mb = out_path.stat().st_size / 1e6
