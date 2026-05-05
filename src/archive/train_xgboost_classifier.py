@@ -36,7 +36,7 @@ import seaborn as sns
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
-from selected_parameters_list import SELECTED_GAIA_PARAMETERS, GAIA_QUERY_COLUMNS
+from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 # Configuration
 PROJECT_DIR = Path(__file__).parent.parent
@@ -54,8 +54,11 @@ CLASS_MAPPING = {
 }
 CLASS_NAMES = list(CLASS_MAPPING.keys())
 
+# Magnitude cut: only train on sources fainter than this Gaia G magnitude
+MAG_CUT = 18.0
 
-def query_training_data(username, limit=None, test_mode=False, data_source='q1', mag_cut=18.0):
+
+def query_training_data(username, limit=None, test_mode=False, data_source='q1'):
     """
     Query Gaia features + Euclid classifications from WSDB.
 
@@ -91,7 +94,7 @@ def query_training_data(username, limit=None, test_mode=False, data_source='q1',
         )
 
         # Build column list with g_ prefix, aliased back to standard names
-        gaia_cols = ', '.join([f'g_{col} AS {col}' for col in GAIA_QUERY_COLUMNS])
+        gaia_cols = ', '.join([f'g_{col} AS {col}' for col in SELECTED_GAIA_PARAMETERS])
 
         if data_source == 'q1':
             # Query Q1 crossmatch table directly (no JOIN needed)
@@ -106,7 +109,7 @@ def query_training_data(username, limit=None, test_mode=False, data_source='q1',
                     END as label
                 FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
                 WHERE p_phz_classification IN (1, 2)
-                    AND g_phot_g_mean_mag >= {mag_cut}
+                    AND g_phot_g_mean_mag >= {MAG_CUT}
                 ORDER BY g_source_id
             """
         elif data_source == 'ero':
@@ -123,7 +126,7 @@ def query_training_data(username, limit=None, test_mode=False, data_source='q1',
                     END as label
                 FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
                 WHERE e_v_class_star IS NOT NULL
-                    AND g_phot_g_mean_mag >= {mag_cut}
+                    AND g_phot_g_mean_mag >= {MAG_CUT}
                 ORDER BY g_source_id
             """
         else:
@@ -428,17 +431,15 @@ def main():
     # Run for both data sources if not specified
     sources = [args.data_source] if args.data_source else ['q1', 'ero']
 
-    mag_cut = 18.0  # hardcoded magnitude cut
-
     for data_source in sources:
-        result = train_single(username, data_source, args.test_mode, args.save_model, mag_cut)
+        result = train_single(username, data_source, args.test_mode, args.save_model)
         if result != 0:
             return result
 
     return 0
 
 
-def train_single(username, data_source, test_mode, save_model, mag_cut=18.0):
+def train_single(username, data_source, test_mode, save_model):
     """Train and evaluate a single model for the given data source."""
     global OUTPUT_DIR
     OUTPUT_DIR = OUTPUT_BASE_DIR / f'xgboost_{data_source}'
@@ -451,7 +452,7 @@ def train_single(username, data_source, test_mode, save_model, mag_cut=18.0):
     print(f"  Features: {len(SELECTED_GAIA_PARAMETERS)}")
     print(f"  Classes: {', '.join(CLASS_NAMES)}")
     print(f"  Data source: {data_source.upper()}")
-    print(f"  Magnitude cut: G >= {mag_cut}")
+    print(f"  Magnitude cut: G >= {MAG_CUT}")
     if data_source == 'q1':
         print(f"    Ground truth: Euclid Q1 PHZ classifications")
     else:
@@ -460,7 +461,7 @@ def train_single(username, data_source, test_mode, save_model, mag_cut=18.0):
     print(f"  Output directory: {OUTPUT_DIR}")
 
     # Query data
-    df = query_training_data(username, test_mode=test_mode, data_source=data_source, mag_cut=mag_cut)
+    df = query_training_data(username, test_mode=test_mode, data_source=data_source)
     if df is None:
         return 1
 

@@ -6,7 +6,7 @@ Produces:
   ero_sep_0_3_dist_rayleigh_offset_corrected_pdf.png
 
 Usage:
-    PGUSER=siwei_zhao_2025 python src/ppt_analyze_ero_sep_0_3_dist_rayleigh_offset_corrected_pdf.py
+    PGUSER=siwei_zhao_2025 python src/temp/ppt_analyze_ero_sep_0_3_dist_rayleigh_offset_corrected_pdf.py
 """
 
 import matplotlib.pyplot as plt
@@ -111,7 +111,7 @@ def main():
     x_fit   = np.linspace(0, x_limit, 500)
 
     # Plot
-    fig, ax = plt.subplots(figsize=(12, 10))
+    fig, ax = plt.subplots(figsize=(12, 5))
 
     ax.hist(seps_uncorr[seps_uncorr <= x_limit], bins=100, density=True,
             color='#FFCDD2', alpha=0.5, edgecolor='none',

@@ -110,10 +110,9 @@ def query_q1_data(username):
                 WHEN p_phz_classification = 2 THEN 'GALAXY'
                 ELSE 'UNCLASSIFIED'
             END AS label
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia
         WHERE m_flux_detection_total > 0
           AND m_flux_detection_total IS NOT NULL
-          AND m_vis_det = 1
     """
     print("  Querying Gaia-matched Q1 data...")
     df = pd.read_sql_query(query, conn)

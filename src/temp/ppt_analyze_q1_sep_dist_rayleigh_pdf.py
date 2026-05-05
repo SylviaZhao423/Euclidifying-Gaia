@@ -6,7 +6,7 @@ Produces:
   q1_sep_dist_rayleigh_pdf.png  — PDF histogram with Rayleigh fit overlay
 
 Usage:
-    PGUSER=siwei_zhao_2025 python src/analyze_q1_sep_dist_rayleigh_pdf.py
+    PGUSER=siwei_zhao_2025 python src/temp/ppt_analyze_q1_sep_dist_rayleigh_pdf.py
 """
 
 import matplotlib.pyplot as plt

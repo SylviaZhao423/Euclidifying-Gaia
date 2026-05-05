@@ -44,12 +44,11 @@ def query_neighbours(username):
             c.g_phot_g_mean_mag AS gaia_g,
             c.p_phz_star_prob   AS star_prob,
             n.cnt4, n.cnt8, n.cnt16, n.cnt32
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia c
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia c
         JOIN gaia_edr3_aux.gaia_source_neighbour_count n
             ON c.g_source_id = n.source_id
         WHERE c.m_flux_detection_total > 0
           AND c.m_flux_detection_total IS NOT NULL
-          AND c.m_vis_det = 1
           AND c.g_phot_g_mean_mag IS NOT NULL
           AND c.p_phz_star_prob IS NOT NULL
     """

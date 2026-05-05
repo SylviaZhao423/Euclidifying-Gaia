@@ -1,0 +1,82 @@
+%!TEX root = ../thesis.tex
+% ******************************* Thesis Appendix A ****************************
+\chapter{Structure of Code}
+
+The code used in this project is based on the repository by Mary Richardson-Slipper et al\cite{MaryRepos}. A link to the repository can be found \href{https://gitlab.cern.ch/ruoyun/part-iii-project.git}{\underline{here}}. Required packages can be installed by following the instruction in the \texttt{README} file. For beginners, a more detailed guide, including solutions to some frequently-asked questions, is available \href{https://docs.google.com/document/d/1eZe5aUjYp-I9UsgxW8yqAF5Ys2iG-Hby9eyUIqivVQg/edit?usp=sharing}{\underline{here}}. 
+
+The structure of the repository is as follows:
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{|p{5.8cm}|m{8.2cm}|} 
+         \hline
+         Name of folder & Description  \\
+         \hline
+         \verb|scripts| & Linux bash scripts for event reconstruction and Python scripts for time-walk correction and further analysis.\\
+         \hline
+         \verb|output| & Output ROOT files of Corryvreckan without time-walk correction: ROOT files with histogram plots.\\
+         \hline
+         \verb|output/plots| & Plots produced by Python scripts. \\
+         \hline
+         \verb|output/timewalk_correction| & ROOT files with \texttt{TGraph} objects that records the time-walk values calculated by crystal ball fits, including error bars.\\
+         \hline
+         \verb|output/scans| & Output ROOT files of Corryvreckan with time-walk correction.\\
+         \hline
+         \verb|config/for_scripts| & Configuration files for Corryvreckan modules.\\
+         \hline
+         \verb|config/geo_prealign| & Geometry files, need to be updated manually after prealignment.  \\
+         \hline
+         \verb|config/geo_results| & Geometry files, which are updated automatically by running Corryvreckan.\\
+         \hline
+    \end{tabular}
+\end{table}
+
+The Linux bash scripts involved in event reconstruction are:
+\newpage
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{ | m{4.5cm} | m{9.5cm}| } 
+         \hline
+         Name of script & Description and instruction after running the sciprt\\
+         \hline
+         \verb|single_prealign| & Prealignment. Check the spatial correlation plots in the output ROOT file, then update the geometry file with correlations of the telescope planes.\\
+         \hline
+         \verb|align_telescope| & Telescope alignment. Check the $\chi^2$ and global spatial residuals plots of the telescope planes in the output ROOT file. If not ideal, update the geometry file and run again. \\
+         \hline
+         \verb|align_DUT| & DUT alignment. Check the spatial correlation plots of the dut in the output ROOT file, then update the corresponding geometry file and run again.\\
+         \hline
+         \verb|check_DUT| & Analysis of DUT, only run when the alignments are complete. The data may be used for further analysis if time-walk correction is not required. \\
+         \hline
+         \verb|timewalk_correction| & Correction for time-walk effect. Check if the correction is sensible, then the data in the output ROOT file may be used for further analysis.\\
+         \hline
+    \end{tabular}
+\end{table}
+
+The python scripts for further analysis and plotting are:
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{ | m{6cm} | m{8cm}| } 
+         \hline
+         Name of script & Description \\
+         \hline         
+         \verb|check_tot.py| & Fit a Landau-Gaussian convolution to a chosen ToT distribution. Find the ToT values where 99\% of  total entries lies above.\\
+         \hline
+         \verb|compare_tot.py| & Plot ToT distribution for different pixel bias voltages at a given threshold.\\
+         \hline
+         \verb|compare_totMPV.py| & Plot the peak position of ToT distribution against threshold, at different bias voltages.\\
+         \hline
+         \verb|compare_cluster_size.py| & Plot cluster size distributions for different pixel bias voltages at a given threshold.\\
+         \hline
+         \verb|compare_cluster_size_mean.py| & Plot mean cluster size against threshold, at different bias voltages.\\
+         \hline
+         \verb|get_residual_vs_tot.py| & Plot a 2D histogram of time residual versus ToT, entries are represented by colour map.\\
+         \hline
+         \verb|get_time_resolution.py| & Plot the time residual distribution, fit a Gaussian curve to find $\mu$ and $\sigma$.\\
+         \hline
+         \verb|get_timewalk_effect.py| & Demonstrates the effect of applying time-walk correction to a slice of the time-residual-vs-ToT plot.\\
+         \hline
+         \verb|get_inpixel.py| & Plot the entries of clusters of a given size versus the in-pixel $x$ position.\\
+         \hline
+         \verb|compare_effciency.py| & Plot efficiency against threshold, at different bias voltages.\\
+         \hline
+    \end{tabular}
+\end{table}

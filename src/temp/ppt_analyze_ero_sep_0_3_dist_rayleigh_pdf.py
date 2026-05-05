@@ -6,7 +6,7 @@ Produces:
   ero_sep_0_3_dist_rayleigh_pdf.png
 
 Usage:
-    PGUSER=siwei_zhao_2025 python src/analyze_ero_sep_0_3_dist_rayleigh_pdf.py
+    PGUSER=siwei_zhao_2025 python src/temp/ppt_analyze_ero_sep_0_3_dist_rayleigh_pdf.py
 """
 
 import matplotlib.pyplot as plt

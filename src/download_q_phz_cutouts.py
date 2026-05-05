@@ -113,6 +113,11 @@ def load_phz_sources(phz_values: list[int]) -> pd.DataFrame:
     df["phot_g_mean_mag"] = data["phot_g_mean_mag"].astype(float)[mask]
     df["phz"]             = phz_arr[mask]
 
+    # XGBoost P(gal) from the Q1 seed ensemble
+    from save_q1_utils import predict_pgal
+    X = data["X_features"][mask].astype(float)
+    df["xgb_pgal"] = predict_pgal(X)
+
     for col in SELECTED_GAIA_PARAMETERS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -171,6 +176,9 @@ def main() -> int:
     parser.add_argument("--dpi",        type=int,   default=90)
     parser.add_argument("--no-cutouts", action="store_true",
                         help="Skip cutout downloads; just show cluster assignment stats.")
+    parser.add_argument("--clusters", type=str, default=None,
+                        help="Comma-separated cluster IDs to download, e.g. --clusters 0,3,4. "
+                             "Default: all clusters 0-4.")
     args = parser.parse_args()
 
     # Parse --phz argument (handle negatives like -1)
@@ -207,11 +215,13 @@ def main() -> int:
     labels_path = ARRAYS_DIR / "q1_cluster_labels.npy"
     if not labels_path.exists():
         print(f"ERROR: {labels_path} not found.")
-        print("  Run first:  python src/compute_q1_clusters.py")
+        print("  Run first:  python src/analyze_umap_q1_clusters.py")
         return 1
     q1_labels = np.load(labels_path)
     print(f"  Loaded from: {labels_path}")
     cluster_ids = sorted(set(q1_labels[q1_labels >= 0]))
+    if args.clusters is not None:
+        cluster_ids = [int(x.strip()) for x in args.clusters.split(",")]
     print(f"  Cluster sizes: " +
           "  ".join(f"C{k}={(q1_labels==k).sum():,}" for k in cluster_ids))
 
@@ -256,16 +266,20 @@ def main() -> int:
         print("\n[6] --no-cutouts set, skipping downloads.")
         return 0
 
-    # ── 6. Discover tiles once for all sources ────────────────────────────────
-    # Use EDF-North field bounds (not data range, which spans multiple fields)
-    print("\n[6] Discovering tiles (one TAP query for EDF-North)...")
-    tiles = _discover_tiles(260.0, 278.0, 62.0, 70.0,
-                            field_name="EDF-North")
+    # ── 6. Discover tiles for all fields present in the data ─────────────────
+    # q1_allphz.npz contains two sky regions: EDF-North and a southern field
+    # (EDF-Fornax / EDF-South).  Run a separate batch query for each and merge.
+    print("\n[6] Discovering tiles (EDF-North + southern fields)...")
+    tiles_north = _discover_tiles(260.0, 278.0, 62.0, 70.0,
+                                  field_name="EDF-North")
+    tiles_south = _discover_tiles(50.0, 68.0, -52.0, 1.0,
+                                  field_name="EDF-South")
+    tiles = tiles_north + tiles_south if (tiles_north or tiles_south) else None
     if tiles:
-        print(f"  {len(tiles)} tile(s) found — reusing for all clusters.")
+        print(f"  {len(tiles)} tile(s) found ({len(tiles_north)} north + "
+              f"{len(tiles_south)} south) — reusing for all clusters.")
     else:
         print("  ESA TAP failed; each cluster will fall back to per-source IRSA TAP.")
-        tiles = None
 
     # ── 7. Download cutouts per (phz × cluster) cell ──────────────────────────
     print("\n[7] Downloading cutouts per (phz × cluster) cell...")
@@ -301,7 +315,7 @@ def main() -> int:
                 cell_df,
                 output_dir=cluster_dir,
                 size_arcsec=args.size_arcsec,
-                c_star_col="corrected_bp_rp_excess",
+                c_star_col="xgb_pgal",
                 title_fn=_make_title(v, lbl, k),
                 tiles=tiles,
                 contact_sheet_stem="contact_sheet",

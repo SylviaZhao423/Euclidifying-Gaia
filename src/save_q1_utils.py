@@ -34,16 +34,20 @@ from pathlib import Path
 from typing import NamedTuple
 
 import matplotlib.pyplot as plt
+from matplotlib import patheffects
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-FITS_CACHE   = PROJECT_ROOT / "output" / "euclid_q1_fits_cache"
+PROJECT_ROOT    = Path(__file__).resolve().parents[1]
+FITS_CACHE      = PROJECT_ROOT / "output" / "euclid_q1_fits_cache"
+ARRAYS_DIR      = PROJECT_ROOT / "output" / "umap" / "arrays"
+SEED_MODELS_DIR = PROJECT_ROOT / "output" / "xgboost_q1" / "seed_models"
 
 IRSA_TAP    = "https://irsa.ipac.caltech.edu/TAP/sync"
 IRSA_IBE_DATA = "https://irsa.ipac.caltech.edu/ibe/data/euclid/q1/MER"
 
-VIS_PIXEL_SCALE = 0.1   # arcsec / pixel (Euclid VIS)
+VIS_PIXEL_SCALE  = 0.1   # arcsec / pixel (Euclid VIS)
+NISP_PIXEL_SCALE = 0.3   # arcsec / pixel (Euclid NISP)
 
 
 # ── Tile info ─────────────────────────────────────────────────────────────────
@@ -158,6 +162,37 @@ def _vis_filename(tile_id: str, retries: int = 3) -> str | None:
                 return None
 
 
+_nisp_filename_cache: dict[tuple[str, str], str | None] = {}
+
+
+def _nisp_filename(tile_id: str, band: str, retries: int = 3) -> str | None:
+    """Scrape the IRSA NISP/ directory for a tile to get the BGSUB-MOSAIC-NIR-{band} filename.
+
+    All NISP bands (J, H, Y) live together under a single NISP/ subdirectory.
+    Filename pattern: EUC_MER_BGSUB-MOSAIC-NIR-{band}_TILE...fits
+    """
+    key = (tile_id, band)
+    if key in _nisp_filename_cache:
+        return _nisp_filename_cache[key]
+    dir_url = f"{IRSA_IBE_DATA}/{tile_id}/NISP/"
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(dir_url, headers={"User-Agent": "euclid-q1-cutout"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                html_text = r.read().decode("utf-8", errors="replace")
+            pattern = rf'href="(EUC_MER_BGSUB-MOSAIC-NIR-{band}_TILE[^"]+\.fits)"'
+            m = re.search(pattern, html_text)
+            filename = m.group(1) if m else None
+            _nisp_filename_cache[key] = filename
+            return filename
+        except Exception as exc:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                _nisp_filename_cache[key] = None
+                return None
+
+
 def _query_tile_irsa(ra: float, dec: float, field_name: str) -> TileInfo | None:
     """Per-source fallback: IRSA TAP cone search + directory scrape for filename."""
     query = (
@@ -191,6 +226,78 @@ def _query_tile_irsa(ra: float, dec: float, field_name: str) -> TileInfo | None:
     return TileInfo(tile_id=tile_id, filename=filename,
                     url=f"{IRSA_IBE_DATA}/{tile_id}/VIS/{filename}",
                     field_name=field_name)
+
+
+# ── XGBoost P(gal) ────────────────────────────────────────────────────────────
+
+def predict_pgal(X: np.ndarray) -> np.ndarray:
+    """Mean P(galaxy) from the 5-seed XGBoost ensemble in seed_models/."""
+    import xgboost as xgb
+    seed_paths = sorted(SEED_MODELS_DIR.glob("xgb_classifier_q1_seed*.json"))
+    if not seed_paths:
+        return np.full(len(X), np.nan)
+    probs = []
+    for p in seed_paths:
+        m = xgb.XGBClassifier()
+        m.load_model(str(p))
+        probs.append(m.predict_proba(X.astype(np.float32))[:, 1])
+    return np.mean(probs, axis=0)
+
+
+# ── LRGB colour composite ─────────────────────────────────────────────────────
+
+def _lrgb_composite(vis, nisp_j, nisp_h, colour_alpha: float = 0.25) -> np.ndarray:
+    """Blend VIS (luminance) with NISP J/H (colour) into an RGB image array."""
+    from scipy.ndimage import gaussian_filter
+    from astropy.visualization import LogStretch, ImageNormalize, ManualInterval
+
+    vis_f = np.where(np.isfinite(vis), vis, 0.0)
+    p01   = float(np.nanpercentile(vis_f, 1.0))
+    p995  = float(np.nanpercentile(vis_f, 99.5))
+    vis_s = np.clip(vis_f - p01 + 1.0, 1e-6, None)
+    norm  = ImageNormalize(vis_s, interval=ManualInterval(1.0, max(p995 - p01 + 1.0, 10.0)),
+                           stretch=LogStretch())
+    lum   = norm(vis_s).filled(0).astype(float)
+    gray  = np.stack([lum, lum, lum], axis=-1)
+
+    def _lin(img):
+        img = np.where(np.isfinite(img), img, 0.0)
+        lo, hi = float(np.nanpercentile(img, 1)), float(np.nanpercentile(img, 99))
+        return np.clip((img - lo) / (hi - lo + 1e-30), 0, 1)
+
+    r_raw = gaussian_filter(_lin(nisp_h), sigma=9.0)
+    g_raw = gaussian_filter(_lin(nisp_j), sigma=9.0)
+    b_raw = gaussian_filter(_lin(vis_f),  sigma=9.0)
+    colour = np.stack([r_raw, g_raw, b_raw], axis=-1).clip(0, 1)
+    colour_lum = (0.299 * colour[..., 0] + 0.587 * colour[..., 1]
+                  + 0.114 * colour[..., 2]) + 1e-10
+    colour_matched = (colour * (lum / colour_lum)[..., None]).clip(0, 1)
+    return ((1.0 - colour_alpha) * gray + colour_alpha * colour_matched).clip(0, 1).astype(np.float32)
+
+
+# ── Scale bar ─────────────────────────────────────────────────────────────────
+
+def _add_scale_bar(ax: "plt.Axes", n_pix: int, size_arcsec: float,
+                   pixel_scale: float, color: str) -> None:
+    """Draw an adaptive scale bar with a stroke-outlined label."""
+    candidates = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
+    bar_as = candidates[0]
+    for candidate in candidates:
+        if candidate / size_arcsec >= 0.15:
+            bar_as = candidate
+            break
+    bar_px = bar_as / pixel_scale
+    x0 = n_pix * 0.05
+    y0 = n_pix * 0.08
+    ax.plot([x0, x0 + bar_px], [y0, y0], color=color, lw=2.0,
+            solid_capstyle="butt")
+    label = f'{bar_as:.4g}"' if bar_as < 1 else f'{bar_as:.4g}"'
+    txt = ax.text(x0 + bar_px / 2, y0 + n_pix * 0.04, label,
+                  color=color, fontsize=9, ha="center", va="bottom")
+    txt.set_path_effects([
+        patheffects.Stroke(linewidth=2.5, foreground="black"),
+        patheffects.Normal(),
+    ])
 
 
 # ── HTTP range-request helpers (avoids downloading full ~1.4 GB tile) ─────────
@@ -240,7 +347,8 @@ class _HttpRangeFile:
 
 
 def _cutout_data_remote(url: str, ra: float, dec: float,
-                        size_arcsec: float) -> np.ndarray:
+                        size_arcsec: float,
+                        pixel_scale: float = VIS_PIXEL_SCALE) -> np.ndarray:
     """Fetch only the pixel rows needed for a cutout via HTTP range requests.
 
     Downloads the FITS header (~KB) then ONE range request for the relevant
@@ -276,7 +384,7 @@ def _cutout_data_remote(url: str, ra: float, dec: float,
     xc, yc = wcs.world_to_pixel(coord)
     xc, yc = int(round(float(xc))), int(round(float(yc)))
 
-    n_pix = max(10, int(round(size_arcsec / VIS_PIXEL_SCALE)))
+    n_pix = max(10, int(round(size_arcsec / pixel_scale)))
     half  = n_pix // 2
     x1, x2 = max(0, xc - half), min(naxis1, xc + half)
     y1, y2 = max(0, yc - half), min(naxis2, yc + half)
@@ -309,21 +417,28 @@ def _cutout_data_remote(url: str, ra: float, dec: float,
 
 def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
                    size_arcsec: float, title: str, dpi: int = 75,
-                   c_star: float | None = None) -> np.ndarray:
+                   c_star: float | None = None,
+                   nisp_j_url: str | None = None,
+                   nisp_h_url: str | None = None) -> np.ndarray:
     """Render a cutout stamp to a numpy array using log stretch.
 
     Accepts either a URL (uses HTTP range requests, ~3–5 MB per stamp) or a
     local Path (uses memory-mapped FITS).  URL mode is the default and avoids
     downloading the full 1.4 GB tile.
 
-    c_star: Gaia corrected BP/RP excess factor — colours the crosshair via
-    coolwarm (blue = point-like/star, red = extended/galaxy).  White if None.
+    c_star:      XGBoost P(gal) in [0, 1] — colours the crosshair via coolwarm_r
+                 (red = star, blue = galaxy).  White if None.
+    nisp_j_url:  Remote URL for the NISP-J tile (optional).
+    nisp_h_url:  Remote URL for the NISP-H tile (optional).
+                 When both are provided and SNR ≥ 10, an LRGB colour composite
+                 is produced instead of grayscale.
     """
     import io
     from astropy.visualization import LogStretch, ImageNormalize, ManualInterval
 
     if isinstance(tile_url_or_path, str):
-        image = _cutout_data_remote(tile_url_or_path, ra, dec, size_arcsec)
+        image = _cutout_data_remote(tile_url_or_path, ra, dec, size_arcsec,
+                                    pixel_scale=VIS_PIXEL_SCALE)
     else:
         from astropy.coordinates import SkyCoord
         from astropy.io import fits as afits
@@ -340,11 +455,18 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
             wcs    = WCS(hdu.header)
             coord  = SkyCoord(ra=ra, dec=dec, unit="deg")
             size   = u.Quantity([size_arcsec, size_arcsec], unit=u.arcsec)
-            cutout = Cutout2D(hdu.data, coord, size, wcs=wcs)
+            cutout = Cutout2D(hdu.data, coord, size, wcs=wcs,
+                              mode="partial", fill_value=np.nan)
         image = cutout.data.astype(float)
 
-    image  = np.asarray(image, dtype=float)
+    image = np.asarray(image, dtype=float)
     finite = np.isfinite(image)
+
+    # Reject edge-tile cutouts with >30% NaN
+    nan_frac = 1.0 - finite.mean()
+    if nan_frac > 0.30:
+        raise RuntimeError(f"Edge tile: {nan_frac:.0%} NaN pixels")
+
     if not finite.any():
         raise RuntimeError("No finite pixels in cutout")
 
@@ -358,18 +480,64 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
     img_s = np.clip(image + shift, 1e-6, None)
     vmin_s = 1.0
     vmax_s = max(p995 + shift, vmin_s * 10)
-    norm   = ImageNormalize(img_s, interval=ManualInterval(vmin_s, vmax_s),
-                            stretch=LogStretch())
 
-    # Crosshair colour: coolwarm by c_star (blue=star, red=galaxy), else white
+    # Faint-source SNR check — only attempt colour if source is bright enough
+    n_pix  = img_s.shape[0]
+    cx_i = cy_i = n_pix // 2
+    r = max(1, n_pix // 8)
+    central  = img_s[cy_i - r:cy_i + r, cx_i - r:cx_i + r]
+    vis_bg   = float(np.nanpercentile(img_s, 10))
+    vis_rms  = float(np.nanstd(img_s[img_s < np.nanpercentile(img_s, 50)]) or 1.0)
+    vis_peak = float(np.nanmax(central))
+    bright_enough = (vis_peak - vis_bg) / vis_rms >= 10.0
+
+    use_color = bright_enough and (nisp_j_url is not None) and (nisp_h_url is not None)
+    rgb = None
+    if use_color:
+        try:
+            from scipy.ndimage import zoom as _zoom
+            # NISP tiles are 0.3"/px — fetch at native resolution then upsample 3×
+            nisp_j_raw = _cutout_data_remote(nisp_j_url, ra, dec, size_arcsec,
+                                             pixel_scale=NISP_PIXEL_SCALE)
+            nisp_h_raw = _cutout_data_remote(nisp_h_url, ra, dec, size_arcsec,
+                                             pixel_scale=NISP_PIXEL_SCALE)
+            scale = NISP_PIXEL_SCALE / VIS_PIXEL_SCALE  # 3.0
+
+            def _match(arr, tgt):
+                th, tw = tgt.shape
+                a = arr[:th, :tw]
+                if a.shape[0] < th or a.shape[1] < tw:
+                    pad = np.full(tgt.shape, np.nanmedian(a) if np.isfinite(a).any() else 0.0)
+                    pad[:a.shape[0], :a.shape[1]] = a
+                    a = pad
+                return a
+
+            nisp_j = _match(_zoom(nisp_j_raw, scale, order=3), image)
+            nisp_h = _match(_zoom(nisp_h_raw, scale, order=3), image)
+
+            # Check NISP NaN fraction — skip colour if either band is too empty
+            if (np.isnan(nisp_j).mean() < 0.50 and np.isnan(nisp_h).mean() < 0.50):
+                rgb = _lrgb_composite(image, nisp_j, nisp_h)
+            else:
+                use_color = False
+        except Exception:
+            use_color = False
+
+    norm = ImageNormalize(img_s, interval=ManualInterval(vmin_s, vmax_s),
+                          stretch=LogStretch())
+
+    # Crosshair colour: coolwarm_r by P(gal) [0,1] (red=star, blue=galaxy)
     if c_star is not None and np.isfinite(c_star):
-        crosshair_color = plt.cm.coolwarm(np.clip((c_star + 0.5) / 1.5, 0, 1))
+        crosshair_color = plt.cm.coolwarm_r(float(np.clip(c_star, 0, 1)))
     else:
         crosshair_color = "white"
 
     fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(img_s, origin="lower", cmap="gray", norm=norm,
-              interpolation="nearest")
+    if use_color and rgb is not None:
+        ax.imshow(rgb, origin="lower", interpolation="nearest")
+    else:
+        ax.imshow(img_s, origin="lower", cmap="gray", norm=norm,
+                  interpolation="nearest")
     ax.set_title(title, fontsize=8)
     ax.set_xticks([]); ax.set_yticks([])
     n   = img_s.shape[0]
@@ -380,6 +548,7 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
     ax.plot([cx + gap, n - 1],   [cy, cy],       **kw)
     ax.plot([cx, cx],  [0,        cy - gap],     **kw)
     ax.plot([cx, cx],  [cy + gap, n - 1],        **kw)
+    _add_scale_bar(ax, n, size_arcsec, VIS_PIXEL_SCALE, crosshair_color)
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
@@ -404,9 +573,37 @@ def _make_contact_sheet(cell_images: list, out_stem: Path,
             if i < len(imgs):
                 ax.imshow(imgs[i])
             ax.axis("off")
+
+        # Fixed-height header (1.10") for consistent layout across all sheet sizes
+        fig_h_in  = 5.0 * nrows
+        header_in = 1.10
+        top_frac  = 1.0 - header_in / fig_h_in
+        _ih       = header_in / fig_h_in
+
+        fig.subplots_adjust(top=top_frac, bottom=0.01, left=0.01, right=0.99,
+                            hspace=0.05, wspace=0.05)
+
+        legend_w = 0.28
+        legend_h = 0.15 / fig_h_in
+        legend_x = 0.07
+        legend_y = top_frac + 0.20 / fig_h_in
+        sup_y    = legend_y + legend_h * 0.5
+
         plt.suptitle(f"Page {pi}/{len(pages)}  ({len(imgs)} sources)",
-                     fontsize=10, y=1.002)
-        plt.tight_layout()
+                     fontsize=10, y=sup_y)
+
+        cbar_ax = fig.add_axes([legend_x, legend_y, legend_w, legend_h])
+        cbar = fig.colorbar(
+            plt.cm.ScalarMappable(cmap="coolwarm_r",
+                                  norm=plt.Normalize(vmin=0, vmax=1)),
+            cax=cbar_ax, orientation="horizontal",
+        )
+        cbar.set_ticks([0, 0.5, 1])
+        cbar.set_ticklabels(["star", "0.5", "galaxy"])
+        cbar.ax.tick_params(labelsize=7, pad=1)
+        cbar_ax.set_title("XGBoost P(gal) — crosshair colour",
+                           fontsize=7, pad=3, loc="left")
+
         plt.savefig(out, dpi=100, bbox_inches="tight")
         plt.close()
         print(f"  Contact sheet: {out}")
@@ -498,6 +695,19 @@ def make_q1_cutouts(
 
     # ── Step 2: collect tile URLs (no full download — range requests only) ───────
     tile_urls: dict[str, str] = {t.tile_id: t.url for t in unique_tiles}
+
+    # Resolve NISP-J and NISP-H URLs for each unique tile
+    nisp_j_urls: dict[str, str | None] = {}
+    nisp_h_urls: dict[str, str | None] = {}
+    for t in unique_tiles:
+        for band, cache in (("J", nisp_j_urls), ("H", nisp_h_urls)):
+            fn = _nisp_filename(t.tile_id, band)
+            cache[t.tile_id] = (f"{IRSA_IBE_DATA}/{t.tile_id}/NISP/{fn}"
+                                 if fn else None)
+    n_nisp_j = sum(1 for v in nisp_j_urls.values() if v)
+    n_nisp_h = sum(1 for v in nisp_h_urls.values() if v)
+    print(f"  NISP-J tiles resolved: {n_nisp_j}/{len(unique_tiles)}  "
+          f"NISP-H: {n_nisp_h}/{len(unique_tiles)}")
     print(f"  Using HTTP range requests (~3–5 MB per stamp, no full tile download).")
 
     # ── Step 3: render cutouts ─────────────────────────────────────────────────
@@ -542,9 +752,13 @@ def make_q1_cutouts(
                     c_star = (float(row[c_star_col])
                               if c_star_col and c_star_col in row.index
                               and pd.notna(row[c_star_col]) else None)
+                    nisp_j = nisp_j_urls.get(tile.tile_id)
+                    nisp_h = nisp_h_urls.get(tile.tile_id)
                     img = _render_cutout(url, float(row["ra"]),
                                          float(row["dec"]), size, title,
-                                         dpi=dpi, c_star=c_star)
+                                         dpi=dpi, c_star=c_star,
+                                         nisp_j_url=nisp_j,
+                                         nisp_h_url=nisp_h)
                     cell_images.append(img)
                     if save_individuals:
                         ind_dir = Path(individuals_dir) if individuals_dir else output_dir

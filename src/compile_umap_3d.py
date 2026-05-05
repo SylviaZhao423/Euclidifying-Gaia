@@ -40,7 +40,7 @@ Writes:
   output/umap/arrays/projected/ero_regular_projected.csv
   output/umap/arrays/projected/ero_rebal_projected.csv
   output/umap/arrays/projected/ero_desi_projected.csv
-  output/umap/q1_individual/3d_umap.html
+  output/umap/q1_individual/umap_3d.html
 
 Usage:
   python src/compile_umap_3d.py
@@ -811,7 +811,7 @@ def _build_ero_traces(emb, y, gmag, features, feature_names, prefix, traces,
 def plot_umap_3d_plotly(
     q1_emb, q1_labels, q1_gmag,
     df_allphz,
-    output_dir,
+    output_dir: "Path | None" = None,
     cutout_cache=None,
     contact_sheet_cache=None,
     sheet_counts=None,
@@ -3443,9 +3443,11 @@ applyZAxis(_currentZ);
 </body>
 </html>"""
 
-    out = output_dir / "3d_umap.html"
-    out.write_text(html, encoding="utf-8")
-    print(f"  -> {out}  ({n_cached} cutouts embedded)")
+    if output_dir is not None:
+        out = output_dir / "umap_3d.html"
+        out.write_text(html, encoding="utf-8")
+        print(f"  -> {out}  ({n_cached} cutouts embedded)")
+    return html
 
 
 
@@ -3729,19 +3731,14 @@ def _compute_model_pgal_for_df(df: pd.DataFrame) -> np.ndarray:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Interactive 3D UMAP with Euclid feature coloring and ERO overlays"
-    )
-    parser.add_argument("--reproject", action="store_true",
-                        help="Force re-projection from raw npz files even if projected CSVs exist.")
-    parser.add_argument("--max-points", type=int, default=5000,
-                        help="Max total overlay points for All PHZ (default: 5000). "
-                             "Classes with <500 sources are kept in full; "
-                             "remaining budget is split proportionally.")
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-
+def build_3d_html(
+    reproject: bool = False,
+    max_points: int = 5000,
+    seed: int = 42,
+    write_output: bool = True,
+) -> str:
+    """Load all data and build the 3D UMAP HTML. Returns the HTML string.
+    If write_output=True, also writes umap_3d.html to OUTPUT_DIR."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── 1. Load Q1 UMAP ───────────────────────────────────────────────────────
@@ -3757,8 +3754,9 @@ def main() -> int:
     print("\n[2] Loading cluster labels...")
     labels_path = ARRAYS_DIR / "q1_cluster_labels.npy"
     if not labels_path.exists():
-        print(f"ERROR: {labels_path} not found. Run compute_q1_clusters.py first.")
-        return 1
+        raise FileNotFoundError(
+            f"{labels_path} not found. Run analyze_umap_q1_clusters.py first."
+        )
     q1_labels   = np.load(labels_path)
     cluster_ids = sorted(set(q1_labels[q1_labels >= 0]))
     print(f"  Clusters: " + "  ".join(f"C{k}={(q1_labels==k).sum():,}" for k in cluster_ids))
@@ -3804,7 +3802,7 @@ def main() -> int:
         return reducer
 
     # ── Step B: allphz ────────────────────────────────────────────────────────
-    if allphz_path.exists() and not args.reproject:
+    if allphz_path.exists() and not reproject:
         print("\n[4a] Loading saved allphz projected data...")
         df_allphz = pd.read_csv(allphz_path, float_precision="round_trip")
         df_allphz["phz"] = df_allphz["phz"].astype(int)
@@ -3829,7 +3827,7 @@ def main() -> int:
     # ── Step C: DESI ──────────────────────────────────────────────────────────
     df_desi = None
     desi_path = PROJECTED_DIR / "q1_desi_projected.csv"
-    if desi_path.exists() and not args.reproject:
+    if desi_path.exists() and not reproject:
         print("\n[4b] Loading saved DESI data...")
         df_desi = pd.read_csv(desi_path, float_precision="round_trip")
         df_desi["phz"] = df_desi["phz"].astype(int)
@@ -3872,7 +3870,7 @@ def main() -> int:
         emb_ero = y_ero = sids_ero = gmag_ero = feats_ero = None
         fn: list[str] = []
 
-        if csv_path.exists() and not args.reproject:
+        if csv_path.exists() and not reproject:
             df_ero = pd.read_csv(csv_path, float_precision="round_trip")
             emb_ero  = df_ero[["umap1", "umap2"]].values
             y_ero    = df_ero["y"].values.astype(int)
@@ -3944,7 +3942,7 @@ def main() -> int:
     ero_desi_csv = PROJECTED_DIR / "ero_desi_projected.csv"
     ero_desi_npz = ARRAYS_DIR / "ero_desi.npz"
 
-    if ero_desi_csv.exists() and not args.reproject:
+    if ero_desi_csv.exists() and not reproject:
         df_ed = pd.read_csv(ero_desi_csv, float_precision="round_trip")
         ero_desi_emb        = df_ed[["umap1", "umap2"]].values
         ero_desi_cat        = df_ed["cat_value"].values.astype(int)
@@ -4044,7 +4042,7 @@ def main() -> int:
         # Use all 50k Gaia XGB sources (data is small relative to image blobs)
         _gxgb_cap = 50_000
         if len(gaia_xgb_emb) > _gxgb_cap:
-            _gi = _random_subsample_idx(len(gaia_xgb_emb), _gxgb_cap, args.seed)
+            _gi = _random_subsample_idx(len(gaia_xgb_emb), _gxgb_cap, seed)
             gaia_xgb_emb       = gaia_xgb_emb[_gi]
             gaia_xgb_gal_prob = gaia_xgb_gal_prob[_gi]
             gaia_xgb_sids      = gaia_xgb_sids[_gi]
@@ -4080,7 +4078,7 @@ def main() -> int:
         _gaia_hilat_full_gprob = gaia_hilat_gal_prob.copy()
         _ghl_cap = 50_000
         if len(gaia_hilat_emb) > _ghl_cap:
-            _ghi = _random_subsample_idx(len(gaia_hilat_emb), _ghl_cap, args.seed)
+            _ghi = _random_subsample_idx(len(gaia_hilat_emb), _ghl_cap, seed)
             gaia_hilat_emb       = gaia_hilat_emb[_ghi]
             gaia_hilat_gal_prob = gaia_hilat_gal_prob[_ghi]
             gaia_hilat_sids      = gaia_hilat_sids[_ghi]
@@ -4118,17 +4116,17 @@ def main() -> int:
     _ero_rebal_full_sids = ero_rebal_sids.copy()   if ero_rebal_sids is not None else None
 
     # Subsample allphz
-    if args.max_points is not None:
-        print(f"\n  Applying --max-points {args.max_points} (hybrid density-preserving)...")
+    if max_points is not None:
+        print(f"\n  Applying --max-points {max_points} (hybrid density-preserving)...")
         cutout_sids = set(cutout_cache.keys())
         df_allphz = _subsample_hybrid(
             df_allphz, "phz", PHZ_LABELS, cutout_sids,
-            max_total=args.max_points, floor=500, seed=args.seed)
+            max_total=max_points, floor=500, seed=seed)
 
-    # Subsample ERO overlays to ~10k density-preserving
-    _ero_cap = 10_000
+    # Subsample ERO overlays (no cap — show all available sources)
+    _ero_cap = 999_999
     if ero_regular_emb is not None and len(ero_regular_emb) > _ero_cap:
-        _ei = _random_subsample_idx(len(ero_regular_emb), _ero_cap, args.seed)
+        _ei = _random_subsample_idx(len(ero_regular_emb), _ero_cap, seed)
         ero_regular_emb = ero_regular_emb[_ei]
         if ero_regular_y is not None: ero_regular_y = ero_regular_y[_ei]
         if ero_regular_gmag is not None: ero_regular_gmag = ero_regular_gmag[_ei]
@@ -4138,7 +4136,7 @@ def main() -> int:
             ero_reg_extra = {k: v[_ei] for k, v in ero_reg_extra.items()}
         print(f"  ERO regular subsampled to {_ero_cap:,} (density-preserving)")
     if ero_rebal_emb is not None and len(ero_rebal_emb) > _ero_cap:
-        _ei = _random_subsample_idx(len(ero_rebal_emb), _ero_cap, args.seed)
+        _ei = _random_subsample_idx(len(ero_rebal_emb), _ero_cap, seed)
         ero_rebal_emb = ero_rebal_emb[_ei]
         if ero_rebal_y is not None: ero_rebal_y = ero_rebal_y[_ei]
         if ero_rebal_gmag is not None: ero_rebal_gmag = ero_rebal_gmag[_ei]
@@ -4231,8 +4229,9 @@ def main() -> int:
 
     # ── Step N: Generate HTML ─────────────────────────────────────────────────
     print("\n[6] Generating interactive 3D HTML...")
-    plot_umap_3d_plotly(
-        q1_emb, q1_labels, q1_gmag, df_allphz, OUTPUT_DIR,
+    html = plot_umap_3d_plotly(
+        q1_emb, q1_labels, q1_gmag, df_allphz,
+        output_dir=OUTPUT_DIR if write_output else None,
         cutout_cache=cutout_cache,
         contact_sheet_cache=contact_sheet_cache, sheet_counts=sheet_counts,
         sheet_extra=sheet_extra,
@@ -4281,7 +4280,33 @@ def main() -> int:
         ero_desi_gaia_features=ero_desi_gaia_feats,
     )
 
-    print(f"\nDone. Output: {OUTPUT_DIR / '3d_umap.html'}")
+    if write_output:
+        print(f"\nDone. Output: {OUTPUT_DIR / 'umap_3d.html'}")
+    return html
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Interactive 3D UMAP with Euclid feature coloring and ERO overlays"
+    )
+    parser.add_argument("--reproject", action="store_true",
+                        help="Force re-projection from raw npz files even if projected CSVs exist.")
+    parser.add_argument("--max-points", type=int, default=5000,
+                        help="Max total overlay points for All PHZ (default: 5000). "
+                             "Classes with <500 sources are kept in full; "
+                             "remaining budget is split proportionally.")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    try:
+        build_3d_html(
+            reproject=args.reproject,
+            max_points=args.max_points,
+            seed=args.seed,
+            write_output=True,
+        )
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}")
+        return 1
     return 0
 
 

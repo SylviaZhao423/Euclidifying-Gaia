@@ -11,7 +11,13 @@ Join key: object_id
 Column naming convention:
 - m_* = Q1 MER columns
 - p_* = PHZ classification columns
+- m_ie_mag: pre-computed AB magnitude = -2.5 * log10(ZPC * m_flux_detection_total) + 23.90
+            ZPC = 1.05 (VIS band), only defined where flux_detection_total > 0
 """
+
+# Zero-point correction for VIS band (ZPC_IE) and AB zero-point
+ZPC_IE = 1.05
+ZP_AB  = 23.90
 
 import os
 from pathlib import Path
@@ -85,6 +91,13 @@ def crossmatch_q1_mer_phz(username):
         # m_ prefix for MER columns
         mer_cols_str = ', '.join([f'q.{col} AS m_{col}' for col in mer_columns])
 
+        # Pre-computed IE magnitude (NULL where flux <= 0)
+        ie_mag_str = (
+            f'CASE WHEN q.flux_detection_total > 0 THEN '
+            f'-2.5 * LOG10({ZPC_IE} * q.flux_detection_total) + {ZP_AB} '
+            f'ELSE NULL END AS m_ie_mag'
+        )
+
         # PHZ columns with p_ prefix
         phz_cols_str = ', '.join([
             f'p.phz_classification AS p_phz_classification',
@@ -108,6 +121,7 @@ def crossmatch_q1_mer_phz(username):
             CREATE TABLE {output_table} AS
             SELECT
                 {mer_cols_str},
+                {ie_mag_str},
                 {phz_cols_str}
             FROM euclid_q1.mer_final_cat q
             INNER JOIN {phz_table} p
@@ -135,6 +149,7 @@ def crossmatch_q1_mer_phz(username):
         col_count = cursor.fetchone()[0]
         print(f"  Columns: {col_count}")
         print(f"    MER columns (m_): {len(mer_columns)}")
+        print(f"    Derived columns:  1 (m_ie_mag)")
         print(f"    PHZ columns (p_): 8")
 
         cursor.close()

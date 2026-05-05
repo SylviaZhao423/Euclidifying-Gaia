@@ -41,7 +41,6 @@ def query_all_ero(username):
                 WHEN v_class_star < 0.65  THEN 'GALAXY'
             END AS label
         FROM euclid_ero.merge_cat
-        WHERE v_class_star IS NOT NULL
     """
     print("Querying all ERO data...")
     df = pd.read_sql_query(query, conn)
@@ -55,38 +54,43 @@ def plot(df):
     mag_star = df[df["label"] == "STAR"]["v_mag_auto"].dropna()
     mag_gal  = df[df["label"] == "GALAXY"]["v_mag_auto"].dropna()
 
-    n_gal  = int(np.histogram(mag_gal,  bins=BINS)[0].sum())
-    n_star = int(np.histogram(mag_star, bins=BINS)[0].sum())
-    n_all  = n_gal + n_star
+    # Full counts for legend (no mag range filter)
+    n_all  = len(df)
+    n_star = int((df["label"] == "STAR").sum())
+    n_gal  = int((df["label"] == "GALAXY").sum())
 
     counts_all,  _ = np.histogram(mag_all,  bins=BINS)
     count_ylim = int(np.ceil(counts_all.max() * 1.10 / 1000) * 1000)
 
     fig, (ax_top, ax_bot) = plt.subplots(
         2, 1,
-        figsize=(12, 7),
+        figsize=(8, 6),
         gridspec_kw={"height_ratios": [2.5, 1.5]},
     )
     fig.subplots_adjust(
         left=0.10, right=0.97,
-        bottom=0.08, top=0.93,
-        hspace=0.30,
+        bottom=0.10, top=0.93,
+        hspace=0.25,
     )
 
     # ── Top: count histogram ─────────────────────────────────────────────────
     ax_top.hist(mag_all,  bins=BINS, alpha=0.3, color="gray",
                 label=f"All ({n_all:,})")
     ax_top.hist(mag_gal,  bins=BINS, alpha=0.7, color="steelblue",
-                label=f"Galaxies ({n_gal:,})", histtype="step", linewidth=1.5)
+                label=f"Extended ({n_gal:,})", histtype="step", linewidth=2.0)
     ax_top.hist(mag_star, bins=BINS, alpha=0.7, color="coral",
-                label=f"Stars ({n_star:,})", histtype="step", linewidth=1.5)
-    ax_top.set_ylabel("Count", fontsize=11)
+                label=f"Point-like ({n_star:,})", histtype="step", linewidth=2.0)
+    ax_top.set_ylabel("Count", fontsize=13, fontweight="bold")
     ax_top.set_xlim(XLIM)
     ax_top.set_ylim(0, count_ylim)
-    ax_top.set_title("Sources Count (All ERO, Euclid VIS)", fontsize=12, fontweight="bold")
-    ax_top.legend(fontsize=9, loc="upper left")
+    ax_top.set_title("Source count — CLASS_STAR (threshold = 0.65)",
+                     fontsize=14, fontweight="bold")
+    handles, labels = ax_top.get_legend_handles_labels()
+    ax_top.legend(handles[1:] + handles[:1], labels[1:] + labels[:1],
+                  fontsize=12, loc="upper left")
     ax_top.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax_top.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
+    ax_top.tick_params(labelsize=12)
     ax_top.grid(alpha=0.3, axis="y")
     plt.setp(ax_top.get_xticklabels(), visible=False)
 
@@ -99,17 +103,19 @@ def plot(df):
         frac_star = np.where(counts_all > 0, counts_star / counts_all, np.nan)
     mask = counts_all >= 10
     ax_bot.plot(bin_centers[mask], frac_star[mask], color="coral",
-                linewidth=1.5, alpha=0.3)
+                linewidth=2.0, alpha=0.3)
     ax_bot.plot(bin_centers[mask], frac_gal[mask], "o-", color="steelblue",
-                markersize=3, linewidth=1.5)
-    ax_bot.set_xlabel("Euclid VIS (v_mag_auto)", fontsize=11)
-    ax_bot.set_ylabel("Class fraction", fontsize=11)
+                markersize=3, linewidth=2.0)
+    ax_bot.set_xlabel("Euclid VIS (v_mag_auto)", fontsize=13, fontweight="bold")
+    ax_bot.set_ylabel("Extended fraction", fontsize=13, fontweight="bold", labelpad=30)
     ax_bot.set_xlim(XLIM)
     ax_bot.set_ylim(-0.02, 1.02)
-    ax_bot.set_title("Class Fraction (All ERO, Euclid VIS)", fontsize=12, fontweight="bold")
-    ax_bot.axhline(y=0.5, color="gray", ls="--", alpha=0.4)
+    ax_bot.set_title(r"Extended fraction (class_star $\leq$ 0.65 $\rightarrow$ extended)",
+                     fontsize=14, fontweight="bold")
+    ax_bot.axhline(y=0.5, color="gray", ls="--", linewidth=1, alpha=0.4)
     ax_bot.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax_bot.yaxis.set_major_locator(ticker.MultipleLocator(0.25))
+    ax_bot.tick_params(labelsize=12)
     ax_bot.grid(alpha=0.3)
 
     plt.savefig(OUTPUT_FILE, dpi=150, bbox_inches="tight")

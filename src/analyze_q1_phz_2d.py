@@ -40,10 +40,9 @@ def query_all_q1(username):
             -2.5 * LOG10({ZPC_IE} * m_flux_detection_total) + {ZP_REF} AS ie_mag,
             p_phz_star_prob AS star_prob,
             p_phz_gal_prob  AS gal_prob
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis
         WHERE m_flux_detection_total > 0
           AND m_flux_detection_total IS NOT NULL
-          AND m_vis_det = 1
           AND p_phz_star_prob IS NOT NULL
     """
     print("  Querying all Q1+PHZ sources (VIS-detected)...")
@@ -63,10 +62,9 @@ def query_gaia_matched(username):
             g_phot_g_mean_mag AS gaia_g,
             p_phz_star_prob AS star_prob,
             p_phz_gal_prob  AS gal_prob
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia
         WHERE m_flux_detection_total > 0
           AND m_flux_detection_total IS NOT NULL
-          AND m_vis_det = 1
           AND g_phot_g_mean_mag IS NOT NULL
           AND p_phz_star_prob IS NOT NULL
     """

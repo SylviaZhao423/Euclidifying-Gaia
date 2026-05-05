@@ -4,8 +4,11 @@ Download Euclid ERO VIS cutouts for ERO×DESI cross-matched sources,
 organised by cat_value (ERO-Star vs ERO-Galaxy) and Q1 UMAP cluster.
 
 Each source is projected into Q1 UMAP space (via ero_desi.npz) and assigned
-to its nearest Q1 cluster.  Cutouts are rendered with log stretch and BP/RP
-excess crosshair colouring, using cached ERO FITS tiles.
+to its nearest Q1 cluster.  Cutouts are rendered with log stretch, a scale bar,
+and BP/RP excess crosshair colouring, using cached ERO FITS tiles.
+
+Pass --color to produce RGB composites (R=H, G=J, B=VIS) using Lupton arcsinh
+stretch.  NISP-J and NISP-H tiles are downloaded and cached automatically.
 
 Category layout (from cat_value in ero_desi.npz):
   2 = ERO Star   (e_v_class_star >= 0.65)
@@ -29,8 +32,9 @@ Reads:
   output/euclid_ero_fits_cache/*.fits
 
 Usage:
-  python src/download_e_ero_desi_cutouts.py
-  python src/download_e_ero_desi_cutouts.py --per-cell 20 --size-arcsec 8
+  python src/download_e_desi_cutouts.py                  # color composites, 30 per cell
+  python src/download_e_desi_cutouts.py --per-cell 10    # fewer sources per cell
+  python src/download_e_desi_cutouts.py --no-color       # grayscale VIS only
 """
 
 from __future__ import annotations
@@ -44,10 +48,12 @@ import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import xgboost as xgb
 from sklearn.neighbors import NearestNeighbors
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ARRAYS_DIR   = PROJECT_ROOT / "output" / "umap" / "arrays"
+PROJECT_ROOT     = Path(__file__).resolve().parents[1]
+ARRAYS_DIR       = PROJECT_ROOT / "output" / "umap" / "arrays"
+SEED_MODELS_DIR  = PROJECT_ROOT / "output" / "xgboost_q1" / "seed_models"
 OUTPUT_DIR   = PROJECT_ROOT / "output" / "euclid_cutouts" / "ero_cutouts" / "desi"
 FITS_CACHE   = PROJECT_ROOT / "output" / "euclid_ero_fits_cache"
 
@@ -104,7 +110,36 @@ _FIELD_NAMES = list(ERO_FIELDS.keys())
 _FIELD_RA    = np.radians([v[0] for v in ERO_FIELDS.values()])
 _FIELD_DEC   = np.radians([v[1] for v in ERO_FIELDS.values()])
 
-VIS_PIXEL_SCALE = 0.1  # arcsec / pixel
+VIS_PIXEL_SCALE  = 0.1   # arcsec / pixel
+NISP_PIXEL_SCALE = 0.3   # arcsec / pixel
+
+# Dynamic cutout sizing: size_arcsec = flux_radius (px) * VIS_PIXEL_SCALE * SIZE_SCALE
+SIZE_SCALE = 8.0   # show 8× the half-light radius
+SIZE_MIN   = 5.0   # arcsec — never smaller than this (50 VIS pixels min)
+SIZE_MAX   = 15.0  # arcsec — cap to avoid pulling in bright neighbors
+
+CDN_BASE = "https://cdn.euclid.esac.esa.int/Stack"
+
+# NISP-J and NISP-H filename maps (same TARGET tokens as VIS)
+FIELD_TO_TARGET = {
+    "Horsehead":   "ERO-Horsehead",
+    "Messier 78":  "ERO-Messier78",
+    "Taurus":      "ERO-Taurus",
+    "Barnard 30":  "ERO-Barnard30",
+    "NGC 6254":    "ERO-NGC6254",
+    "NGC 6397":    "ERO-NGC6397",
+    "NGC 6822":    "ERO-NGC6822",
+    "Holmberg II": "ERO-HolmbergII",
+    "IC 10":       "ERO-IC10",
+    "IC 342":      "ERO-IC342",
+    "NGC 2403":    "ERO-NGC2403",
+    "NGC 6744":    "ERO-NGC6744",
+    "Fornax":      "ERO-Fornax",
+    "Dorado":      "ERO-Dorado",
+    "Perseus":     "ERO-Perseus",
+    "Abell 2390":  "ERO-Abell2390",
+    "Abell 2764":  "ERO-Abell2764",
+}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -132,6 +167,242 @@ def sanitize(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(text)).strip("_")
 
 
+# ── NISP download helper ──────────────────────────────────────────────────────
+
+def _find_tar_entry(tar_url: str, pattern: str) -> tuple[str, int, int]:
+    """Scan a remote tar via HTTP range requests to find an entry whose name
+    matches *pattern* (case-insensitive substring).  Returns (name, data_offset,
+    data_size).  Makes one 512-byte request per entry header — efficient for
+    tars with a small number of large entries (e.g. Euclid NISP combined tar)."""
+    import re, urllib.request
+
+    def _fetch_header(byte_offset: int) -> bytes:
+        hdrs = {"Range": f"bytes={byte_offset}-{byte_offset + 511}",
+                "User-Agent": "euclid-fits-downloader"}
+        req = urllib.request.Request(tar_url, headers=hdrs)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.read()
+
+    offset = 0
+    long_name: str | None = None          # GNU long-name extension
+    while True:
+        block = _fetch_header(offset)
+        if len(block) < 512 or block == b"\x00" * 512:
+            break  # end of archive
+
+        raw_name  = block[0:100].rstrip(b"\x00").decode("utf-8", errors="replace")
+        typeflag  = block[156:157]
+        size_oct  = block[124:136].rstrip(b"\x00 ").decode("ascii", errors="replace")
+        size      = int(size_oct, 8) if size_oct else 0
+        padded    = ((size + 511) // 512) * 512
+
+        if typeflag == b"L":
+            # GNU long-name: next 'size' bytes are the real name, then the actual entry
+            name_hdrs = {"Range": f"bytes={offset+512}-{offset+512+size-1}",
+                         "User-Agent": "euclid-fits-downloader"}
+            name_req  = urllib.request.Request(tar_url, headers=name_hdrs)
+            with urllib.request.urlopen(name_req, timeout=60) as r:
+                long_name = r.read().rstrip(b"\x00").decode("utf-8", errors="replace")
+            offset += 512 + padded
+            continue
+
+        name = long_name if long_name else raw_name
+        long_name = None  # reset after use
+
+        if typeflag not in (b"5", b"L", b"K") and size > 0:
+            if re.search(pattern, name, re.IGNORECASE):
+                return name, offset + 512, size
+
+        offset += 512 + padded
+
+    raise RuntimeError(f"No entry matching '{pattern}' found in tar: {tar_url}")
+
+
+def _stream_download(url: str, dest: Path, start: int, size: int,
+                     chunk: int = 4 << 20) -> None:
+    import urllib.request
+    headers = {"Range": f"bytes={start}-{start + size - 1}",
+               "User-Agent": "euclid-fits-downloader"}
+    req = urllib.request.Request(url, headers=headers)
+    downloaded = 0
+    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
+        while True:
+            block = r.read(chunk)
+            if not block:
+                break
+            f.write(block)
+            downloaded += len(block)
+            print(f"    {downloaded/1e6:,.0f} / {size/1e6:,.0f} MB  "
+                  f"({100*downloaded/size:.1f}%)", end="\r", flush=True)
+    print()
+    if downloaded != size:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(f"Incomplete download: got {downloaded:,} / {size:,} bytes")
+
+
+def get_nisp_fits(field: str, band: str) -> Path | None:
+    """Return cached NISP FITS path for (field, band='J'|'H'|'Y'), downloading if needed.
+
+    All three NISP bands live in a single combined tar:
+      Euclid-NISP-Stack-ERO-{TARGET}.DR3.tar
+    We scan the tar headers to find the entry matching the requested band and
+    download only that entry's bytes via HTTP Range.
+    """
+    import gzip, shutil
+    target = FIELD_TO_TARGET.get(field)
+    if target is None:
+        return None
+    fits_path = FITS_CACHE / f"Euclid-NISP-{band}-{target}-Flattened.DR3.fits"
+    if fits_path.exists():
+        return fits_path
+    # Combined NISP tar (contains Y, J, H band stacks + ancillary files)
+    tar_url = f"{CDN_BASE}/Euclid-NISP-Stack-{target}.DR3.tar"
+    gz_path = FITS_CACHE / f"Euclid-NISP-{band}-{target}-Flattened.DR3.fits.gz"
+    # Pattern to locate the right band entry, e.g. "NISP-J-ERO-Fornax-Flattened"
+    entry_pattern = rf"NISP-{band}-.*Flattened"
+    print(f"  Scanning NISP tar for band {band} ({field})...")
+    try:
+        name, data_offset, data_size = _find_tar_entry(tar_url, entry_pattern)
+        print(f"    Found: {name}  ({data_size/1e9:.2f} GB)  offset={data_offset:,}")
+        print(f"  Downloading...")
+        _stream_download(tar_url, gz_path, data_offset, data_size)
+        print(f"  Decompressing {gz_path.name}...")
+        with gzip.open(gz_path, "rb") as f_in, open(fits_path, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out, length=32 << 20)
+        gz_path.unlink()
+        print(f"  -> {fits_path.name}")
+        return fits_path
+    except Exception as exc:
+        print(f"  WARNING: NISP-{band} download failed for {field}: {exc}")
+        gz_path.unlink(missing_ok=True)
+        return None
+
+
+def _extract_fits_cutout(fits_path: Path, ra: float, dec: float,
+                         size_arcsec: float,
+                         max_nan_frac: float = 0.30) -> np.ndarray:
+    """Extract a square cutout from a FITS file, returned as float array.
+
+    Uses mode='partial' so edge sources get NaN-padded rather than silently
+    trimmed.  If more than *max_nan_frac* of pixels are NaN (source near tile
+    edge), raises RuntimeError so the caller can fall back or skip.
+    """
+    from astropy.io import fits as afits
+    from astropy.coordinates import SkyCoord
+    from astropy.nddata import Cutout2D
+    from astropy.wcs import WCS
+    import astropy.units as u
+
+    with afits.open(fits_path, memmap=True) as hdul:
+        hdu = next((h for h in hdul
+                    if hasattr(h, "data") and isinstance(h.data, np.ndarray)
+                    and h.data.ndim == 2), None)
+        if hdu is None:
+            raise RuntimeError(f"No 2D HDU in {fits_path.name}")
+        wcs    = WCS(hdu.header)
+        coord  = SkyCoord(ra=ra, dec=dec, unit="deg")
+        size   = u.Quantity([size_arcsec, size_arcsec], unit=u.arcsec)
+        cutout = Cutout2D(hdu.data, coord, size, wcs=wcs,
+                          mode="partial", fill_value=np.nan)
+    data = cutout.data.astype(float)
+    nan_frac = np.isnan(data).mean()
+    if nan_frac > max_nan_frac:
+        raise RuntimeError(
+            f"Source near tile edge: {nan_frac:.0%} of cutout is off-tile "
+            f"(>{max_nan_frac:.0%} threshold)"
+        )
+    return data
+
+
+# ── LRGB composite ───────────────────────────────────────────────────────────
+
+def _lrgb_composite(vis: np.ndarray,
+                    nisp_j: np.ndarray,
+                    nisp_h: np.ndarray,
+                    colour_alpha: float = 0.25) -> np.ndarray:
+    """LRGB composite via luminance-layer blending.
+
+    VIS log-stretch provides the full-fidelity luminance base (identical to
+    grayscale mode — no structural information is lost).  Smoothed NISP H/J
+    colour channels are then blended on top at low opacity so that only
+    large-scale warm/cool gradients appear.
+
+    Steps:
+      1. Log-stretch VIS → lum [0,1]  (base layer, R=G=B=lum)
+      2. Smooth NISP H, J to NISP's native resolution (sigma ≈ 9 VIS px)
+      3. Build a colour-tinted image: rescale each channel so its luminance
+         matches the VIS luminance (no brightness change, only hue added)
+      4. Alpha-blend:  result = (1-α)·gray + α·colour_tinted
+         Background pixels are naturally dark in both layers → no noise issue.
+
+    Returns (H, W, 3) float32 in [0, 1].
+    """
+    from scipy.ndimage import gaussian_filter
+    from astropy.visualization import LogStretch, ImageNormalize, ManualInterval
+
+    # ── 1. VIS log luminance — identical to grayscale mode ────────────────────
+    vis_f  = np.where(np.isfinite(vis), vis, 0.0)
+    p01    = float(np.nanpercentile(vis_f, 1.0))
+    p995   = float(np.nanpercentile(vis_f, 99.5))
+    shift  = -p01 + 1.0
+    vis_s  = np.clip(vis_f + shift, 1e-6, None)
+    vmax_s = max(p995 + shift, 10.0)
+    norm   = ImageNormalize(vis_s,
+                            interval=ManualInterval(1.0, vmax_s),
+                            stretch=LogStretch())
+    lum    = norm(vis_s).filled(0).astype(float)   # [0, 1]
+
+    # ── 2. Base layer: pure VIS grayscale ─────────────────────────────────────
+    gray = np.stack([lum, lum, lum], axis=-1)
+
+    # ── 3. Colour layer: smoothed NISP, brightness-matched to VIS ─────────────
+    # Smooth to NISP's native resolution (3 NISP px × 3 upsample = 9 VIS px)
+    smooth_sigma = 9.0
+
+    def _lin(img, lo_pct=1.0, hi_pct=99.0):
+        img = np.where(np.isfinite(img), img, 0.0)
+        lo  = float(np.nanpercentile(img, lo_pct))
+        hi  = float(np.nanpercentile(img, hi_pct))
+        return np.clip((img - lo) / (hi - lo + 1e-30), 0, 1)
+
+    r_raw = gaussian_filter(_lin(nisp_h), sigma=smooth_sigma)  # H → warm/red
+    g_raw = gaussian_filter(_lin(nisp_j), sigma=smooth_sigma)  # J → mid/green
+    b_raw = gaussian_filter(_lin(vis_f),  sigma=smooth_sigma)  # VIS → cool/blue
+
+    colour = np.stack([r_raw, g_raw, b_raw], axis=-1).clip(0, 1)
+
+    # Rescale each pixel's colour so its perceived luminance equals VIS lum.
+    # Perceived lum = 0.299R + 0.587G + 0.114B  (Rec.601 weights)
+    colour_lum = (0.299 * colour[..., 0]
+                + 0.587 * colour[..., 1]
+                + 0.114 * colour[..., 2]) + 1e-10
+    scale = lum / colour_lum           # per-pixel brightness correction
+    colour_matched = (colour * scale[..., None]).clip(0, 1)
+
+    # ── 4. Alpha blend: gray base + colour tint ───────────────────────────────
+    result = (1.0 - colour_alpha) * gray + colour_alpha * colour_matched
+    return result.clip(0, 1).astype(np.float32)
+
+
+def predict_pgal(X: np.ndarray) -> np.ndarray:
+    """Run the Q1 XGBoost seed ensemble and return mean P(galaxy) for each row."""
+    seed_paths = sorted(SEED_MODELS_DIR.glob("xgb_classifier_q1_seed*.json"))
+    if not seed_paths:
+        # Fall back to single model
+        single = PROJECT_ROOT / "output" / "xgboost_q1" / "xgb_classifier_q1.json"
+        if single.exists():
+            seed_paths = [single]
+        else:
+            print("  WARNING: no XGBoost model found — P(gal) will be NaN")
+            return np.full(len(X), np.nan)
+    probs = []
+    for p in seed_paths:
+        m = xgb.XGBClassifier()
+        m.load_model(str(p))
+        probs.append(m.predict_proba(X.astype(np.float32))[:, 1])
+    return np.mean(probs, axis=0)
+
+
 def assign_to_clusters(src_emb: np.ndarray,
                        q1_emb: np.ndarray,
                        q1_labels: np.ndarray) -> np.ndarray:
@@ -146,67 +417,146 @@ def assign_to_clusters(src_emb: np.ndarray,
     return q1_labels[valid_indices[idx]]
 
 
-# ── Cutout rendering (log stretch) ──────────────────────────────────────────
+# ── Cutout rendering ─────────────────────────────────────────────────────────
 
-def make_cutout_image(fits_path: Path, ra: float, dec: float,
+def _add_scale_bar(ax: "plt.Axes", n_pix: int, size_arcsec: float,
+                   pixel_scale: float, color: str = "white") -> None:
+    """Draw a scale bar in the bottom-left corner of the cutout axes.
+
+    Chooses the smallest round bar length (0.5 / 1 / 2 / 5 / 10 / 20 arcsec)
+    that occupies at least 15% of the cutout width.
+    """
+    bar_as = 20.0  # fallback for very large cutouts
+    for candidate in (0.5, 1.0, 2.0, 5.0, 10.0, 20.0):
+        if candidate / size_arcsec >= 0.15:
+            bar_as = candidate
+            break
+    import matplotlib.patheffects as pe
+    bar_pix  = bar_as / pixel_scale
+    x0 = n_pix * 0.06
+    y0 = n_pix * 0.08
+    outline = [pe.withStroke(linewidth=2.5, foreground="black")]
+    ax.plot([x0, x0 + bar_pix], [y0, y0], color=color, lw=2.5,
+            solid_capstyle="butt",
+            path_effects=[pe.withStroke(linewidth=4.0, foreground="black")])
+    label = f'{bar_as:.0f}"' if bar_as >= 1 else f'{bar_as:.1f}"'
+    ax.text(x0 + bar_pix / 2, y0 + n_pix * 0.04, label,
+            ha="center", va="bottom", color=color,
+            fontsize=9, fontweight="bold", path_effects=outline)
+
+
+def make_cutout_image(fits_path_vis: Path, ra: float, dec: float,
                       size_arcsec: float, title: str,
                       dpi: int = 75,
-                      c_star: float | None = None) -> np.ndarray:
+                      c_star: float | None = None,
+                      fits_path_nisp_j: Path | None = None,
+                      fits_path_nisp_h: Path | None = None) -> np.ndarray:
+    """Render a cutout stamp.
+
+    Grayscale (log stretch) by default.  When fits_path_nisp_j and
+    fits_path_nisp_h are both provided, produces an RGB composite
+    (R=H, G=J, B=VIS) using Lupton arcsinh stretch.
+
+    A scale bar and crosshair are always overlaid.
+    """
     import io
-    from astropy.io import fits as afits
-    from astropy.coordinates import SkyCoord
-    from astropy.nddata import Cutout2D
-    from astropy.wcs import WCS
     from astropy.visualization import LogStretch, ImageNormalize, ManualInterval
-    import astropy.units as u
 
-    with afits.open(fits_path, memmap=True) as hdul:
-        hdu = None
-        for h in hdul:
-            if hasattr(h, "data") and isinstance(h.data, np.ndarray) and h.data.ndim == 2:
-                hdu = h
-                break
-        if hdu is None:
-            raise RuntimeError(f"No 2D image HDU found in {fits_path.name}")
-        wcs    = WCS(hdu.header)
-        coord  = SkyCoord(ra=ra, dec=dec, unit="deg")
-        size   = u.Quantity([size_arcsec, size_arcsec], unit=u.arcsec)
-        cutout = Cutout2D(hdu.data, coord, size, wcs=wcs)
+    color_mode = (fits_path_nisp_j is not None and fits_path_nisp_h is not None)
 
-    image  = cutout.data.astype(float)
-    finite = np.isfinite(image)
+    # ── Extract VIS cutout ────────────────────────────────────────────────────
+    vis = _extract_fits_cutout(fits_path_vis, ra, dec, size_arcsec)
+    finite = np.isfinite(vis)
     if not finite.any():
-        raise RuntimeError("No finite pixels in cutout")
-
-    image = np.where(finite, image, float(np.nanmedian(image[finite])))
-
-    p01  = float(np.nanpercentile(image, 1.0))
-    p995 = float(np.nanpercentile(image, 99.5))
-    shift = -p01 + 1.0
-    img_s = np.clip(image + shift, 1e-6, None)
-    vmin_s = 1.0
-    vmax_s = max(p995 + shift, vmin_s * 10)
-
-    norm = ImageNormalize(img_s, interval=ManualInterval(vmin_s, vmax_s),
-                          stretch=LogStretch())
+        raise RuntimeError("No finite pixels in VIS cutout")
+    vis = np.where(finite, vis, float(np.nanmedian(vis[finite])))
+    n = vis.shape[0]
 
     if c_star is not None and np.isfinite(c_star):
-        crosshair_color = plt.cm.coolwarm(np.clip((c_star + 0.5) / 1.5, 0, 1))
+        crosshair_color = plt.cm.coolwarm_r(float(np.clip(c_star, 0, 1)))
     else:
         crosshair_color = "white"
 
     fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(img_s, origin="lower", cmap="gray", norm=norm, interpolation="nearest")
+
+    if color_mode:
+        # ── RGB composite: R=H, G=J, B=VIS ───────────────────────────────────
+        try:
+            nisp_j = _extract_fits_cutout(fits_path_nisp_j, ra, dec, size_arcsec,
+                                          max_nan_frac=0.30)
+            nisp_h = _extract_fits_cutout(fits_path_nisp_h, ra, dec, size_arcsec,
+                                          max_nan_frac=0.30)
+        except Exception as exc:
+            print(f"      WARNING: NISP cutout failed ({exc}), falling back to grayscale")
+            color_mode = False
+
+        if color_mode:
+            # Skip colour for very faint sources: NISP noise would degrade the image.
+            # Estimate peak SNR from the central 25% of the VIS cutout.
+            cy, cx = n // 2, n // 2
+            cy0, cy1 = max(0, cy - n // 4), min(n, cy + n // 4)
+            cx0, cx1 = max(0, cx - n // 4), min(n, cx + n // 4)
+            center_vis = vis[cy0:cy1, cx0:cx1]
+            vis_peak = float(np.nanpercentile(center_vis, 99.0))
+            vis_bg   = float(np.nanpercentile(vis, 50.0))
+            vis_rms  = float(np.nanstd(vis[vis < vis_bg + 3 * np.nanstd(vis)]))
+            if vis_rms > 0 and (vis_peak - vis_bg) / vis_rms < 10.0:
+                print(f"      (faint source — using grayscale, peak SNR "
+                      f"{(vis_peak-vis_bg)/vis_rms:.1f} < 10)")
+                color_mode = False
+
+        if color_mode:
+            # Upsample NISP (0.3"/pix) to VIS resolution (0.1"/pix)
+            from scipy.ndimage import zoom
+            scale = NISP_PIXEL_SCALE / VIS_PIXEL_SCALE   # = 3.0
+            nisp_j_up = zoom(nisp_j, scale, order=3)
+            nisp_h_up = zoom(nisp_h, scale, order=3)
+
+            # Crop / pad to match VIS shape
+            def _match_shape(arr, target):
+                th, tw = target.shape
+                h, w   = arr.shape
+                arr = arr[:th, :tw]
+                if arr.shape[0] < th or arr.shape[1] < tw:
+                    pad = np.full(target.shape, np.nanmedian(arr))
+                    pad[:arr.shape[0], :arr.shape[1]] = arr
+                    arr = pad
+                return arr
+
+            nisp_j_up = _match_shape(nisp_j_up, vis)
+            nisp_h_up = _match_shape(nisp_h_up, vis)
+
+            rgb = _lrgb_composite(vis, nisp_j_up, nisp_h_up)
+            ax.imshow(rgb, origin="lower", interpolation="nearest")
+
+    if not color_mode:
+        # ── Grayscale log stretch ─────────────────────────────────────────────
+        p01   = float(np.nanpercentile(vis, 1.0))
+        p995  = float(np.nanpercentile(vis, 99.5))
+        shift = -p01 + 1.0
+        img_s = np.clip(vis + shift, 1e-6, None)
+        vmin_s = 1.0
+        vmax_s = max(p995 + shift, vmin_s * 10)
+        norm = ImageNormalize(img_s, interval=ManualInterval(vmin_s, vmax_s),
+                              stretch=LogStretch())
+        ax.imshow(img_s, origin="lower", cmap="gray", norm=norm,
+                  interpolation="nearest")
+
     ax.set_title(title, fontsize=8)
     ax.set_xticks([]); ax.set_yticks([])
-    n   = img_s.shape[0]
+
+    # ── Crosshair ─────────────────────────────────────────────────────────────
     gap = n * 0.10
     cx  = cy = n / 2
     kw  = dict(color=crosshair_color, lw=1.0, alpha=0.8, solid_capstyle="butt")
-    ax.plot([0,      cx - gap], [cy, cy],      **kw)
-    ax.plot([cx + gap, n - 1], [cy, cy],       **kw)
-    ax.plot([cx, cx], [0,      cy - gap],      **kw)
-    ax.plot([cx, cx], [cy + gap, n - 1],       **kw)
+    ax.plot([0,        cx - gap], [cy, cy],      **kw)
+    ax.plot([cx + gap, n - 1],   [cy, cy],       **kw)
+    ax.plot([cx, cx],  [0,        cy - gap],     **kw)
+    ax.plot([cx, cx],  [cy + gap, n - 1],        **kw)
+
+    # ── Scale bar ─────────────────────────────────────────────────────────────
+    _add_scale_bar(ax, n, size_arcsec, VIS_PIXEL_SCALE, color=crosshair_color)
+
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
@@ -216,25 +566,6 @@ def make_cutout_image(fits_path: Path, ra: float, dec: float,
 
 
 # ── Contact sheet ────────────────────────────────────────────────────────────
-
-def save_cmap_legend(output_dir: Path) -> None:
-    fig, ax = plt.subplots(figsize=(4, 0.6))
-    fig.subplots_adjust(left=0.05, right=0.95, top=0.55, bottom=0.0)
-    cbar = fig.colorbar(
-        plt.cm.ScalarMappable(cmap="coolwarm",
-                              norm=plt.Normalize(vmin=0, vmax=1)),
-        cax=ax, orientation="horizontal",
-    )
-    cbar.set_ticks([0, 0.5, 1])
-    cbar.set_ticklabels(["point-like (star)", "intermediate", "extended (galaxy)"])
-    cbar.ax.tick_params(labelsize=8)
-    ax.set_title("Crosshair colour = Gaia corrected BP/RP excess (c_star)",
-                 fontsize=8, pad=4)
-    out = output_dir / "crosshair_cmap_legend.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved cmap legend: {out}")
-
 
 def make_contact_sheet(cell_images: list, out_stem: Path,
                        ncols: int = 5, max_rows: int = 6) -> None:
@@ -252,9 +583,42 @@ def make_contact_sheet(cell_images: list, out_stem: Path,
             if i < len(page_imgs):
                 ax.imshow(page_imgs[i])
             ax.axis("off")
+        # Fixed-height header: 0.55" regardless of figure height, so the
+        # colorbar and suptitle look the same on tall (many-row) and short sheets.
+        fig_h_in  = 5.0 * nrows
+        header_in = 1.2                       # physical header height in inches
+        top_frac  = 1.0 - header_in / fig_h_in
+        _ih       = header_in / fig_h_in       # header as figure fraction
+
+        fig.subplots_adjust(top=top_frac, bottom=0.01, left=0.01, right=0.99,
+                            hspace=0.05, wspace=0.05)
+
+        # ── P(gal) colorbar — left side of header, same height as suptitle ────
+        # All sizes anchored to physical inches so every sheet looks identical.
+        legend_w  = 0.28
+        legend_h  = 0.15 / fig_h_in           # ~0.15" bar height → ~15 px at 100 dpi
+        legend_x  = 0.07
+        # Leave 0.20" of clearance above subplots for tick labels below the bar
+        legend_y  = top_frac + 0.20 / fig_h_in
+
+        # Suptitle anchored to bar centre so they always sit on the same line
+        sup_y = legend_y + legend_h * 0.5
+
         plt.suptitle(f"Page {pi} / {len(pages)}  ({len(page_imgs)} sources)",
-                     fontsize=10, y=1.002)
-        plt.tight_layout()
+                     fontsize=10, y=sup_y)
+
+        cbar_ax = fig.add_axes([legend_x, legend_y, legend_w, legend_h])
+        cbar = fig.colorbar(
+            plt.cm.ScalarMappable(cmap="coolwarm_r",
+                                  norm=plt.Normalize(vmin=0, vmax=1)),
+            cax=cbar_ax, orientation="horizontal",
+        )
+        cbar.set_ticks([0, 0.5, 1])
+        cbar.set_ticklabels(["star", "0.5", "galaxy"])
+        cbar.ax.tick_params(labelsize=7, pad=1)
+        cbar_ax.set_title("XGBoost P(gal) — crosshair colour",
+                           fontsize=7, pad=3, loc="left")
+
         plt.savefig(out_path, dpi=100, bbox_inches="tight")
         plt.close()
         print(f"  Contact sheet: {out_path}")
@@ -268,12 +632,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--per-cell", type=int, default=30,
                    help="Max sources per (category × cluster) cell (default: 30).")
-    p.add_argument("--size-arcsec", type=float, default=6.0,
-                   help="VIS cutout size in arcsec (default: 6.0).")
     p.add_argument("--seed",       type=int, default=42)
     p.add_argument("--dpi",        type=int, default=75)
     p.add_argument("--no-cutouts", action="store_true",
                    help="Skip cutout downloads; just show cluster assignment stats.")
+    p.add_argument("--no-color", action="store_true",
+                   help="Skip NISP color composites; produce grayscale VIS cutouts only.")
     return p.parse_args()
 
 
@@ -299,7 +663,7 @@ def main() -> int:
     labels_path = ARRAYS_DIR / "q1_cluster_labels.npy"
     if not labels_path.exists():
         print(f"ERROR: {labels_path} not found.")
-        print("  Run: python src/compute_q1_clusters.py")
+        print("  Run: python src/analyze_umap_q1_clusters.py")
         return 1
     q1_labels = np.load(labels_path)
     cluster_ids = sorted(set(q1_labels[q1_labels >= 0]))
@@ -322,8 +686,9 @@ def main() -> int:
     ra       = ed["ra"].astype(float) if "ra" in ed else None
     dec      = ed["dec"].astype(float) if "dec" in ed else None
     desi_z   = ed["desi_z"].astype(float) if "desi_z" in ed else None
-    cls_star = ed["class_star"].astype(float) if "class_star" in ed else None
-    c_star   = ed["corrected_bp_rp_excess"].astype(float) if "corrected_bp_rp_excess" in ed else None
+    cls_star   = ed["class_star"].astype(float) if "class_star" in ed else None
+    c_star     = ed["corrected_bp_rp_excess"].astype(float) if "corrected_bp_rp_excess" in ed else None
+    flux_radius = ed["flux_radius"].astype(float) if "flux_radius" in ed else None
 
     if ra is None or dec is None:
         print("ERROR: ero_desi.npz missing RA/Dec. Re-run analyze_umap_query.py.")
@@ -331,6 +696,11 @@ def main() -> int:
 
     n_total = len(cat_vals)
     print(f"  {n_total:,} sources  (cat=2: {(cat_vals==2).sum():,},  cat=3: {(cat_vals==3).sum():,})")
+
+    # ── XGBoost P(galaxy) predictions ───────────────────────────────────────
+    print("\n  Running XGBoost ensemble predictions...")
+    xgb_pgal = predict_pgal(ed_X)
+    print(f"  P(gal): min={np.nanmin(xgb_pgal):.3f}  median={np.nanmedian(xgb_pgal):.3f}  max={np.nanmax(xgb_pgal):.3f}")
 
     # ── 4. Project into UMAP space ───────────────────────────────────────────
     print("\n[4] Projecting into UMAP space...")
@@ -357,10 +727,16 @@ def main() -> int:
         "desi_z": desi_z if desi_z is not None else np.nan,
         "corrected_bp_rp_excess": c_star if c_star is not None else np.nan,
         "phot_g_mean_mag": gmag if gmag is not None else np.nan,
+        "flux_radius": flux_radius if flux_radius is not None else np.nan,
+        "xgb_pgal": xgb_pgal,
         "umap1": emb[:, 0], "umap2": emb[:, 1],
         "cluster": clusters,
         "field": fields,
     })
+    _has_flux_radius = flux_radius is not None and np.any(np.isfinite(flux_radius))
+    if not _has_flux_radius:
+        print("  NOTE: flux_radius not in npz — using fixed --size-arcsec for all sources.")
+        print("        Re-run query_umap_array.py with PGUSER to enable dynamic sizing.")
 
     print("\n  Cluster assignment summary:")
     for v in sorted(CATEGORY_DIRS.keys()):
@@ -380,7 +756,6 @@ def main() -> int:
 
     # ── 6. Download cutouts per (category × cluster) ─────────────────────────
     print("\n[6] Downloading cutouts per (category × cluster) cell...")
-    save_cmap_legend(OUTPUT_DIR)
     rng = np.random.default_rng(args.seed)
 
     for cat_val in sorted(CATEGORY_DIRS.keys()):
@@ -400,9 +775,16 @@ def main() -> int:
         else:
             df_cat = df_cat.sort_values("class_star", ascending=True)
 
-        # Pre-cache FITS for all needed fields
+        # Pre-cache VIS FITS (and NISP if --color) for all needed fields
         needed_fields = [f for f in df_cat["field"].unique() if f in FIELD_TO_FILENAME]
-        fits_map: dict[str, Path | None] = {f: get_cached_fits(f) for f in needed_fields}
+        fits_map:   dict[str, Path | None] = {f: get_cached_fits(f) for f in needed_fields}
+        nisp_j_map: dict[str, Path | None] = {}
+        nisp_h_map: dict[str, Path | None] = {}
+        if not args.no_color:
+            print(f"    Pre-caching NISP-J and NISP-H for {len(needed_fields)} field(s)...")
+            for f in needed_fields:
+                nisp_j_map[f] = get_nisp_fits(f, "J")
+                nisp_h_map[f] = get_nisp_fits(f, "H")
 
         for k in cluster_ids:
             cell_df = df_cat[df_cat["cluster"] == k]
@@ -435,16 +817,29 @@ def main() -> int:
                     status, message = "skipped", f"no FITS for field '{field}'"
                 else:
                     try:
-                        c_val = row["corrected_bp_rp_excess"]
-                        c_val = float(c_val) if pd.notna(c_val) and np.isfinite(c_val) else None
+                        pgal  = row["xgb_pgal"]
+                        c_val = float(pgal) if pd.notna(pgal) and np.isfinite(float(pgal)) else None
                         g_str = f"G={row['phot_g_mean_mag']:.2f}" if pd.notna(row['phot_g_mean_mag']) else ""
                         sid = str(row.get('g_source_id', row.get('source_id', '')))
+
+                        # Dynamic cutout size from flux_radius when available
+                        fr = row.get("flux_radius", np.nan)
+                        if pd.notna(fr) and np.isfinite(float(fr)) and float(fr) > 0:
+                            size = float(np.clip(
+                                float(fr) * VIS_PIXEL_SCALE * SIZE_SCALE,
+                                SIZE_MIN, SIZE_MAX,
+                            ))
+                        else:
+                            size = SIZE_MIN
+
                         title = (f"{cat_label}  cluster{k}\n"
                                  f"RA={float(row['ra']):.4f}  Dec={float(row['dec']):+.4f}\n"
                                  f"{g_str}  id={sid}")
                         img = make_cutout_image(
                             fits_path, float(row["ra"]), float(row["dec"]),
-                            args.size_arcsec, title, dpi=args.dpi, c_star=c_val,
+                            size, title, dpi=args.dpi, c_star=c_val,
+                            fits_path_nisp_j=nisp_j_map.get(field) if not args.no_color else None,
+                            fits_path_nisp_h=nisp_h_map.get(field) if not args.no_color else None,
                         )
                         indiv_path = cutouts_subdir / f"cutout_{local_idx:04d}.png"
                         plt.imsave(str(indiv_path), img)

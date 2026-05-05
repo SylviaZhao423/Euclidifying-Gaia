@@ -101,6 +101,7 @@ def load_allphz_from_npz() -> pd.DataFrame:
     data = np.load(ARRAYS_DIR / "q1_allphz.npz", allow_pickle=True)
     df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
     df["phz"] = data["phz"].astype(int)
+    df["phz_gal_prob"] = data["phz_gal_prob"].astype(float)
     return df
 
 
@@ -116,7 +117,8 @@ def _project(df_sub, q1_mean, q1_std, reducer, max_n=MAX_PER_CLASS):
     std_safe = np.where(q1_std > 0, q1_std, 1.0)
     X_scaled = (X - q1_mean) / std_safe
     X_scaled = np.where(np.isfinite(X_scaled), X_scaled, 0.0)
-    return reducer.transform(X_scaled), len(df_sub)
+    gal_prob = df_sub["phz_gal_prob"].values if "phz_gal_prob" in df_sub.columns else None
+    return reducer.transform(X_scaled), len(df_sub), gal_prob
 
 
 def main() -> int:
@@ -158,8 +160,8 @@ def main() -> int:
             print(f"  phz={phz_val}: no sources, skipping")
             continue
         label = PHZ_MAP.get(phz_val, QSO_MAP.get(phz_val, (str(phz_val), None)))[0]
-        emb, n_used = _project(sub, q1_mean, q1_std, reducer)
-        embeddings[phz_val] = (emb, n_used)
+        emb, n_used, gal_prob = _project(sub, q1_mean, q1_std, reducer)
+        embeddings[phz_val] = (emb, n_used, gal_prob)
         print(f"  phz={phz_val:>3} {label:22s}: {n_used:,} sources projected")
 
     # ── Plot setup ────────────────────────────────────────────────────────────
@@ -179,8 +181,14 @@ def main() -> int:
     cmap_pgal     = _get_cmap("RdYlBu_r", bad_alpha_zero=True)
 
     # ── Summary column histograms ─────────────────────────────────────────────
-    # Row-1 summary: Q1 density
-    H_q1, _, _ = np.histogram2d(q1_emb[:, 0], q1_emb[:, 1],
+    # Row-1 summary: density of ALL projected PHZ sources (not the original Q1 50k)
+    all_projected = [emb for emb, _, _ in embeddings.values()]
+    if all_projected:
+        all_proj_emb = np.vstack(all_projected)
+    else:
+        all_proj_emb = q1_emb  # fallback
+    n_projected_total = len(all_proj_emb)
+    H_q1, _, _ = np.histogram2d(all_proj_emb[:, 0], all_proj_emb[:, 1],
                                  bins=[x_edges, y_edges])
     H_q1 = np.where(H_q1 > 0, H_q1, np.nan)
     q1_dens_norm = LogNorm(vmin=np.nanmin(H_q1), vmax=np.nanmax(H_q1))
@@ -199,7 +207,7 @@ def main() -> int:
             else:
                 histograms["QSO"] = np.full((n_bins, n_bins), np.nan)
         elif key in embeddings:
-            emb, _ = embeddings[key]
+            emb, _, _ = embeddings[key]
             H, _, _ = np.histogram2d(emb[:, 0], emb[:, 1],
                                      bins=[x_edges, y_edges])
             histograms[key] = np.where(H > 0, H, np.nan)
@@ -273,23 +281,32 @@ def main() -> int:
                    c=Q1_BG, s=2, alpha=0.4, linewidths=0,
                    label=f"Q1 all (n={len(q1_y):,})", zorder=1)
 
-    # ── Summary col, row 0: phz_gal_prob scatter ─────────────────────────────
+    # ── Summary col, row 0: projected all-PHZ sources coloured by phz_gal_prob ─
+    all_proj_emb_list = []
+    all_proj_gal_prob_list = []
+    for emb, _, gal_prob in embeddings.values():
+        if gal_prob is not None:
+            all_proj_emb_list.append(emb)
+            all_proj_gal_prob_list.append(gal_prob)
+    all_proj_emb_pgal = np.vstack(all_proj_emb_list) if all_proj_emb_list else q1_emb
+    all_proj_gal_prob = np.concatenate(all_proj_gal_prob_list) if all_proj_gal_prob_list else phz_gal_prob
+
     rng_sum = np.random.RandomState(0)
-    idx_sum = np.arange(len(q1_y))
+    idx_sum = np.arange(len(all_proj_emb_pgal))
     if len(idx_sum) > 15_000:
         idx_sum = rng_sum.choice(idx_sum, 15_000, replace=False)
-    sc0 = ax_sum0.scatter(q1_emb[idx_sum, 0], q1_emb[idx_sum, 1],
-                          c=phz_gal_prob[idx_sum], cmap=cmap_pgal,
+    sc0 = ax_sum0.scatter(all_proj_emb_pgal[idx_sum, 0], all_proj_emb_pgal[idx_sum, 1],
+                          c=all_proj_gal_prob[idx_sum], cmap=cmap_pgal,
                           vmin=0, vmax=1, s=3, alpha=0.6, linewidths=0,
                           rasterized=True)
     fig.colorbar(sc0, ax=ax_sum0, label="PHZ P(galaxy)", pad=0.02, fraction=0.046)
-    _style_sum(ax_sum0, f"Q1: PHZ P(galaxy)  (n={len(q1_y):,})")
+    _style_sum(ax_sum0, f"All PHZ projected: P(galaxy)  (n={len(all_proj_emb_pgal):,})")
 
     # ── Summary col, row 1: Q1 density ────────────────────────────────────────
     sc1 = ax_sum1.pcolormesh(x_edges, y_edges, H_q1.T,
                               cmap=cmap_dens_q1, norm=q1_dens_norm, rasterized=True)
     fig.colorbar(sc1, ax=ax_sum1, label="Count (log)", pad=0.02, fraction=0.046)
-    _style_sum(ax_sum1, f"Q1: source density  (n={len(q1_y):,})")
+    _style_sum(ax_sum1, f"All PHZ projected density  (n={n_projected_total:,})")
 
     # ── Row 0: phz=1, 2, 3 ───────────────────────────────────────────────────
     for col, phz_val in enumerate([1, 2, 3]):
@@ -298,7 +315,7 @@ def main() -> int:
         label, color = PHZ_MAP[phz_val]
         n = embeddings[phz_val][1] if phz_val in embeddings else 0
         if phz_val in embeddings:
-            emb, _ = embeddings[phz_val]
+            emb, _, _ = embeddings[phz_val]
             alpha = 0.3 if phz_val in (1, 2) else 0.7
             ax.scatter(emb[:, 0], emb[:, 1], c=color, s=6, alpha=alpha,
                        linewidths=0, label=f"{label} (n={n:,})", zorder=3)
@@ -307,7 +324,7 @@ def main() -> int:
         ax_d = dn_axes[0][col]
         H = histograms[phz_val]
         sc2 = ax_d.pcolormesh(x_edges, y_edges, H.T,
-                              cmap=cmap_dens, norm=shared_norm, rasterized=True)
+                              cmap=cmap_dens, norm=shared_norm, rasterized=True, alpha=0.7)
         _style_dn(ax_d)
         fig.colorbar(sc2, ax=ax_d, label="Count (log)", pad=0.02, fraction=0.046)
 
@@ -318,7 +335,7 @@ def main() -> int:
         label, color = PHZ_MAP[phz_val]
         n = embeddings[phz_val][1] if phz_val in embeddings else 0
         if phz_val in embeddings:
-            emb, _ = embeddings[phz_val]
+            emb, _, _ = embeddings[phz_val]
             ax.scatter(emb[:, 0], emb[:, 1], c=color, s=6, alpha=0.7,
                        linewidths=0, label=f"{label} (n={n:,})", zorder=3)
         _style_sc(ax, f"phz={phz_val} — {label}  (n={n:,})")
@@ -326,7 +343,7 @@ def main() -> int:
         ax_d = dn_axes[1][col]
         H = histograms[phz_val]
         sc2 = ax_d.pcolormesh(x_edges, y_edges, H.T,
-                              cmap=cmap_dens, norm=shared_norm, rasterized=True)
+                              cmap=cmap_dens, norm=shared_norm, rasterized=True, alpha=0.7)
         _style_dn(ax_d)
         fig.colorbar(sc2, ax=ax_d, label="Count (log)", pad=0.02, fraction=0.046)
 
@@ -336,7 +353,7 @@ def main() -> int:
     for phz_val, (label, color) in QSO_MAP.items():
         if phz_val not in embeddings:
             continue
-        emb, n = embeddings[phz_val]
+        emb, n, _ = embeddings[phz_val]
         ax.scatter(emb[:, 0], emb[:, 1], c=color, s=6, alpha=0.8,
                    linewidths=0, label=f"{label} phz={phz_val} (n={n:,})", zorder=3)
     n_qso_total = sum(embeddings[v][1] for v in QSO_MAP if v in embeddings)
@@ -345,7 +362,7 @@ def main() -> int:
     ax_d = dn_axes[1][2]
     H = histograms["QSO"]
     sc2 = ax_d.pcolormesh(x_edges, y_edges, H.T,
-                          cmap=cmap_dens, norm=shared_norm, rasterized=True)
+                          cmap=cmap_dens, norm=shared_norm, rasterized=True, alpha=0.7)
     _style_dn(ax_d)
     fig.colorbar(sc2, ax=ax_d, label="Count (log)", pad=0.02, fraction=0.046)
 

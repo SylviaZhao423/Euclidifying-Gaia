@@ -43,16 +43,15 @@ def query_data(username):
         SELECT
             -2.5 * LOG10({ZPC_IE} * c.m_flux_detection_total) + {ZP_REF} AS ie_mag,
             c.g_phot_g_mean_mag          AS gaia_g,
-            c.p_phz_star_prob            AS star_prob,
+            c.p_phz_gal_prob             AS gal_prob,
             c.p_phz_classification       AS phz_class,
             c.g_corrected_bp_rp_excess   AS c_star,
             {gaia_feat_cols}
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia c
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia c
         WHERE c.m_flux_detection_total > 0
           AND c.m_flux_detection_total IS NOT NULL
-          AND c.m_vis_det = 1
           AND c.g_phot_g_mean_mag IS NOT NULL
-          AND c.p_phz_star_prob IS NOT NULL
+          AND c.p_phz_gal_prob IS NOT NULL
     """
     print("  Querying Q1 PHZ + Gaia...")
     df = pd.read_sql_query(query, conn)
@@ -94,11 +93,11 @@ def plot_dmag_vs_gmag_by_phz(df, output_dir):
         histograms.append((h, xe, ye))
     global_vmax = max(max(vmaxes, default=10), 2)
 
-    # Mean PHZ P_galaxy per bin (all sources with star_prob available, min 3 per bin)
-    base_p = base.dropna(subset=['star_prob'])
+    # Mean PHZ P_galaxy per bin (all sources with gal_prob available, min 3 per bin)
+    base_p = base.dropna(subset=['gal_prob'])
     gx = base_p['gaia_g'].values
     gy = base_p['mag_diff'].values
-    gp = 1.0 - base_p['star_prob'].values   # PHZ P_galaxy
+    gp = base_p['gal_prob'].values   # PHZ P_galaxy (direct)
     xi = np.digitize(gx, xbins) - 1
     yi = np.digitize(gy, ybins) - 1
     valid = (xi >= 0) & (xi < len(xbins)-1) & (yi >= 0) & (yi < len(ybins)-1)
@@ -288,8 +287,8 @@ def plot_xgb_on_q1_by_phz(df, output_dir):
             vals_neg, vals_pos = neg['xgb_q1_prob'], pos['xgb_q1_prob']
             xlabel = 'PHZ galaxy probability'
         else:
-            vals_neg, vals_pos = neg['star_prob'], pos['star_prob']
-            xlabel = 'PHZ star probability'
+            vals_neg, vals_pos = neg['gal_prob'], pos['gal_prob']
+            xlabel = 'PHZ galaxy probability (p_phz_gal_prob)'
         ax.hist(vals_neg, bins=prob_bins, alpha=0.6, color='steelblue',
                 label=f'Δmag < 0  N={len(neg):,}')
         ax.hist(vals_pos, bins=prob_bins, alpha=0.6, color='coral',

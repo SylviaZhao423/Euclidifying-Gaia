@@ -83,11 +83,11 @@ def query_q1(username, test_mode=False):
                 WHEN p_phz_classification = 1 THEN 'STAR'
                 WHEN p_phz_classification = 2 THEN 'GALAXY'
             END AS label
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia_sep
         WHERE p_phz_classification IN (1, 2)
           AND g_phot_g_mean_mag >= {MAG_CUT}
           AND g_phot_g_mean_mag <= {MAG_CUT_FAINT}
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     if test_mode:
         query += " LIMIT 10000"
@@ -134,12 +134,12 @@ def query_q1_extrap(username):
                 WHEN p_phz_classification = 1 THEN 'STAR'
                 WHEN p_phz_classification = 2 THEN 'GALAXY'
             END AS label
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia_sep
         WHERE p_phz_classification IN (1, 2)
           AND g_phot_g_mean_mag IS NOT NULL
           AND g_phot_g_mean_mag >= 15
           AND ({where_extrap})
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print(f"  Querying Q1 extrapolation sources (outside {_mag_range()})...")
     df = pd.read_sql_query(query, conn)
@@ -167,10 +167,10 @@ def query_q1_population(username):
                 WHEN p_phz_classification IN (4, 8) THEN 'QSO_GC'
                 ELSE 'UNCLASSIFIED'
             END AS label
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia
         WHERE g_phot_g_mean_mag IS NOT NULL
           AND g_phot_g_mean_mag >= 15
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print("  Querying Q1 population (G >= 15, all classes)...")
     df = pd.read_sql_query(query, conn)
@@ -351,7 +351,7 @@ def plot_feature_importance(importances, feature_names, output_dir, metrics_summ
     cv_s = cv[order]
 
     n = len(feats)
-    fig, ax = plt.subplots(figsize=(18, max(8, n * 0.38)))
+    fig, ax = plt.subplots(figsize=(10, max(6, n * 0.38)))
 
     cv_abs_max = 0.5
     norm = plt.Normalize(vmin=0, vmax=cv_abs_max)
@@ -363,9 +363,9 @@ def plot_feature_importance(importances, feature_names, output_dir, metrics_summ
         error_kw={'elinewidth': 1.2, 'ecolor': 'black'},
     )
     ax.set_yticks(range(n))
-    ax.set_yticklabels([f'#{i+1}  {f}' for i, f in enumerate(feats)], fontsize=9)
+    ax.set_yticklabels([f'#{i+1}  {f}' for i, f in enumerate(feats)], fontsize=10)
     ax.invert_yaxis()
-    ax.set_xlabel('Feature Importance  (mean ± 1σ across seeds)', fontsize=11, fontweight='bold')
+    ax.set_xlabel('Feature importance  (mean ± 1σ across seeds)', fontsize=13, fontweight='bold')
     ax.set_xlim(0, 0.5)
     ax.set_xticks(np.arange(0, 0.51, 0.1))
     ax.grid(alpha=0.3, axis='x')
@@ -401,8 +401,10 @@ def plot_feature_importance(importances, feature_names, output_dir, metrics_summ
             bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='#bbbbbb', alpha=0.95),
         )
 
+    ax.tick_params(axis='x', labelsize=12)
+
     title = f'Q1 Model Feature Importance Stability  ({len(imp)} seeds, {_mag_range()})'
-    plt.suptitle(title, fontsize=13, fontweight='bold', y=0.96)
+    plt.suptitle(title, fontsize=14, fontweight='bold', y=0.96)
     plt.tight_layout()
 
     out = output_dir / 'q1_feature_importance.png'
@@ -694,7 +696,7 @@ def main():
     if args.faint_cut is not None:
         MAG_CUT_FAINT = args.faint_cut
 
-    OUTPUT_DIR      = PROJECT_DIR / 'output' / 'xgboost_q1' / _mag_range_dir()
+    OUTPUT_DIR      = PROJECT_DIR / 'output' / 'xgboost_q1'
     SEED_MODELS_DIR = OUTPUT_DIR / 'seed_models'
 
     username = os.getenv('PGUSER')
@@ -725,8 +727,6 @@ def main():
     all_importances = []
     all_models = []
     all_test_idx = []
-    all_y_test_proba = []
-    y_test_ref = None
     split_summary = None
     idx_all = np.arange(len(X))
 
@@ -764,9 +764,6 @@ def main():
         all_metrics.append(metrics_clean)
         all_importances.append(model.feature_importances_)
         all_models.append(model)
-        all_y_test_proba.append(model.predict_proba(X_test)[:, 1])
-        if y_test_ref is None:
-            y_test_ref = y_test
 
         if seed == 42:
             split_summary = {
@@ -779,6 +776,12 @@ def main():
         model_path = SEED_MODELS_DIR / f'xgb_classifier_q1_seed{seed}.json'
         model.get_booster().save_model(str(model_path))
         print(f"  -> {model_path}")
+
+    # ── Ensemble prediction on fixed seed-42 test split ───────────────────────
+    _, _, X_test_ref, _, _, y_test_ref = split_data(X, y, seed=42)
+    all_y_test_proba = []
+    for m in all_models:
+        all_y_test_proba.append(m.predict_proba(X_test_ref)[:, 1])
 
     # ── Step 5: Save baseline model / seed metrics ───────────────────────────
     print("\n[5] Saving model...")

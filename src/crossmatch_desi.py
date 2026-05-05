@@ -3,17 +3,13 @@
 Join DESI-confirmed galaxy tables with existing Euclid/Gaia crossmatch tables.
 
 All joins are direct ID matches (no positional matching needed):
-  Q1 : desi_q1_galaxies.euclid_object_id  =  crossmatch_q1_*.m_object_id
-  ERO: desi_ero_galaxies.ero_objid         =  crossmatch_ero_gaia_0_3.e_ero_objid
+  Q1 : desi_q1_galaxies.euclid_object_id  =  crossmatch_q1_mer_phz_vis_gaia_sep.m_object_id
+  ERO: desi_ero_galaxies.v_objid           =  crossmatch_ero_gaia_0_3.e_v_objid
 
-Creates three tables (DESI columns prefixed with d_):
+Creates two tables (DESI columns prefixed with d_):
 
-  {username}.crossmatch_q1_mer_phz_desi
-      Q1 MER + PHZ classifications for DESI-confirmed galaxies.
-      Use for: studying PHZ selection effects against spectroscopic truth.
-
-  {username}.crossmatch_q1_mer_phz_gaia_desi
-      Q1 MER + PHZ + Gaia features for DESI-confirmed galaxies.
+  {username}.crossmatch_q1_mer_phz_vis_gaia_sep_desi
+      Q1 MER + PHZ + Gaia features (vis_det=1, sep≤0.3") for DESI-confirmed galaxies.
       Use for: XGBoost training/testing with spectroscopic ground truth.
 
   {username}.crossmatch_ero_gaia_0_3_desi
@@ -74,43 +70,26 @@ def main():
         cols = get_columns(conn, username, table_suffix)
         return ", ".join([f'd."{c}" AS d_{c}' for c in cols if c not in exclude])
 
-    # ── 1. crossmatch_q1_mer_phz_desi ────────────────────────────────
-    print("\n[1] crossmatch_q1_mer_phz_desi")
-    print("    Q1 MER + PHZ  ×  DESI Q1 (join on object_id)")
+    # ── 1. crossmatch_q1_mer_phz_vis_gaia_sep_desi ─────────────────
+    print("\n[1] crossmatch_q1_mer_phz_vis_gaia_sep_desi")
+    print("    Q1 MER + PHZ + Gaia (vis, sep)  ×  DESI Q1 (join on object_id)")
     desi_q1_cols = desi_cols(conn, "desi_q1_galaxies", exclude=["euclid_object_id"])
     n = create_table(conn,
-        f"{username}.crossmatch_q1_mer_phz_desi",
+        f"{username}.crossmatch_q1_mer_phz_vis_gaia_sep_desi",
         f"""
-        CREATE TABLE {username}.crossmatch_q1_mer_phz_desi AS
+        CREATE TABLE {username}.crossmatch_q1_mer_phz_vis_gaia_sep_desi AS
         SELECT
             q.*,
             {desi_q1_cols}
-        FROM {username}.crossmatch_q1_mer_phz AS q
+        FROM {username}.crossmatch_q1_mer_phz_vis_gaia_sep AS q
         INNER JOIN {username}.desi_q1_galaxies AS d
             ON q.m_object_id = d.euclid_object_id
         """,
     )
     print(f"    -> {n:,} rows")
 
-    # ── 2. crossmatch_q1_mer_phz_gaia_desi ───────────────────────────
-    print("\n[2] crossmatch_q1_mer_phz_gaia_desi")
-    print("    Q1 MER + PHZ + Gaia  ×  DESI Q1 (join on object_id)")
-    n = create_table(conn,
-        f"{username}.crossmatch_q1_mer_phz_gaia_desi",
-        f"""
-        CREATE TABLE {username}.crossmatch_q1_mer_phz_gaia_desi AS
-        SELECT
-            q.*,
-            {desi_q1_cols}
-        FROM {username}.crossmatch_q1_mer_phz_gaia AS q
-        INNER JOIN {username}.desi_q1_galaxies AS d
-            ON q.m_object_id = d.euclid_object_id
-        """,
-    )
-    print(f"    -> {n:,} rows")
-
-    # ── 3. crossmatch_ero_gaia_0_3_desi ──────────────────────────────
-    print("\n[3] crossmatch_ero_gaia_0_3_desi")
+    # ── 2. crossmatch_ero_gaia_0_3_desi ──────────────────────────────
+    print("\n[2] crossmatch_ero_gaia_0_3_desi")
     print("    ERO + Gaia  ×  DESI ERO (join on ero_objid)")
     desi_ero_cols = desi_cols(conn, "desi_ero_galaxies", exclude=["ero_objid"])
     n = create_table(conn,
@@ -131,8 +110,7 @@ def main():
 
     print("\n" + "=" * 65)
     print("Done. Tables created:")
-    print(f"  {username}.crossmatch_q1_mer_phz_desi")
-    print(f"  {username}.crossmatch_q1_mer_phz_gaia_desi")
+    print(f"  {username}.crossmatch_q1_mer_phz_vis_gaia_sep_desi")
     print(f"  {username}.crossmatch_ero_gaia_0_3_desi")
     print("\nAll DESI columns are prefixed d_  (e.g. d_desi_z, d_desi_spectype)")
     print("=" * 65)

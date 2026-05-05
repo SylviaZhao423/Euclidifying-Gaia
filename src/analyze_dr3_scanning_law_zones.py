@@ -185,7 +185,7 @@ def plot_scanning_law_with_zones(scan_map, nside, output_path):
 
     excluded = ~((ecl_lat > 45) & (gal_lat > 10))
     hp.projscatter(ra_m[excluded], dec_m[excluded], lonlat=True, coord='CG',
-                   color='deepskyblue', alpha=1, s=1, marker='s',
+                   color='deepskyblue', alpha=0.6, s=1, marker='s',
                    edgecolors='none', zorder=5)
 
     # ── Latitude boundary lines ─────────────────────────────────────────

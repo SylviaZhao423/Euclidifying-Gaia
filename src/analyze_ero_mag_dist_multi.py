@@ -152,10 +152,9 @@ def query_q1_data(username):
                 ELSE 'UNCLASSIFIED'
             END AS phz_class,
             COUNT(*) AS cnt
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis
         WHERE m_flux_detection_total > 0
           AND m_flux_detection_total IS NOT NULL
-          AND m_vis_det = 1
         GROUP BY bin_idx, phz_class
         ORDER BY bin_idx
     """

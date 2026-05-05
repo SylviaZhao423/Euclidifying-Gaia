@@ -180,12 +180,11 @@ def _run_pipeline(
                                   bins=[x_edges, y_edges])
         return np.where(H > 0, H, np.nan)
 
-    H_q1      = _hist(q1_emb,  np.ones(len(q1_y),  dtype=bool))
     H_ero_all = _hist(ero_emb, np.ones(len(ero_y), dtype=bool))
     H_ero_str = _hist(ero_emb, ero_y == 0)
     H_ero_gal = _hist(ero_emb, ero_y == 1)
 
-    q1_dens_norm = LogNorm(vmin=np.nanmin(H_q1), vmax=np.nanmax(H_q1))
+    ero_all_norm = LogNorm(vmin=np.nanmin(H_ero_all), vmax=np.nanmax(H_ero_all))
 
     finite_ero  = [h for h in [H_ero_all, H_ero_str, H_ero_gal]
                    if not np.all(np.isnan(h))]
@@ -210,11 +209,11 @@ def _run_pipeline(
     ax_str_d  = fig.add_subplot(gs[1, 2])
     ax_gal_d  = fig.add_subplot(gs[1, 3])
 
-    # Col 0: Q1 source density
-    sc_q1 = ax_q1_d.pcolormesh(x_edges, y_edges, H_q1.T,
-                                cmap=cmap_dens_q1, norm=q1_dens_norm, rasterized=True)
+    # Col 0: All ERO projected density
+    sc_q1 = ax_q1_d.pcolormesh(x_edges, y_edges, H_ero_all.T,
+                                cmap=cmap_dens_q1, norm=ero_all_norm, rasterized=True, alpha=0.7)
     fig.colorbar(sc_q1, ax=ax_q1_d, label="Count (log)", pad=0.02, fraction=0.046)
-    _style_sum(ax_q1_d, f"Q1: source density  (n={len(q1_y):,})")
+    _style_sum(ax_q1_d, f"All ERO projected density  (n={len(ero_y):,})")
 
     # Q1 background helper
     def _bg(ax):
@@ -253,7 +252,7 @@ def _run_pipeline(
         (ax_gal_d, H_ero_gal),
     ]:
         sc2 = ax_d.pcolormesh(x_edges, y_edges, H.T,
-                              cmap=cmap_dens, norm=shared_norm, rasterized=True)
+                              cmap=cmap_dens, norm=shared_norm, rasterized=True, alpha=0.7)
         _style_dn(ax_d)
         fig.colorbar(sc2, ax=ax_d, label="Count (log)", pad=0.02, fraction=0.046)
 
@@ -287,8 +286,8 @@ def main() -> int:
           f"(STAR={(q1_y==0).sum():,}  GALAXY={(q1_y==1).sum():,})")
 
     tasks = [
-        ("ero_indiv.npz",            "q1_space_ero.png"),
-        ("ero_indiv_rebalanced.npz", "q1_space_ero_rebalanced.png"),
+        ("ero_regular.npz",  "q1_space_ero.png"),
+        ("ero_rebal.npz",   "q1_space_ero_rebalanced.png"),
     ]
 
     ok_any = False

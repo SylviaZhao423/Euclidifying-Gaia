@@ -65,7 +65,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
 CUTOUTS_DIR = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "desi"
 
-# Q1 PHZ codes (9-class scheme from crossmatch_q1_mer_phz_gaia)
+# Q1 PHZ codes (9-class scheme from crossmatch_q1_mer_phz_vis_gaia)
 # phz=2 is the "agree" case; all others are disagreements with DESI galaxy label.
 CATEGORY_DIRS = {
      2: "agree_both_gal",
@@ -114,6 +114,11 @@ def load_desi_sources(phz_values: list[int]) -> pd.DataFrame:
     df["phz"]             = phz_arr[mask]
     df["d_desi_z"]        = data["desi_z"].astype(float)[mask]
     df["d_desi_spectype"] = data["spectype"][mask]
+
+    # XGBoost P(gal) from the Q1 seed ensemble
+    from save_q1_utils import predict_pgal
+    X = data["X_features"][mask].astype(float)
+    df["xgb_pgal"] = predict_pgal(X)
 
     for col in SELECTED_GAIA_PARAMETERS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -207,7 +212,7 @@ def main() -> int:
     labels_path = ARRAYS_DIR / "q1_cluster_labels.npy"
     if not labels_path.exists():
         print(f"ERROR: {labels_path} not found.")
-        print("  Run first:  python src/compute_q1_clusters.py")
+        print("  Run first:  python src/analyze_umap_q1_clusters.py")
         return 1
     q1_labels = np.load(labels_path)
     cluster_ids = sorted(set(q1_labels[q1_labels >= 0]))
@@ -295,7 +300,7 @@ def main() -> int:
                 cell_df,
                 output_dir=cluster_dir,
                 size_arcsec=args.size_arcsec,
-                c_star_col="corrected_bp_rp_excess",
+                c_star_col="xgb_pgal",
                 title_fn=_make_title(v, lbl, k),
                 tiles=tiles,
                 contact_sheet_stem="contact_sheet",

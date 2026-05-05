@@ -156,7 +156,13 @@ def _prepare_fields(fields_dict):
 # ── Sky image ───────────────────────────────────────────────────────────────
 
 def _blacken_outside_ellipse(img_path):
-    """Set pixels outside the Aitoff ellipse to black."""
+    """Set pixels outside the Aitoff ellipse to black, then normalize brightness.
+
+    hips2fits auto-scales colour HiPS without pinnable parameters, so the
+    download can be bright or dark depending on server state.  We apply an
+    adaptive gamma to the inside pixels so the median always lands at ~17
+    (matching the canonical dark Gaia all-sky appearance).
+    """
     from PIL import Image
     img = Image.open(img_path)
     arr = np.array(img)
@@ -169,6 +175,17 @@ def _blacken_outside_ellipse(img_path):
     cy, cx = IMG_CRPIX[1] - 0.5, IMG_CRPIX[0] - 0.5  # 0-indexed
     yy, xx = np.mgrid[:h, :w]
     outside = ((xx - cx) / semi_a) ** 2 + ((yy - cy) / semi_b) ** 2 > 1
+
+    # Adaptive gamma: normalise so median inside pixel ≈ 17 (dark sky target)
+    inside_vals = arr[~outside].astype(np.float32)
+    current_median = float(np.median(inside_vals))
+    TARGET_MEDIAN = 32.0
+    if current_median > TARGET_MEDIAN * 1.1 and current_median < 255:
+        gamma = np.log(TARGET_MEDIAN / 255.0) / np.log(current_median / 255.0)
+        arr_f = arr.astype(np.float32) / 255.0
+        arr_f = np.power(np.clip(arr_f, 1e-6, 1.0), gamma) * 255.0
+        arr = arr_f.clip(0, 255).astype(np.uint8)
+
     arr[outside] = [8, 8, 8]  # match body background #080808
     img_out = Image.fromarray(arr)
     img_out.save(img_path, quality=92)
@@ -690,6 +707,8 @@ function resizeCanvases() {{
   var dpr = window.devicePixelRatio || 1;
   glCanvas.width = w * dpr;
   glCanvas.height = h * dpr;
+  glCanvas.style.width = w + 'px';
+  glCanvas.style.height = h + 'px';
   srcCanvas.width = w * dpr;
   srcCanvas.height = h * dpr;
   srcCanvas.style.width = w + 'px';
@@ -1515,7 +1534,7 @@ def main() -> int:
     print("[4] Building HTML ...")
     html = build_html(df, hilat_df=hilat_df, sky_b64=sky_b64, q1_base=q1_base)
 
-    out_path = OUTPUT_DIR / "sky_umap.html"
+    out_path = OUTPUT_DIR / "umap_sky.html"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
     sz_mb = out_path.stat().st_size / 1e6

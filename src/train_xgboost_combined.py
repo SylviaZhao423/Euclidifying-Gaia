@@ -81,10 +81,10 @@ def query_dataset(username, data_source, test_mode=False):
                     WHEN p_phz_classification = 1 THEN 'STAR'
                     WHEN p_phz_classification = 2 THEN 'GALAXY'
                 END as label
-            FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+            FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia_sep
             WHERE p_phz_classification IN (1, 2)
                 AND g_phot_g_mean_mag >= {MAG_CUT}
-            ORDER BY g_source_id
+            ORDER BY g_random_index
         """
     else:  # ero
         query = f"""
@@ -98,7 +98,7 @@ def query_dataset(username, data_source, test_mode=False):
             FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
             WHERE e_v_class_star IS NOT NULL
                 AND g_phot_g_mean_mag >= {MAG_CUT}
-            ORDER BY g_source_id
+            ORDER BY g_random_index
         """
 
     if test_mode:

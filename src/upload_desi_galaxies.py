@@ -147,7 +147,7 @@ def main():
         print(f"  {username}.{table_suffix}")
     print("\nNext step: create crossmatch tables joining these with")
     print("  crossmatch_ero_gaia_0_3  (via position, q3c)")
-    print("  crossmatch_q1_mer_phz_gaia  (via euclid_gaia_id = g_source_id)")
+    print("  crossmatch_q1_mer_phz_vis_gaia_sep  (via euclid_object_id = m_object_id)")
     print("=" * 65)
 
 

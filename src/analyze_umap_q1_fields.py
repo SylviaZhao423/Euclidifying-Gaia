@@ -18,7 +18,7 @@ Layout: 2 rows × 4 cols
 
 Reads:
   output/umap/arrays/q1_indiv.npz
-  DB: siwei_zhao_2025.crossmatch_q1_mer_phz_gaia  (RA/Dec lookup)
+  DB: siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia  (RA/Dec lookup)
 
 Writes:
   output/umap/q1_individual/q1_space_fields.png
@@ -212,7 +212,7 @@ def main() -> int:
     H_all = np.where(H_all > 0, H_all, np.nan)
     all_norm = LogNorm(vmin=np.nanmin(H_all), vmax=np.nanmax(H_all))
     sc_sum = ax_sum.pcolormesh(x_edges, y_edges, H_all.T,
-                               cmap=cmap_dens, norm=all_norm, rasterized=True)
+                               cmap=cmap_dens, norm=all_norm, rasterized=True, alpha=0.7)
     fig.colorbar(sc_sum, ax=ax_sum, label="Count (log)", pad=0.02, fraction=0.046)
     _style_sum(ax_sum, f"Q1: source density  (n={len(q1_y):,})")
 
@@ -239,7 +239,7 @@ def main() -> int:
         ax_d = dn_axes[col]
         H    = histograms[fname]
         sc2  = ax_d.pcolormesh(x_edges, y_edges, H.T,
-                               cmap=cmap_dens, norm=shared_norm, rasterized=True)
+                               cmap=cmap_dens, norm=shared_norm, rasterized=True, alpha=0.7)
         _style_dn(ax_d)
         fig.colorbar(sc2, ax=ax_d, label="Count (log)", pad=0.02, fraction=0.046)
 

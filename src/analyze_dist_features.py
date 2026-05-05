@@ -54,7 +54,7 @@ def query_dataset(username, data_source):
                     WHEN p_phz_classification = 1 THEN 'STAR'
                     WHEN p_phz_classification = 2 THEN 'GALAXY'
                 END AS label
-            FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+            FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia
             WHERE p_phz_classification IN (1, 2)
               AND g_phot_g_mean_mag >= {MAG_CUT}
             ORDER BY g_source_id

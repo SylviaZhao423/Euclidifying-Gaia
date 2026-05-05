@@ -61,11 +61,10 @@ def query_mag_dist_by_class(username, gaia_matched_only=False, use_gaia_mag=Fals
     class_filter = 'AND p_phz_classification IN (1, 2, 4)' if classified_only else ''
 
     if gaia_matched_only:
-        table_name = 'siwei_zhao_2025.crossmatch_q1_mer_phz_gaia'
+        table_name = 'siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia'
         flux_col = 'm_flux_detection_total'
         extra_filter = (f'AND g_phot_g_mean_mag IS NOT NULL'
                         f' AND p_phz_classification IS NOT NULL'
-                        f' AND m_vis_det = 1'
                         f' {class_filter}')
         if use_gaia_mag:
             mag_expr = 'g_phot_g_mean_mag'
@@ -86,12 +85,11 @@ def query_mag_dist_by_class(username, gaia_matched_only=False, use_gaia_mag=Fals
             extra_filter += f' AND {flux_col} > 0 AND {flux_col} IS NOT NULL'
             print(f"Querying GAIA-MATCHED (Q1 IE mag)...")
     else:
-        table_name = 'siwei_zhao_2025.crossmatch_q1_mer_phz'
+        table_name = 'siwei_zhao_2025.crossmatch_q1_mer_phz_vis'
         flux_col = 'm_flux_detection_total'
         mag_expr = f'-2.5 * LOG10({ZPC_IE} * {flux_col}) + {ZP_REF}'
         mag_label = 'Q1 IE mag'
         extra_filter = (f'AND {flux_col} > 0 AND {flux_col} IS NOT NULL'
-                        f' AND m_vis_det = 1'
                         f' {class_filter}')
         label = 'classified only' if classified_only else 'all'
         print(f"Querying ALL Q1+PHZ ({label}) from {table_name}...")

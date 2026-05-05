@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Post-process 3d_umap.html: externalize embedded image data for web deployment.
+Post-process umap_3d.html: externalize embedded image data for web deployment.
 
-Reads the monolithic 3d_umap.html (~430 MB, mostly base64 cutout/contact-sheet
+Reads the monolithic umap_3d.html (~430 MB, mostly base64 cutout/contact-sheet
 images) and produces a deployable directory:
 
-    output/umap/q1_individual/web/
+    output/umap/q1_individual/web_3d/
         index.html          (~17 MB — plot data + JS code)
         data/
             cutouts.json
@@ -17,7 +17,7 @@ served from any static host (GitHub Pages, Netlify, Cloudflare Pages, etc.).
 
 Usage:
     python src/export_web_3d.py
-    # then:  cd output/umap/q1_individual/web && python -m http.server 8000
+    # then:  cd output/umap/q1_individual/web_3d && python -m http.server 8100
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ import sys
 import time
 from pathlib import Path
 
-INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "3d_umap.html"
-OUTDIR = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "web"
+INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "umap_3d.html"
+OUTDIR = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "web_3d"
 
 # Loaded at startup (contact sheets for transposition + cutouts for hover).
 # Plot initialises only after all of these arrive.
@@ -169,7 +169,7 @@ function _updateLoadHint(name) {
   if (_loadedCount < _totalEager) {
     el.innerHTML = 'Loading image data... <span style="color:#666">' + _loadedCount + '/' + _totalEager + '</span>';
   } else {
-    el.textContent = 'hover a point \\u00b7 click to pin';
+    el.textContent = 'hover a point \\u00b7 double-click to pin';
   }
 }
 function _jfetch(name) {
@@ -250,8 +250,8 @@ var _dataReady = Promise.all([
     print(f"    ─────────────────────────────")
     print(f"    total: {total/1e6:.1f} MB")
     print(f"\n  To test locally:")
-    print(f"    cd {OUTDIR} && python -m http.server 8000")
-    print(f"    # then open http://localhost:8000")
+    print(f"    cd {OUTDIR} && python -m http.server 8100")
+    print(f"    # then open http://localhost:8100")
     return 0
 
 

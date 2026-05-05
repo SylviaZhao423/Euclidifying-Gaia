@@ -1,0 +1,18 @@
+%!TEX root = ../thesis.tex
+%*******************************************************************************
+%*********************************** First Chapter *****************************
+%*******************************************************************************
+
+\chapter{Introduction}
+\label{section1}
+Experimental particle physics today focuses on observing interactions between elementary particles, most of which are well-described by the Standard Model. However, certain observations remain unexplained and point towards new physics beyond the Standard Model - one of the primary motivations driving current research in the field.
+
+To explore these phenomena, experiments require high-energy particles and large statistics, which in turn demand large particle colliders with high luminosity and highly sensitive detectors. The Large Hadron Collider (LHC) is one such facility\cite{LHCTDR}. Large-scale projects like the LHC often takes years or even decades to plan and build. During this time, new technologies may be developed with improved performance. The silicon sensors for particle tracking is an example of such technological evolution\cite{SiliconSensor}. 
+
+The current implementation of silicon sensors at the LHC uses hybrid sensors, where the sensing element and the readout electronics are fabricated on separate chips. One major drawback of this approach is the need for fine-pitch bump bonding in pixelated sensors, which significantly adds to both the material and cost budgets. A new sensor concept called high-voltage monolithic active-pixel sensor (HV-MAPS) in complementary metal-oxide-semiconductor (CMOS) technology, was proposed by Ivan Perić in 2007\cite{HVMAPS2}. Since then, several families of sensors have been developed based on this concept\cite{Mu3e}\cite{ATLASPix}\cite{MupixATLASPix}.
+
+This project aims to contribute to one of the target applications of HV-MAPS: the pixelated area on the Mighty Tracker of the LHCb detector, at the LHC\cite{TDR}. Specifically, the time resolution of the target sensor, MightyPix\cite{Mightypix}, was studied through the test beam performance of a sister sensor, TelePix2\cite{Telepix}.
+
+Chapter 2 introduces the Mighty Tracker in the context of the LHC and the LHCb experiment, providing the background and motivation for the development of MightyPix. The theoretical foundation of CMOS HV-MAPS is presented in Chapter 3.
+
+Chapter 4 outlines the test beam setup and describes the methods used for event reconstruction using the Corryvreckan framework\cite{Corry}. The results of the analysis are summarised and discussed in Chapter 5, followed by the overall conclusions in Chapter 6.

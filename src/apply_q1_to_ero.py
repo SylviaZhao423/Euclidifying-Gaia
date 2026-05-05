@@ -104,7 +104,7 @@ def query_ero(username):
             e_v_flux_radius
         FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
         WHERE e_v_class_star IS NOT NULL
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print("  Querying full ERO data (no Gaia G cut)...")
     df = pd.read_sql_query(query, conn)
@@ -127,10 +127,9 @@ def query_q1(username):
         SELECT
             g_phot_g_mean_mag  AS gaia_g,
             p_phz_classification AS phz_class
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia
         WHERE m_flux_detection_total > 0
           AND m_flux_detection_total IS NOT NULL
-          AND m_vis_det = 1
           AND g_phot_g_mean_mag    IS NOT NULL
     """
     print("  Querying Q1 data...")

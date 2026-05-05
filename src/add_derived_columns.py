@@ -23,7 +23,7 @@ WSDB_DB = 'wsdb'
 
 # Tables to update
 TABLES = [
-    'siwei_zhao_2025.crossmatch_q1_mer_phz_gaia',
+    'siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia_sep',
     'siwei_zhao_2025.crossmatch_ero_gaia_0_3',
 ]
 

@@ -6,7 +6,7 @@ Produces:
   ero_0_1_0_15_arcsec_clump_pm2d.png
 
 Usage:
-    PGUSER=siwei_zhao_2025 python src/analyze_ero_0_1_0_15_arcsec_clump_pm2d.py
+    PGUSER=siwei_zhao_2025 python src/temp/ppt_analyze_ero_0_1_0_15_arcsec_clump_pm2d.py
 """
 
 import matplotlib.pyplot as plt

@@ -1,0 +1,21 @@
+%!TEX root = ../thesis.tex
+%*******************************************************************************
+%*********************************** Sixth Chapter *****************************
+%*******************************************************************************
+
+\chapter{Conclusion}
+\label{section6}
+%The performance of TelePix2 was evaluated using test beam data collected at DESY in May 2024. The setup featured three MuPix11 telescope planes with MuDAQ readout, a scintillator, and a 4 GeV electron beam. Event reconstruction was carried out by the Corryvreckan framework.
+
+A detailed analysis was conducted on the time-over-threshold (ToT) and cluster size distributions across runs with thresholds ranging from 140-180 DAC and bias voltages 40-85 V (pixel), 120-130 V (chip). The ToT distributions were fitted with Landau–Gaussian convolutions to extract their peak values, which were found to increase with bias voltage and decrease with higher thresholds, in line with expectations. Mean cluster sizes exhibited a minimum around a threshold of 155 DAC, with the position of this minimum shifting toward higher values as the bias voltage increased. This is due to noise clustered to real signals at lower thresholds, and real clusters being cut away at higher thresholds. %, and aligns with patterns observed in independent studies of TelePix2.
+
+
+The efficiency of TelePix2 was also evaluated, suggesting high efficiency ($\geq$96\%) with bias $\geq$ 85 V and threshold 140-160 DAC. The configuration with 130 V chip bias and 140 DAC threshold was selected for the time resolution measurement. Under these conditions, the impact of time-walk effect was small - only around 1\% of the data points fall below a ToT value of 500 ns, and the magnitude of the shift is negligible. The resulting time resolution was measured to be $2.656 \pm 0.003$ ns, meeting the 3 ns requirement. However, time-walk effects become more pronounced at thresholds above 150 DAC, in which case corrections would be necessary.
+
+
+Future studies can proceed along several directions. On the experimental side, a wider scan of bias voltages - beyond the limited range available in this study - should be conducted. Additionally, performing test beam experiments with X-ray sources could enable calibration of ToT with respect to deposited energy. 
+
+
+On the analysis side, it would be valuable to investigate how time resolution depends on both bias voltage and threshold. Time-walk corrections should be applied to datasets where the effect becomes non-negligible. These analyses can be carried out using existing data and scripts. In addition, the quality of the Landau-Gaussian fits can be improved by further optimising the initial fitting parameters. 
+
+In the longer term, when more MightyPix sensors become available, direct testing under conditions representative of LHCb environment should be undertaken to evaluate their performance.

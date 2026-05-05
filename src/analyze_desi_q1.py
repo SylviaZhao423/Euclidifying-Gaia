@@ -83,7 +83,7 @@ def query_q1_bg(username):
             c.p_phz_classification  AS phz_class,
             c.g_phot_g_mean_mag     AS gaia_g,
             c.g_corrected_bp_rp_excess AS c_star
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_gaia c
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia c
         WHERE c.m_flux_detection_total > 0
           AND c.g_phot_g_mean_mag IS NOT NULL
     """
@@ -107,7 +107,7 @@ def query_desi_dmag(username):
             d.d_desi_z,
             d.d_desi_deltachi2
         FROM siwei_zhao_2025.crossmatch_q1_mer_phz_desi d
-        JOIN siwei_zhao_2025.crossmatch_q1_mer_phz_gaia g
+        JOIN siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia g
           ON d.m_right_ascension = g.m_right_ascension
          AND d.m_declination     = g.m_declination
         WHERE d.m_flux_detection_total > 0

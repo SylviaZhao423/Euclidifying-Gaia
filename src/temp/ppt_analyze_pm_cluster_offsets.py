@@ -6,7 +6,7 @@ Produces:
   ero_gaia_pm_cluster_offsets.png
 
 Usage:
-    PGUSER=siwei_zhao_2025 python src/analyze_pm_cluster_offsets.py
+    PGUSER=siwei_zhao_2025 python src/temp/ppt_analyze_pm_cluster_offsets.py
 """
 
 import psycopg2
