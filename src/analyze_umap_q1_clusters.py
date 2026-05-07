@@ -99,7 +99,7 @@ def plot_clusters(emb: np.ndarray, labels: np.ndarray, y: np.ndarray,
     from matplotlib.lines import Line2D as L2D
 
     fig_c, (ax_cl, ax_pg) = plt.subplots(1, 2, figsize=(12, 5))
-    fig_c.subplots_adjust(wspace=0.28)
+    fig_c.subplots_adjust(wspace=0.26)
 
     # Left panel: cluster labels (same as fig1)
     noise_mask_c = labels == -1
@@ -145,7 +145,7 @@ def plot_clusters(emb: np.ndarray, labels: np.ndarray, y: np.ndarray,
                           c=pgal[idx_pg], cmap="RdYlBu_r",
                           vmin=0, vmax=1, s=0.6, alpha=0.6,
                           linewidths=0, rasterized=True)
-    cb_pg = fig_c.colorbar(sc_pg, ax=ax_pg, pad=0.02, fraction=0.046)
+    cb_pg = fig_c.colorbar(sc_pg, ax=ax_pg, pad=0.06, fraction=0.046)
     cb_pg.set_label("PHZ P(galaxy)", fontsize=12, fontweight="bold")
     cb_pg.ax.tick_params(labelsize=11)
     ax_pg.set_xlabel("UMAP 1", fontsize=13, fontweight="bold")

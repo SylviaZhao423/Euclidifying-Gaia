@@ -53,9 +53,9 @@ EDGE_GAP = 0.06
 def draw_decision_node(ax, x, y, text, w=2.4, h=NODE_H):
     box = FancyBboxPatch((x - w/2, y - h/2), w, h,
                           boxstyle=f"round,pad={NODE_PAD}",
-                          facecolor=NODE_COL, edgecolor=EDGE_COL, linewidth=1.5)
+                          facecolor=NODE_COL, edgecolor=EDGE_COL, linewidth=2.0)
     ax.add_patch(box)
-    ax.text(x, y, text, ha='center', va='center', fontsize=9.5,
+    ax.text(x, y, text, ha='center', va='center', fontsize=14,
             fontweight='bold', color=TEXT_COL)
 
 def _box_bottom(y):
@@ -66,7 +66,7 @@ def _box_top(y):
 
 def draw_edge_box_to_box(ax, x1, y1, x2, y2):
     ax.plot([x1, x2], [_box_bottom(y1), _box_top(y2)],
-            color=EDGE_COL, lw=1.3, solid_capstyle='round')
+            color=EDGE_COL, lw=1.8, solid_capstyle='round')
 
 def draw_edge_box_to_circle(ax, x1, y1, x2, y2):
     x_start, y_start = x1, _box_bottom(y1)
@@ -75,7 +75,7 @@ def draw_edge_box_to_circle(ax, x1, y1, x2, y2):
     cx = x2 + (CIRCLE_R + EDGE_GAP) * np.cos(angle)
     cy = y2 + (CIRCLE_R + EDGE_GAP) * np.sin(angle)
     ax.plot([x_start, cx], [y_start, cy],
-            color=EDGE_COL, lw=1.3, solid_capstyle='round')
+            color=EDGE_COL, lw=1.8, solid_capstyle='round')
 
 def draw_yn(ax, x1, y1, x2, y2, label):
     y_top = _box_bottom(y1)
@@ -83,8 +83,8 @@ def draw_yn(ax, x1, y1, x2, y2, label):
     mx = (x1 + x2) / 2
     my = (y_top + y_bot) / 2
     # Push label away from the edge line
-    offset = -0.32 if x2 < x1 else 0.32
-    ax.text(mx + offset, my, label, fontsize=9.5, ha='center',
+    offset = -0.38 if x2 < x1 else 0.38
+    ax.text(mx + offset, my, label, fontsize=14, ha='center',
             va='center', color=EDGE_COL, fontweight='bold')
 
 def draw_bright_star(ax, x, y, size=0.25):
@@ -132,7 +132,7 @@ def draw_source_group(ax, x, y, sources, circle=False):
         fn(ax, x + dx, y + dy)
 
 def score_label(ax, x, y, text, color):
-    ax.text(x, y, text, fontsize=11, fontweight='bold',
+    ax.text(x, y, text, fontsize=16, fontweight='bold',
             ha='center', va='center', color=color)
 
 
@@ -145,10 +145,10 @@ T1_R = T1X + 1.8   # right child x
 T1_LL = T1X - 3.0  # bottom-left leaf
 T1_LR = T1X - 0.6  # bottom-right leaf
 
-ax.text(T1X, Y_TITLE, 'Tree 1', fontsize=13, fontweight='bold',
+ax.text(T1X, Y_TITLE, 'Tree 1', fontsize=18, fontweight='bold',
         ha='center', va='center', color=TEXT_COL)
 
-draw_decision_node(ax, T1X, Y_ROOT, 'proper motion / error > 3 ?', w=3.0)
+draw_decision_node(ax, T1X, Y_ROOT, 'proper motion / error > 3 ?', w=3.8)
 
 # Root → children
 draw_edge_box_to_box(ax, T1X, Y_ROOT, T1_L, Y_MID)
@@ -157,7 +157,7 @@ draw_yn(ax, T1X, Y_ROOT, T1_L, Y_MID, 'Y')
 draw_yn(ax, T1X, Y_ROOT, T1_R, Y_MID, 'N')
 
 # Left child: second decision
-draw_decision_node(ax, T1_L, Y_MID, 'RUWE < 1.4 ?', w=1.8)
+draw_decision_node(ax, T1_L, Y_MID, 'RUWE < 1.4 ?', w=2.2)
 
 # Right leaf: galaxies
 draw_source_group(ax, T1_R, Y_MID,
@@ -192,10 +192,10 @@ ax.plot([7, 7], [Y_SEP, Y_TITLE + 0.2], color='#BDC3C7', lw=1.0, ls=':')
 T2_L = T2X - 1.6
 T2_R = T2X + 1.6
 
-ax.text(T2X, Y_TITLE, 'Tree 2', fontsize=13, fontweight='bold',
+ax.text(T2X, Y_TITLE, 'Tree 2', fontsize=18, fontweight='bold',
         ha='center', va='center', color=TEXT_COL)
 
-draw_decision_node(ax, T2X, Y_ROOT, 'G flux / error > 100 ?')
+draw_decision_node(ax, T2X, Y_ROOT, 'G flux / error > 100 ?', w=3.2)
 
 draw_edge_box_to_circle(ax, T2X, Y_ROOT, T2_L, Y_MID)
 draw_edge_box_to_circle(ax, T2X, Y_ROOT, T2_R, Y_MID)
@@ -225,29 +225,29 @@ COL_ARR = 6.0
 COL_RES = 8.8
 
 # Row 1: galaxy example
-ax.text(COL_F, Y_SUM1, 'f (', fontsize=12, ha='center', va='center',
+ax.text(COL_F, Y_SUM1, 'f (', fontsize=16, ha='center', va='center',
         color=TEXT_COL, fontweight='bold')
 draw_bright_galaxy(ax, COL_ICO, Y_SUM1)
 ax.text(COL_EQ, Y_SUM1, ') = +1.5 + 0.5 = +2.0',
-        fontsize=11, ha='left', va='center', color=TEXT_COL, fontweight='bold')
+        fontsize=15, ha='left', va='center', color=TEXT_COL, fontweight='bold')
 ax.text(COL_ARR, Y_SUM1, '\u2192   \u03c3(+2.0) \u2248 0.88',
-        fontsize=11, ha='left', va='center', color=SCORE_POS,
+        fontsize=15, ha='left', va='center', color=SCORE_POS,
         fontweight='bold')
 ax.text(COL_RES, Y_SUM1, '\u2192  Galaxy candidate',
-        fontsize=11, ha='left', va='center', color=SCORE_POS,
+        fontsize=15, ha='left', va='center', color=SCORE_POS,
         fontweight='bold', style='italic')
 
 # Row 2: star example
-ax.text(COL_F, Y_SUM2, 'f (', fontsize=12, ha='center', va='center',
+ax.text(COL_F, Y_SUM2, 'f (', fontsize=16, ha='center', va='center',
         color=TEXT_COL, fontweight='bold')
 draw_bright_star(ax, COL_ICO, Y_SUM2)
 ax.text(COL_EQ, Y_SUM2, ') = \u22122.0 + 0.5 = \u22121.5',
-        fontsize=11, ha='left', va='center', color=TEXT_COL, fontweight='bold')
+        fontsize=15, ha='left', va='center', color=TEXT_COL, fontweight='bold')
 ax.text(COL_ARR, Y_SUM2, '\u2192   \u03c3(\u22121.5) \u2248 0.18',
-        fontsize=11, ha='left', va='center', color=SCORE_NEG,
+        fontsize=15, ha='left', va='center', color=SCORE_NEG,
         fontweight='bold')
 ax.text(COL_RES, Y_SUM2, '\u2192  Star',
-        fontsize=11, ha='left', va='center', color=SCORE_NEG,
+        fontsize=15, ha='left', va='center', color=SCORE_NEG,
         fontweight='bold', style='italic')
 
 
@@ -257,23 +257,23 @@ ax.text(COL_RES, Y_SUM2, '\u2192  Star',
 
 ax.plot([0.3, 12.7], [Y_LEG + 0.35, Y_LEG + 0.35], color='#BDC3C7', lw=0.5)
 
-# Centre the legend row: total content ~10 units wide, canvas is 13
-lx = 1.5
-spc = [0, 0.55, 2.2, 2.8, 4.8, 6.2, 8.1]  # offsets for each element
+# Centre the legend row
+lx = 0.8
+spc = [0, 0.55, 2.0, 2.6, 4.8, 6.8, 9.5]  # offsets for each element
 
 draw_bright_star(ax, lx + spc[0], Y_LEG)
-ax.text(lx + spc[1], Y_LEG, '= Star', fontsize=10, ha='left', va='center',
+ax.text(lx + spc[1], Y_LEG, '= Star', fontsize=14, ha='left', va='center',
         color='#555555', fontweight='bold')
 
 draw_bright_galaxy(ax, lx + spc[2], Y_LEG)
-ax.text(lx + spc[3], Y_LEG, '= Galaxy', fontsize=10, ha='left', va='center',
+ax.text(lx + spc[3], Y_LEG, '= Galaxy', fontsize=14, ha='left', va='center',
         color='#555555', fontweight='bold')
 
-ax.text(lx + spc[4], Y_LEG, 'Leaf scores:', fontsize=10, ha='left',
+ax.text(lx + spc[4], Y_LEG, 'Leaf scores:', fontsize=14, ha='left',
         va='center', color='#555555', fontweight='bold')
-ax.text(lx + spc[5], Y_LEG, '+ve \u2192 galaxy', fontsize=10, ha='left',
+ax.text(lx + spc[5], Y_LEG, '+ve \u2192 galaxy', fontsize=14, ha='left',
         va='center', color=SCORE_POS, fontweight='bold')
-ax.text(lx + spc[6], Y_LEG, '\u2212ve \u2192 star', fontsize=10, ha='left',
+ax.text(lx + spc[6], Y_LEG, '\u2212ve \u2192 star', fontsize=14, ha='left',
         va='center', color=SCORE_NEG, fontweight='bold')
 
 
@@ -288,9 +288,9 @@ print("  [1/2] xgboost_concept saved")
 #  FIGURE 3: Pipeline only (concept style)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-fig3, ax3 = plt.subplots(1, 1, figsize=(13, 3.3))
+fig3, ax3 = plt.subplots(1, 1, figsize=(13, 2.5))
 ax3.set_xlim(0, 13)
-ax3.set_ylim(0, 5.8)
+ax3.set_ylim(2.0, 5.8)
 ax3.axis('off')
 
 # ── Reusable box helper (concept style: round,pad=0.1, lw=1.5) ──
@@ -382,25 +382,17 @@ ax3.text(sig_x3, pipe_y3 - 0.2, 'logistic', ha='center', va='center',
          fontsize=9, fontweight='bold', color='#666666')
 
 # Arrow down -> P(galaxy)
-ax3.annotate('', xy=(sig_x3, pipe_y3 - 1.05), xytext=(sig_x3, pipe_y3 - 0.75),
-             arrowprops=dict(arrowstyle='->', color=SCORE_POS, lw=1.8))
-ax3.text(sig_x3, pipe_y3 - 1.35, 'P(galaxy)', fontsize=11, fontweight='bold',
+ax3.annotate('', xy=(sig_x3, pipe_y3 - 1.12), xytext=(sig_x3, pipe_y3 - 0.64),
+             arrowprops=dict(arrowstyle='->', color=SCORE_POS, lw=2,
+                             mutation_scale=15))
+ax3.text(sig_x3, pipe_y3 - 1.3, 'P(galaxy)', fontsize=14, fontweight='bold',
          ha='center', va='center', color=SCORE_POS)
 
-# Caption box
-ax3.text(6.5, 1.4,
-    'Each tree is trained on the residual errors of the previous ensemble.\n'
-    'The final prediction sums all tree outputs and applies a logistic function\n'
-    '\u03c3 to produce P(galaxy) \u2208 [0, 1] for each source.',
-    fontsize=10, ha='center', va='center', color='#444444',
-    bbox=dict(boxstyle='round,pad=0.4', facecolor='#FEF9E7',
-              edgecolor='#F0E68C', alpha=0.8),
-    linespacing=1.5, fontweight='bold')
 
 # Footnote
-ax3.text(6.5, 0.1,
+ax3.text(6.5, 1.9,
     'preliminary configuration for feature selection: N = 200 trees, max depth = 8, learning rate \u03b7 = 0.1, feature subsample = 0.8',
-    fontsize=9, ha='center', va='center', color='#777777', style='italic')
+    fontsize=11, ha='center', va='center', color='#777777', style='italic')
 
 # ── Save combined ──
 fig3.savefig('/Users/sylviazhao/Downloads/III/Euclidifying-Gaia/output/xgboost_combined.png',

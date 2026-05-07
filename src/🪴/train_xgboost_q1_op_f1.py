@@ -218,113 +218,117 @@ def evaluate(model, X_test, y_test):
 # Plotting
 # =============================================================================
 
-def plot_threshold_analysis(y_test, y_proba_seeds, output_dir):
-    """Precision / Recall / F1 vs threshold on Q1 test set.
-    Uses mean probability across all seed models.
-    2×2 grid:
-      [0,0] P_gal distribution on test set (split by true label)
-      [0,1] Precision / Recall / F1 vs threshold
-      [1,0] ROC curve
-      [1,1] Precision-Recall curve
-    Output: q1_threshold_analysis.png
-    """
+def plot_threshold_analysis(X, y, all_models, seeds, output_dir):
+    """Per-seed threshold analysis (no leakage). Same as train_xgboost_q1.py."""
     from sklearn.metrics import roc_curve, auc, precision_recall_curve
 
-    y_proba = np.mean(y_proba_seeds, axis=0)   # ensemble mean
     thresholds = np.linspace(0, 1, 201)
+    bins = np.linspace(0, 1, 101)
+    n_seeds = len(seeds)
 
-    prec_list, rec_list, f1_list = [], [], []
-    for t in thresholds:
-        pred = (y_proba >= t).astype(int)
-        tp = ((pred == 1) & (y_test == 1)).sum()
-        fp = ((pred == 1) & (y_test == 0)).sum()
-        fn = ((pred == 0) & (y_test == 1)).sum()
-        p = tp / (tp + fp) if (tp + fp) > 0 else np.nan
-        r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        prec_list.append(p)
-        rec_list.append(r)
-        f1_list.append(2*p*r/(p+r) if (p + r) > 0 else 0.0)
+    hist_star_sum = np.zeros(len(bins) - 1)
+    hist_gal_sum  = np.zeros(len(bins) - 1)
+    all_prec = np.zeros((n_seeds, len(thresholds)))
+    all_rec  = np.zeros((n_seeds, len(thresholds)))
+    all_f1   = np.zeros((n_seeds, len(thresholds)))
+    n_star_total, n_gal_total = 0, 0
+    y_test_42, y_proba_42 = None, None
 
-    prec_arr = np.array(prec_list)
-    rec_arr  = np.array(rec_list)
-    f1_arr   = np.array(f1_list)
+    for si, seed in enumerate(seeds):
+        _, _, X_test, _, _, y_test = split_data(X, y, seed)
+        y_proba = all_models[si].predict_proba(X_test)[:, 1]
+        hist_star_sum += np.histogram(y_proba[y_test == 0], bins=bins)[0]
+        hist_gal_sum  += np.histogram(y_proba[y_test == 1], bins=bins)[0]
+        n_star_total += (y_test == 0).sum()
+        n_gal_total  += (y_test == 1).sum()
+        if seed == 42:
+            y_test_42, y_proba_42 = y_test, y_proba
+        for ti, t in enumerate(thresholds):
+            pred = (y_proba >= t).astype(int)
+            tp = ((pred == 1) & (y_test == 1)).sum()
+            fp = ((pred == 1) & (y_test == 0)).sum()
+            fn = ((pred == 0) & (y_test == 1)).sum()
+            p = tp / (tp + fp) if (tp + fp) > 0 else np.nan
+            r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            all_prec[si, ti] = p
+            all_rec[si, ti]  = r
+            all_f1[si, ti]   = 2*p*r/(p+r) if (p + r) > 0 else 0.0
+
+    hist_star_mean = hist_star_sum / n_seeds
+    hist_gal_mean  = hist_gal_sum / n_seeds
+    prec_arr = np.nanmean(all_prec, axis=0)
+    rec_arr  = np.nanmean(all_rec, axis=0)
+    f1_arr   = np.nanmean(all_f1, axis=0)
     best_idx = np.nanargmax(f1_arr)
     best_t   = thresholds[best_idx]
+    n_star_avg = n_star_total // n_seeds
+    n_gal_avg  = n_gal_total // n_seeds
 
-    fpr, tpr, _ = roc_curve(y_test, y_proba)
+    if y_test_42 is None:
+        y_test_42, y_proba_42 = y_test, y_proba
+    fpr, tpr, _ = roc_curve(y_test_42, y_proba_42)
     roc_auc_val = auc(fpr, tpr)
-    pr_prec, pr_rec, pr_thresh = precision_recall_curve(y_test, y_proba)
+    pr_prec, pr_rec, pr_thresh = precision_recall_curve(y_test_42, y_proba_42)
 
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
     fig.subplots_adjust(wspace=0.38)
 
-    # [0] P_gal distribution split by true label
     ax = axes[0]
-    bins = np.linspace(0, 1, 101)
-    ax.hist(y_proba[y_test == 0], bins=bins, color='coral',     alpha=0.6, lw=0,
-            label=f'STAR  (n={( y_test==0).sum():,})')
-    ax.hist(y_proba[y_test == 1], bins=bins, color='steelblue', alpha=0.6, lw=0,
-            label=f'GALAXY  (n={(y_test==1).sum():,})')
-    ax.axvline(0.5,   color='black',        lw=1.5, ls='--', label='Default (0.5)')
-    ax.axvline(best_t, color='mediumseagreen', lw=1.5, ls=':',  label=f'Best F1 ({best_t:.2f})')
-    ax.set_yscale('log')
-    ax.set_xlabel('P_gal', fontsize=11)
-    ax.set_ylabel('Count', fontsize=11)
+    bin_centres = 0.5 * (bins[:-1] + bins[1:])
+    bin_width = bins[1] - bins[0]
+    ax.bar(bin_centres, hist_star_mean, width=bin_width, alpha=0.6, color='coral', edgecolor='none',
+           label=f'STAR  (n={n_star_avg:,})')
+    ax.bar(bin_centres, hist_gal_mean, width=bin_width, alpha=0.6, color='steelblue', edgecolor='none',
+           label=f'GALAXY  (n={n_gal_avg:,})')
+    ax.axvline(0.5, color='black', lw=1.5, ls='--', label='Default (0.5)')
+    ax.axvline(best_t, color='mediumseagreen', lw=1.5, ls=':', label=f'Best F1 ({best_t:.2f})')
+    ax.set_yscale('log'); ax.set_xlabel('P_gal', fontsize=11); ax.set_ylabel('Count', fontsize=11)
     ax.set_title('P_gal distribution — Q1 test set', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9); ax.grid(alpha=0.3)
 
-    # [1] Precision / Recall / F1 vs threshold
     ax = axes[1]
-    ax.plot(thresholds, prec_arr, color='steelblue',      lw=2, label='Precision')
-    ax.plot(thresholds, rec_arr,  color='coral',          lw=2, label='Recall')
-    ax.plot(thresholds, f1_arr,   color='mediumseagreen', lw=2, label='F1')
-    ax.axvline(0.5,   color='black',          lw=1.5, ls='--', label='Default (0.5)')
-    ax.axvline(best_t, color='mediumseagreen', lw=1.5, ls=':',  label=f'Best F1 ({best_t:.2f})')
+    ax.plot(thresholds, prec_arr, color='steelblue', lw=2, label='Precision')
+    ax.plot(thresholds, rec_arr, color='coral', lw=2, label='Recall')
+    ax.plot(thresholds, f1_arr, color='mediumseagreen', lw=2, label='F1')
+    ax.axvline(0.5, color='black', lw=1.5, ls='--', label='Default (0.5)')
+    ax.axvline(best_t, color='mediumseagreen', lw=1.5, ls=':', label=f'Best F1 ({best_t:.2f})')
+    bbox = dict(boxstyle='round,pad=0.15', facecolor='white', edgecolor='none', alpha=1.0)
+    for t_val in [0.5, 0.7, 0.9]:
+        idx_t = np.argmin(np.abs(thresholds - t_val))
+        for arr, color in [(prec_arr, 'steelblue'), (rec_arr, 'coral'), (f1_arr, 'mediumseagreen')]:
+            ax.text(t_val, arr[idx_t], f'{arr[idx_t]:.3f}', fontsize=9, fontweight='bold',
+                    color=color, ha='center', va='center', bbox=bbox, zorder=10)
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-    ax.set_xlabel('P_gal threshold', fontsize=11)
-    ax.set_ylabel('Score', fontsize=11)
+    ax.set_xlabel('P_gal threshold', fontsize=11); ax.set_ylabel('Score', fontsize=11)
     ax.set_title('Metrics vs threshold — Q1 test set', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9, loc='center left'); ax.grid(alpha=0.3)
 
-    # [2] ROC curve
     ax = axes[2]
     ax.plot(fpr, tpr, color='steelblue', lw=2, label=f'ROC  (AUC = {roc_auc_val:.4f})')
     ax.plot([0, 1], [0, 1], color='gray', lw=1, ls='--', label='Random')
-    # Mark operating point at default and best-F1 threshold
-    idx_def  = np.argmin(np.abs(thresholds - 0.5))
-    idx_best = best_idx
-    fpr_c, tpr_c = roc_curve(y_test, y_proba)[:2]
-    # interpolate to get FPR/TPR at our thresholds
-    from scipy.interpolate import interp1d
-    roc_thresh = roc_curve(y_test, y_proba)[2]
-    ax.scatter(fpr[np.argmin(np.abs(roc_thresh - 0.5))],
-               tpr[np.argmin(np.abs(roc_thresh - 0.5))],
-               s=80, color='black',          zorder=6, label=f'Default (0.5)')
-    ax.scatter(fpr[np.argmin(np.abs(roc_thresh - best_t))],
-               tpr[np.argmin(np.abs(roc_thresh - best_t))],
+    roc_thresh = roc_curve(y_test_42, y_proba_42)[2]
+    ax.scatter(fpr[np.argmin(np.abs(roc_thresh - 0.5))], tpr[np.argmin(np.abs(roc_thresh - 0.5))],
+               s=80, color='black', zorder=6, label='Default (0.5)')
+    ax.scatter(fpr[np.argmin(np.abs(roc_thresh - best_t))], tpr[np.argmin(np.abs(roc_thresh - best_t))],
                s=80, color='mediumseagreen', zorder=6, label=f'Best F1 ({best_t:.2f})')
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-    ax.set_xlabel('False Positive Rate', fontsize=11)
-    ax.set_ylabel('True Positive Rate', fontsize=11)
+    ax.set_xlabel('False Positive Rate', fontsize=11); ax.set_ylabel('True Positive Rate', fontsize=11)
     ax.set_title('ROC curve — Q1 test set (GALAXY = positive)', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9); ax.grid(alpha=0.3)
 
-    # [3] Precision-Recall curve
     ax = axes[3]
-    sc = ax.scatter(pr_rec[:-1], pr_prec[:-1], c=pr_thresh,
-                    cmap='viridis', s=8, zorder=5)
+    idx_def = np.argmin(np.abs(thresholds - 0.5))
+    sc = ax.scatter(pr_rec[:-1], pr_prec[:-1], c=pr_thresh, cmap='viridis', s=8, zorder=5)
     fig.colorbar(sc, ax=ax, pad=0.02).set_label('P_gal threshold', fontsize=9)
-    ax.scatter(rec_arr[idx_def],  prec_arr[idx_def],
-               s=80, color='black',          zorder=6, label='Default (0.5)')
-    ax.scatter(rec_arr[best_idx], prec_arr[best_idx],
-               s=80, color='mediumseagreen', zorder=6, label=f'Best F1 ({best_t:.2f})')
+    ax.scatter(rec_arr[idx_def], prec_arr[idx_def], s=80, color='black', zorder=6, label='Default (0.5)')
+    ax.scatter(rec_arr[best_idx], prec_arr[best_idx], s=80, color='mediumseagreen', zorder=6,
+               label=f'Best F1 ({best_t:.2f})')
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-    ax.set_xlabel('Recall', fontsize=11)
-    ax.set_ylabel('Precision', fontsize=11)
+    ax.set_xlabel('Recall', fontsize=11); ax.set_ylabel('Precision', fontsize=11)
     ax.set_title('Precision-Recall curve — Q1 test set', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9); ax.grid(alpha=0.3)
 
-    fig.suptitle(f'Q1 model threshold analysis  (ensemble mean, {len(y_proba_seeds)} seeds)',
+    fig.suptitle(f'Q1 model threshold analysis  (per-seed mean, {n_seeds} seeds)',
                  fontsize=13, fontweight='bold', y=1.01)
     plt.tight_layout()
     out = output_dir / 'q1_threshold_analysis.png'
@@ -773,12 +777,7 @@ def main():
         model.get_booster().save_model(str(model_path))
         print(f"  -> {model_path}")
 
-    # ── Ensemble prediction on fixed seed-42 test split ───────────────────────
-    # Use one consistent test set for threshold analysis (not per-seed splits)
-    _, _, X_test_ref, _, _, y_test_ref = split_data(X, y, seed=42)
-    all_y_test_proba = []
-    for m in all_models:
-        all_y_test_proba.append(m.predict_proba(X_test_ref)[:, 1])
+    # (per-seed evaluation done inside plot_threshold_analysis)
 
     # ── Step 5: Save baseline model / seed metrics ───────────────────────────
     print("\n[5] Saving model...")
@@ -812,7 +811,7 @@ def main():
     )
 
     print("\n[6b] Generating threshold analysis plot...")
-    plot_threshold_analysis(y_test_ref, np.array(all_y_test_proba), OUTPUT_DIR)
+    plot_threshold_analysis(X, y, all_models, seeds, OUTPUT_DIR)
 
     print("\n[6c] Generating per-bin performance plot...")
     extrap = query_q1_extrap(username)

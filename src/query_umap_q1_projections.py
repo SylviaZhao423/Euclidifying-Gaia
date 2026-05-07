@@ -90,10 +90,14 @@ def _xgb_ensemble_pgal(X: np.ndarray) -> np.ndarray:
     if not seed_paths:
         # Fallback to single model
         if MODEL_PATH.exists():
-            bst = xgb.Booster()
-            bst.load_model(str(MODEL_PATH))
-            dmat = xgb.DMatrix(X, feature_names=list(SELECTED_GAIA_PARAMETERS))
-            return bst.predict(dmat)
+            m = xgb.XGBClassifier()
+            m.load_model(str(MODEL_PATH))
+            X_clean = X.astype(np.float32).copy()
+            for c in range(X_clean.shape[1]):
+                bad = ~np.isfinite(X_clean[:, c])
+                if bad.any():
+                    X_clean[bad, c] = np.nanmedian(X_clean[:, c])
+            return m.predict_proba(X_clean)[:, 1]
         return np.full(X.shape[0], np.nan)
 
     X_clean = X.astype(np.float32).copy()

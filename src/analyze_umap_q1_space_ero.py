@@ -104,6 +104,7 @@ def _run_pipeline(
     q1_mean: np.ndarray,
     q1_std: np.ndarray,
     reducer,
+    mag_min: float = None,
 ) -> bool:
     npz_path = ARRAYS_DIR / npz_name
     if not npz_path.exists():
@@ -115,6 +116,19 @@ def _run_pipeline(
     ero       = np.load(npz_path, allow_pickle=True)
     ero_X_raw = ero["X_raw"].astype(float)
     ero_y     = ero["y"]
+    ero_gmag  = ero["g_mag"].astype(float) if "g_mag" in ero else None
+    ero_cs    = ero["class_star"].astype(float) if "class_star" in ero else None
+
+    # Optional magnitude filter
+    if mag_min is not None and ero_gmag is not None:
+        mask = ero_gmag >= mag_min
+        ero_X_raw = ero_X_raw[mask]
+        ero_y     = ero_y[mask]
+        ero_gmag  = ero_gmag[mask]
+        if ero_cs is not None:
+            ero_cs = ero_cs[mask]
+        print(f"  Filtered to G >= {mag_min}: {mask.sum():,} / {len(mask):,} sources")
+
     print(f"  ERO: {len(ero_y):,} sources  "
           f"(STAR={(ero_y==0).sum():,}  GALAXY={(ero_y==1).sum():,})")
 
@@ -224,25 +238,56 @@ def _run_pipeline(
     n_ero_str = (ero_y == 0).sum()
     n_ero_gal = (ero_y == 1).sum()
 
-    # Col 1: ERO all
+    # Col 1: ERO all — coloured by class_star
     _bg(ax_all_sc)
-    pts = _downsample(ero_emb, np.ones(len(ero_y), dtype=bool))
-    ax_all_sc.scatter(pts[:, 0], pts[:, 1], c=ERO_ALL_C, s=6, alpha=0.6,
-                      linewidths=0, label=f"ERO all (n={len(ero_y):,})", zorder=3)
-    _style_sc(ax_all_sc, f"ERO: all  (n={len(ero_y):,})")
+    rng_sc = np.random.RandomState(0)
+    idx_all = rng_sc.permutation(len(ero_emb))
+    if len(idx_all) > MAX_PTS:
+        idx_all = idx_all[:MAX_PTS]
+    if ero_cs is not None:
+        sc_all = ax_all_sc.scatter(ero_emb[idx_all, 0], ero_emb[idx_all, 1],
+                    c=ero_cs[idx_all], cmap="RdYlBu_r", vmin=0, vmax=1,
+                    s=6, alpha=0.6, linewidths=0, zorder=3, rasterized=True)
+        fig.colorbar(sc_all, ax=ax_all_sc, pad=0.02, fraction=0.046, label="class_star")
+    else:
+        ax_all_sc.scatter(ero_emb[idx_all, 0], ero_emb[idx_all, 1],
+                    c=ERO_ALL_C, s=6, alpha=0.6, linewidths=0, zorder=3)
+    _style_sc(ax_all_sc, f"ERO: all by class_star  (n={len(ero_y):,})")
 
-    # Col 2: ERO stars
+    # Col 2: ERO stars — coloured by class_star
     _bg(ax_str_sc)
-    pts = _downsample(ero_emb, ero_y == 0)
-    ax_str_sc.scatter(pts[:, 0], pts[:, 1], c=ERO_STAR_C, s=6, alpha=0.5,
-                      linewidths=0, label=f"ERO STAR (n={n_ero_str:,})", zorder=3)
+    mask_str = ero_y == 0
+    idx_str = np.where(mask_str)[0]
+    rng_sc2 = np.random.RandomState(0)
+    rng_sc2.shuffle(idx_str)
+    if len(idx_str) > MAX_PTS:
+        idx_str = idx_str[:MAX_PTS]
+    if ero_cs is not None:
+        sc_str = ax_str_sc.scatter(ero_emb[idx_str, 0], ero_emb[idx_str, 1],
+                    c=ero_cs[idx_str], cmap="RdYlBu_r", vmin=0, vmax=1,
+                    s=6, alpha=0.5, linewidths=0, zorder=3, rasterized=True)
+        fig.colorbar(sc_str, ax=ax_str_sc, pad=0.02, fraction=0.046, label="class_star")
+    else:
+        ax_str_sc.scatter(ero_emb[idx_str, 0], ero_emb[idx_str, 1],
+                    c=ERO_STAR_C, s=6, alpha=0.5, linewidths=0, zorder=3)
     _style_sc(ax_str_sc, f"ERO: stars  (n={n_ero_str:,})")
 
-    # Col 3: ERO galaxies
+    # Col 3: ERO galaxies — coloured by class_star
     _bg(ax_gal_sc)
-    pts = _downsample(ero_emb, ero_y == 1)
-    ax_gal_sc.scatter(pts[:, 0], pts[:, 1], c=ERO_GAL_C, s=6, alpha=0.5,
-                      linewidths=0, label=f"ERO GALAXY (n={n_ero_gal:,})", zorder=3)
+    mask_gal = ero_y == 1
+    idx_gal = np.where(mask_gal)[0]
+    rng_sc3 = np.random.RandomState(0)
+    rng_sc3.shuffle(idx_gal)
+    if len(idx_gal) > MAX_PTS:
+        idx_gal = idx_gal[:MAX_PTS]
+    if ero_cs is not None:
+        sc_gal = ax_gal_sc.scatter(ero_emb[idx_gal, 0], ero_emb[idx_gal, 1],
+                    c=ero_cs[idx_gal], cmap="RdYlBu_r", vmin=0, vmax=1,
+                    s=6, alpha=0.5, linewidths=0, zorder=3, rasterized=True)
+        fig.colorbar(sc_gal, ax=ax_gal_sc, pad=0.02, fraction=0.046, label="class_star")
+    else:
+        ax_gal_sc.scatter(ero_emb[idx_gal, 0], ero_emb[idx_gal, 1],
+                    c=ERO_GAL_C, s=6, alpha=0.5, linewidths=0, zorder=3)
     _style_sc(ax_gal_sc, f"ERO: galaxies  (n={n_ero_gal:,})")
 
     # Density panels
@@ -285,14 +330,16 @@ def main() -> int:
     print(f"  Q1: {len(q1_y):,} sources  "
           f"(STAR={(q1_y==0).sum():,}  GALAXY={(q1_y==1).sum():,})")
 
+    # (npz_name, out_name, mag_min)
     tasks = [
-        ("ero_regular.npz",  "q1_space_ero.png"),
-        ("ero_rebal.npz",   "q1_space_ero_rebalanced.png"),
+        ("ero_regular.npz",  "q1_space_ero.png",              None),
+        ("ero_regular.npz",  "q1_space_ero_g19.png",          19.0),
     ]
 
     ok_any = False
-    for npz_name, out_name in tasks:
-        if _run_pipeline(npz_name, out_name, q1_emb, q1_y, q1_mean, q1_std, reducer):
+    for npz_name, out_name, mag_min in tasks:
+        if _run_pipeline(npz_name, out_name, q1_emb, q1_y, q1_mean, q1_std, reducer,
+                         mag_min=mag_min):
             ok_any = True
 
     if not ok_any:

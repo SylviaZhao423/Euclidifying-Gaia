@@ -513,7 +513,7 @@ def main():
     # print(f"Saved: {OUTPUT_LABEL}")
 
     # ── Figure 4: Gaia colour indices ─────────────────────────────────────────
-    fig4, axes4 = plt.subplots(1, 3, figsize=(12.4, 4),
+    fig4, axes4 = plt.subplots(1, 3, figsize=(12.4, 3.6),
                                gridspec_kw={"wspace": 0.12})
     fig4.subplots_adjust(left=0.07, right=0.86, top=0.88, bottom=0.14)
     colour_labels = ["BP \u2212 G", "BP \u2212 RP", "G \u2212 RP"]

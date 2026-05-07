@@ -102,7 +102,7 @@ def query_q1(username):
         WHERE p_phz_classification IN (1, 2)
           AND g_phot_g_mean_mag IS NOT NULL
           AND g_phot_g_mean_mag >= 15
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print("  Querying Q1 training data (G >= 15, STAR/GALAXY only)...")
     df = pd.read_sql_query(query, conn)
@@ -132,7 +132,7 @@ def query_q1_population(username):
         FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia
         WHERE g_phot_g_mean_mag IS NOT NULL
           AND g_phot_g_mean_mag >= 15
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print("  Querying Q1 population (G >= 15, all classes)...")
     df = pd.read_sql_query(query, conn)

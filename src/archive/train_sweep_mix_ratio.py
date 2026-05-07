@@ -293,6 +293,8 @@ def main():
                         help='ERO class_star threshold (default: 0.9)')
     parser.add_argument('--threshold-analysis', action='store_true',
                         help='Run P(gal) threshold analysis per ratio using gaia_random.npz')
+    parser.add_argument('--auto-ratios', action='store_true',
+                        help='Auto-compute integer ratios from Q1 baseline to max ERO')
     args = parser.parse_args()
 
     global CLASS_STAR_THRESH
@@ -322,6 +324,19 @@ def main():
     print("\n[2] Querying ERO stars...")
     X_ero, y_ero = query_ero_stars(username, test_mode=args.test_mode)
     print(f"  ERO: {len(X_ero):,} stars")
+
+    # ── Compute dynamic ratio range if --auto-ratios ─────────────────────────
+    if args.auto_ratios:
+        # Max ratio: train split has ~70% of Q1
+        n_train_gal = int(n_q1_galaxy * 0.85 * 0.824)  # 70% after 15% test, 17.6% val
+        n_train_star = int(n_q1_star * 0.85 * 0.824)
+        max_ratio = (n_train_star + len(X_ero)) / max(n_train_gal, 1)
+        min_ratio = int(np.ceil(q1_ratio))  # first integer above Q1 baseline
+        max_ratio_int = int(np.floor(max_ratio))
+        args.ratios = list(range(min_ratio, max_ratio_int + 1))
+        print(f"\n  Auto ratios: {min_ratio}:1 to {max_ratio_int}:1 "
+              f"(max possible {max_ratio:.1f}:1)")
+        print(f"  Ratios: {args.ratios}")
 
     # ── Sweep ────────────────────────────────────────────────────────────────
     all_results = []
@@ -515,6 +530,51 @@ def main():
             plt.savefig(out_plot, dpi=150, bbox_inches='tight')
             plt.close()
             print(f"  -> {out_plot}")
+
+            # ── Bayesian recalibration plot per ratio ────────────────────
+            import matplotlib.cm as cm2
+            import matplotlib.colors as mcolors
+
+            pi_range = np.logspace(-4, -0.3, 500)
+            ratio_labels_used = list(dict.fromkeys(
+                [r['ratio_label'] for _, r in df_thresh.iterrows()]))
+            n_ratios = len(ratio_labels_used)
+            cmap_ratio = cm2.viridis(np.linspace(0, 0.9, n_ratios))
+
+            fig_recal, ax_recal = plt.subplots(1, 1, figsize=(10, 7))
+
+            for i, rlabel in enumerate(ratio_labels_used):
+                sub = df_thresh[df_thresh['ratio_label'] == rlabel]
+                color = cmap_ratio[i]
+                for _, r in sub.iterrows():
+                    t = r['threshold']
+                    tpr, fpr = r['tpr'], r['fpr']
+                    if fpr == 0:
+                        continue
+                    prec = tpr * pi_range / (tpr * pi_range + fpr * (1 - pi_range) + 1e-12)
+                    ls = '-' if t == 0.5 else ('--' if t == 0.7 else ':')
+                    lbl = f"{rlabel}, t={t}" if t == 0.9 else '_'
+                    ax_recal.plot(pi_range * 100, prec * 100, color=color,
+                                  lw=2, ls=ls, alpha=0.8, label=lbl)
+
+            ax_recal.axhline(50, color="grey", lw=1, ls=":", alpha=0.5)
+            ax_recal.axvspan(1, 3, color="steelblue", alpha=0.12, zorder=0,
+                              label="Est. Gaia gal. fraction (1\u20133%)")
+            ax_recal.set_xlabel("True galaxy fraction (%)", fontsize=11, fontweight="bold")
+            ax_recal.set_ylabel("Galaxy selection purity (%)", fontsize=11, fontweight="bold")
+            ax_recal.set_title("Bayesian recalibration — purity vs galaxy fraction\n"
+                               "per ERO mixing ratio (solid=0.5, dashed=0.7, dotted=0.9)",
+                               fontsize=12, fontweight="bold")
+            ax_recal.set_xscale("log")
+            ax_recal.set_xlim(0.01, 50)
+            ax_recal.set_ylim(0, 100)
+            ax_recal.legend(fontsize=7, ncol=2)
+            ax_recal.grid(alpha=0.3)
+
+            out_recal = output_dir / 'threshold_recalibration.png'
+            fig_recal.savefig(out_recal, dpi=150, bbox_inches='tight')
+            plt.close(fig_recal)
+            print(f"  -> {out_recal}")
 
             # Print summary
             print(f"\n  {'Ratio':<10} {'Thresh':>6} {'TPR':>7} {'FPR':>7} "

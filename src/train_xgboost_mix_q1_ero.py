@@ -1,30 +1,49 @@
 #!/usr/bin/env python3
 """
-XGBoost Q1+ERO model training & evaluation.
+XGBoost Q1+ERO mixed model training & evaluation.
 
-Identical to train_xgboost_q1.py, but augments the training data with
-ERO sources classified as stars (SExtractor class_star > 0.9) from the
-crossmatch_ero_gaia_0_3 table.
+Augments Q1 training data with ERO sources classified as stars
+(SExtractor class_star > 0.9) from crossmatch_ero_gaia_0_3.
+The STAR:GALAXY ratio in training is controlled by --target-ratio.
 
 Q1 labels:  PHZ classification (STAR / GALAXY)
 ERO labels: class_star > 0.9 → STAR  (all added as y=0)
 
-Split: 70 % train / 15 % val (early stopping) / 15 % test.
-ERO stars are added ONLY to the training split — the val/test splits
-remain pure Q1 so metrics are directly comparable to the Q1-only model.
+Split: 70% train / 15% val (early stopping) / 15% test.
+ERO stars are added ONLY to the training split — val/test remain
+pure Q1 so metrics are directly comparable to the Q1-only model.
 
-Outputs saved to output/xgboost_q1_ero/:
+Per-seed evaluation: each of the 10 seed models is evaluated on its
+own held-out Q1 test set (no data leakage). Metrics and histograms
+in q1_threshold_analysis.png are averaged across seeds.
+
+Outputs saved to output/xgboost_mix_q1_ero/ratio_sgN/:
   xgb_classifier_q1.json        — baseline seed-42 model
-  seed_models/*.json            — per-seed models
-  q1_feature_importance.png     — horizontal bar chart
-  q1_feature_importance.csv     — importances table
-  q1_seed_metrics.json          — per-seed metrics summary
-  q1_summary.txt                — ensemble metrics summary
+  seed_models/*.json             — per-seed models
+  q1_feature_importance.png      — horizontal bar chart
+  q1_feature_importance.csv      — importances table
+  q1_seed_metrics.json           — per-seed metrics
+  q1_threshold_analysis.png      — P(gal) distribution + metrics vs threshold
+  q1_summary.txt                 — ensemble metrics summary
 
 Usage:
-    PGUSER=siwei_zhao_2025 python src/train_xgboost_q1_ero.py                  # all ERO stars (~8.5:1)
-    PGUSER=siwei_zhao_2025 python src/train_xgboost_q1_ero.py --target-ratio 4 # subsample to 4:1
-    PGUSER=siwei_zhao_2025 python src/train_xgboost_q1_ero.py --target-ratio 5 # subsample to 5:1
+    # Sweep all ratios (3:1 to max, + all ERO) — default:
+    PGUSER=siwei_zhao_2025 python src/train_xgboost_mix_q1_ero.py
+
+    # Train at a single STAR:GALAXY ratio:
+    PGUSER=siwei_zhao_2025 python src/train_xgboost_mix_q1_ero.py --target-ratio 5
+
+    # Use all ERO stars without sweeping (max ratio ~8.6:1):
+    PGUSER=siwei_zhao_2025 python src/train_xgboost_mix_q1_ero.py --no-sweep
+
+    # Sweep with ERO stars restricted to G >= 18.5:
+    PGUSER=siwei_zhao_2025 python src/train_xgboost_mix_q1_ero.py --ero-mag-cut 18.5
+
+    # Sweep with lower class_star threshold:
+    PGUSER=siwei_zhao_2025 python src/train_xgboost_mix_q1_ero.py --class-star 0.5
+
+    # Sweep without class_star filter, G >= 18.5:
+    PGUSER=siwei_zhao_2025 python src/train_xgboost_mix_q1_ero.py --class-star 0 --ero-mag-cut 18.5
 """
 
 import os
@@ -46,8 +65,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).parent.parent
-OUTPUT_DIR  = PROJECT_DIR / 'output' / 'xgboost_mix_q1_ero' / 'ratio_all_sg8.76'
-SEED_MODELS_DIR = OUTPUT_DIR / 'seed_models'
+OUTPUT_DIR  = PROJECT_DIR / 'output' / 'xgboost_mix_q1_ero'  # overridden in main()
+SEED_MODELS_DIR = OUTPUT_DIR / 'seed_models'                 # overridden in main()
 
 WSDB_HOST = 'wsdb.ast.cam.ac.uk'
 WSDB_DB   = 'wsdb'
@@ -97,7 +116,7 @@ def query_q1(username, test_mode=False):
         WHERE p_phz_classification IN (1, 2)
           AND g_phot_g_mean_mag >= {MAG_CUT}
           AND g_phot_g_mean_mag <= {MAG_CUT_FAINT}
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     if test_mode:
         query += " LIMIT 10000"
@@ -122,29 +141,36 @@ def query_q1(username, test_mode=False):
     return X, y, mag
 
 
-def query_ero_stars(username, test_mode=False):
-    """Query ERO sources with class_star > 0.9 and Gaia G >= MAG_CUT.
+def query_ero_stars(username, test_mode=False, class_star_thresh=0.9):
+    """Query ERO sources with Gaia G >= MAG_CUT.
 
+    class_star_thresh: filter to class_star > threshold. Set to 0 to disable.
     All returned sources are labelled STAR (y=0).
     """
     import psycopg2
     conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
     gaia_cols = ', '.join([f'g_{col} AS {col}' for col in SELECTED_GAIA_PARAMETERS])
+    if class_star_thresh > 0:
+        cs_filter = f"AND e_v_class_star > {class_star_thresh}"
+        cs_label = f"class_star > {class_star_thresh}"
+    else:
+        cs_filter = ""
+        cs_label = "no class_star filter"
     query = f"""
         SELECT
             g_phot_g_mean_mag AS phot_g_mean_mag,
             e_v_class_star AS class_star,
             {gaia_cols}
         FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
-        WHERE e_v_class_star > {CLASS_STAR_THRESH}
-          AND g_phot_g_mean_mag >= {MAG_CUT}
+        WHERE g_phot_g_mean_mag >= {MAG_CUT}
           AND g_phot_g_mean_mag <= {MAG_CUT_FAINT}
-        ORDER BY g_source_id
+          {cs_filter}
+        ORDER BY g_random_index
     """
     if test_mode:
         query += " LIMIT 5000"
 
-    print(f"  Querying ERO stars (class_star > {CLASS_STAR_THRESH}, {_mag_range()})...")
+    print(f"  Querying ERO stars ({cs_label}, {_mag_range()})...")
     df = pd.read_sql_query(query, conn)
     conn.close()
 
@@ -194,7 +220,7 @@ def query_q1_extrap(username):
           AND g_phot_g_mean_mag IS NOT NULL
           AND g_phot_g_mean_mag >= 15
           AND ({where_extrap})
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print(f"  Querying Q1 extrapolation sources (outside {_mag_range()})...")
     df = pd.read_sql_query(query, conn)
@@ -225,7 +251,7 @@ def query_q1_population(username):
         FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia
         WHERE g_phot_g_mean_mag IS NOT NULL
           AND g_phot_g_mean_mag >= 15
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print("  Querying Q1 population (G >= 15, all classes)...")
     df = pd.read_sql_query(query, conn)
@@ -311,47 +337,76 @@ def evaluate(model, X_test, y_test):
 # Plotting
 # =============================================================================
 
-def plot_threshold_analysis(y_test, y_proba_seeds, output_dir):
-    """Precision / Recall / F1 vs threshold on Q1 test set.
-    Uses mean probability across all seed models.
+def plot_threshold_analysis(X_q1, y_q1, all_models, seeds, output_dir):
+    """Per-seed threshold analysis (no leakage).
+    Each seed's model evaluated on its own Q1 held-out test set,
+    histograms and metrics averaged across seeds.
     """
     from sklearn.metrics import roc_curve, auc, precision_recall_curve
 
-    y_proba = np.mean(y_proba_seeds, axis=0)
     thresholds = np.linspace(0, 1, 201)
+    bins = np.linspace(0, 1, 101)
+    n_seeds = len(seeds)
 
-    prec_list, rec_list, f1_list = [], [], []
-    for t in thresholds:
-        pred = (y_proba >= t).astype(int)
-        tp = ((pred == 1) & (y_test == 1)).sum()
-        fp = ((pred == 1) & (y_test == 0)).sum()
-        fn = ((pred == 0) & (y_test == 1)).sum()
-        p = tp / (tp + fp) if (tp + fp) > 0 else np.nan
-        r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        prec_list.append(p)
-        rec_list.append(r)
-        f1_list.append(2*p*r/(p+r) if (p + r) > 0 else 0.0)
+    hist_star_sum = np.zeros(len(bins) - 1)
+    hist_gal_sum  = np.zeros(len(bins) - 1)
+    all_prec = np.zeros((n_seeds, len(thresholds)))
+    all_rec  = np.zeros((n_seeds, len(thresholds)))
+    all_f1   = np.zeros((n_seeds, len(thresholds)))
+    n_star_total, n_gal_total = 0, 0
+    y_test_42, y_proba_42 = None, None
 
-    prec_arr = np.array(prec_list)
-    rec_arr  = np.array(rec_list)
-    f1_arr   = np.array(f1_list)
+    for si, seed in enumerate(seeds):
+        _, X_test, _, y_test = train_test_split(
+            X_q1, y_q1, test_size=0.15, random_state=seed, stratify=y_q1)
+        y_proba = all_models[si].predict_proba(X_test)[:, 1]
+
+        hist_star_sum += np.histogram(y_proba[y_test == 0], bins=bins)[0]
+        hist_gal_sum  += np.histogram(y_proba[y_test == 1], bins=bins)[0]
+        n_star_total += (y_test == 0).sum()
+        n_gal_total  += (y_test == 1).sum()
+
+        if seed == 42:
+            y_test_42, y_proba_42 = y_test, y_proba
+
+        for ti, t in enumerate(thresholds):
+            pred = (y_proba >= t).astype(int)
+            tp = ((pred == 1) & (y_test == 1)).sum()
+            fp = ((pred == 1) & (y_test == 0)).sum()
+            fn = ((pred == 0) & (y_test == 1)).sum()
+            p = tp / (tp + fp) if (tp + fp) > 0 else np.nan
+            r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            all_prec[si, ti] = p
+            all_rec[si, ti]  = r
+            all_f1[si, ti]   = 2*p*r/(p+r) if (p + r) > 0 else 0.0
+
+    hist_star_mean = hist_star_sum / n_seeds
+    hist_gal_mean  = hist_gal_sum / n_seeds
+    prec_arr = np.nanmean(all_prec, axis=0)
+    rec_arr  = np.nanmean(all_rec, axis=0)
+    f1_arr   = np.nanmean(all_f1, axis=0)
     best_idx = np.nanargmax(f1_arr)
     best_t   = thresholds[best_idx]
+    n_star_avg = n_star_total // n_seeds
+    n_gal_avg  = n_gal_total // n_seeds
 
-    fpr, tpr, _ = roc_curve(y_test, y_proba)
+    if y_test_42 is None:
+        y_test_42, y_proba_42 = y_test, y_proba
+    fpr, tpr, _ = roc_curve(y_test_42, y_proba_42)
     roc_auc_val = auc(fpr, tpr)
-    pr_prec, pr_rec, pr_thresh = precision_recall_curve(y_test, y_proba)
+    pr_prec, pr_rec, pr_thresh = precision_recall_curve(y_test_42, y_proba_42)
 
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
     fig.subplots_adjust(wspace=0.38)
 
-    # [0] P_gal distribution split by true label
+    # [0] P_gal distribution — averaged histogram
     ax = axes[0]
-    bins = np.linspace(0, 1, 101)
-    ax.hist(y_proba[y_test == 0], bins=bins, color='coral',     alpha=0.6, lw=0,
-            label=f'STAR  (n={( y_test==0).sum():,})')
-    ax.hist(y_proba[y_test == 1], bins=bins, color='steelblue', alpha=0.6, lw=0,
-            label=f'GALAXY  (n={(y_test==1).sum():,})')
+    bin_centres = 0.5 * (bins[:-1] + bins[1:])
+    bin_width = bins[1] - bins[0]
+    ax.bar(bin_centres, hist_star_mean, width=bin_width, alpha=0.6, color='coral', edgecolor='none',
+           label=f'STAR  (n={n_star_avg:,})')
+    ax.bar(bin_centres, hist_gal_mean, width=bin_width, alpha=0.6, color='steelblue', edgecolor='none',
+           label=f'GALAXY  (n={n_gal_avg:,})')
     ax.axvline(0.5,   color='black',        lw=1.5, ls='--', label='Default (0.5)')
     ax.axvline(best_t, color='mediumseagreen', lw=1.5, ls=':',  label=f'Best F1 ({best_t:.2f})')
     ax.set_yscale('log')
@@ -360,27 +415,33 @@ def plot_threshold_analysis(y_test, y_proba_seeds, output_dir):
     ax.set_title('P_gal distribution — Q1 test set', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9); ax.grid(alpha=0.3)
 
-    # [1] Precision / Recall / F1 vs threshold
+    # [1] Precision / Recall / F1 vs threshold — averaged
     ax = axes[1]
     ax.plot(thresholds, prec_arr, color='steelblue',      lw=2, label='Precision')
     ax.plot(thresholds, rec_arr,  color='coral',          lw=2, label='Recall')
     ax.plot(thresholds, f1_arr,   color='mediumseagreen', lw=2, label='F1')
     ax.axvline(0.5,   color='black',          lw=1.5, ls='--', label='Default (0.5)')
     ax.axvline(best_t, color='mediumseagreen', lw=1.5, ls=':',  label=f'Best F1 ({best_t:.2f})')
+    bbox = dict(boxstyle='round,pad=0.15', facecolor='white', edgecolor='none', alpha=1.0)
+    for t_val in [0.5, 0.7, 0.9]:
+        idx_t = np.argmin(np.abs(thresholds - t_val))
+        for arr, color in [(prec_arr, 'steelblue'), (rec_arr, 'coral'), (f1_arr, 'mediumseagreen')]:
+            ax.text(t_val, arr[idx_t], f'{arr[idx_t]:.3f}', fontsize=9, fontweight='bold',
+                    color=color, ha='center', va='center', bbox=bbox, zorder=10)
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
     ax.set_xlabel('P_gal threshold', fontsize=11)
     ax.set_ylabel('Score', fontsize=11)
     ax.set_title('Metrics vs threshold — Q1 test set', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9, loc='center left'); ax.grid(alpha=0.3)
 
-    # [2] ROC curve
+    # [2] ROC curve (seed-42)
     ax = axes[2]
     ax.plot(fpr, tpr, color='steelblue', lw=2, label=f'ROC  (AUC = {roc_auc_val:.4f})')
     ax.plot([0, 1], [0, 1], color='gray', lw=1, ls='--', label='Random')
-    roc_thresh = roc_curve(y_test, y_proba)[2]
+    roc_thresh = roc_curve(y_test_42, y_proba_42)[2]
     ax.scatter(fpr[np.argmin(np.abs(roc_thresh - 0.5))],
                tpr[np.argmin(np.abs(roc_thresh - 0.5))],
-               s=80, color='black',          zorder=6, label=f'Default (0.5)')
+               s=80, color='black',          zorder=6, label='Default (0.5)')
     ax.scatter(fpr[np.argmin(np.abs(roc_thresh - best_t))],
                tpr[np.argmin(np.abs(roc_thresh - best_t))],
                s=80, color='mediumseagreen', zorder=6, label=f'Best F1 ({best_t:.2f})')
@@ -390,13 +451,13 @@ def plot_threshold_analysis(y_test, y_proba_seeds, output_dir):
     ax.set_title('ROC curve — Q1 test set (GALAXY = positive)', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9); ax.grid(alpha=0.3)
 
-    # [3] Precision-Recall curve
+    # [3] Precision-Recall curve (seed-42)
     ax = axes[3]
+    idx_def = np.argmin(np.abs(thresholds - 0.5))
     sc = ax.scatter(pr_rec[:-1], pr_prec[:-1], c=pr_thresh,
                     cmap='viridis', s=8, zorder=5)
     fig.colorbar(sc, ax=ax, pad=0.02).set_label('P_gal threshold', fontsize=9)
-    ax.scatter(rec_arr[np.argmin(np.abs(thresholds - 0.5))],
-               prec_arr[np.argmin(np.abs(thresholds - 0.5))],
+    ax.scatter(rec_arr[idx_def], prec_arr[idx_def],
                s=80, color='black',          zorder=6, label='Default (0.5)')
     ax.scatter(rec_arr[best_idx], prec_arr[best_idx],
                s=80, color='mediumseagreen', zorder=6, label=f'Best F1 ({best_t:.2f})')
@@ -406,7 +467,7 @@ def plot_threshold_analysis(y_test, y_proba_seeds, output_dir):
     ax.set_title('Precision-Recall curve — Q1 test set', fontsize=11, fontweight='bold')
     ax.legend(fontsize=9); ax.grid(alpha=0.3)
 
-    fig.suptitle(f'Q1+ERO model threshold analysis  (ensemble mean, {len(y_proba_seeds)} seeds)',
+    fig.suptitle(f'Q1+ERO model threshold analysis  (per-seed mean, {n_seeds} seeds)',
                  fontsize=13, fontweight='bold', y=1.01)
     plt.tight_layout()
     out = output_dir / 'q1_threshold_analysis.png'
@@ -744,9 +805,17 @@ def main():
     parser.add_argument('--test-mode', action='store_true',
                         help='Limit to 10 k Q1 + 5 k ERO sources for quick testing')
     parser.add_argument('--target-ratio', type=float, default=None, metavar='R',
-                        help='Target STAR:GALAXY ratio in training set (e.g. 4, 5). '
+                        help='Train at a single STAR:GALAXY ratio (e.g. 4, 5). '
                              'ERO stars are subsampled to achieve this. '
-                             'Default: use all ERO stars.')
+                             'Default: sweep all integer ratios + all ERO stars.')
+    parser.add_argument('--no-sweep', action='store_true',
+                        help='With no --target-ratio, use all ERO stars instead of sweeping.')
+    parser.add_argument('--ero-mag-cut', type=float, default=None, metavar='MAG',
+                        help='Additional bright-end magnitude cut on ERO stars only '
+                             '(e.g. 18.5). Saves to xgboost_mix_q1_ero_g/ instead.')
+    parser.add_argument('--class-star', type=float, default=0.9, metavar='THRESH',
+                        help='ERO class_star threshold (default: 0.9). '
+                             'Set to 0 to disable filtering (all ERO sources as stars).')
     args = parser.parse_args()
 
     username = os.getenv('PGUSER')
@@ -754,14 +823,20 @@ def main():
         print("ERROR: PGUSER environment variable not set!")
         return 1
 
-    ratio_desc = f'{args.target_ratio:.0f}:1 target' if args.target_ratio else 'all ERO stars'
+    if args.target_ratio is not None:
+        ratio_desc = f'{args.target_ratio:.0f}:1 target'
+    elif args.no_sweep:
+        ratio_desc = 'all ERO stars'
+    else:
+        ratio_desc = 'sweep all ratios'
 
     print("=" * 70)
     print("XGBoost Q1+ERO Model Training")
     print("=" * 70)
     print(f"  Features:       {len(SELECTED_GAIA_PARAMETERS)}")
     print(f"  Magnitude cut:  {_mag_range()}")
-    print(f"  ERO criterion:  class_star > {CLASS_STAR_THRESH}")
+    cs_desc = "no class_star filter" if args.class_star == 0 else f"class_star > {args.class_star}"
+    print(f"  ERO criterion:  {cs_desc}")
     print(f"  ERO mixing:     {ratio_desc}")
     print(f"  Training mode:  {len(SEEDS)}-seed ensemble")
     if args.test_mode:
@@ -773,7 +848,17 @@ def main():
 
     # ── Step 1b: Query ERO stars ─────────────────────────────────────────────
     print("\n[1b] Querying ERO stars...")
-    X_ero, y_ero, mag_ero = query_ero_stars(username, test_mode=args.test_mode)
+    X_ero, y_ero, mag_ero = query_ero_stars(username, test_mode=args.test_mode,
+                                              class_star_thresh=args.class_star)
+
+    # Optional additional magnitude cut on ERO stars
+    if args.ero_mag_cut is not None:
+        mask = mag_ero >= args.ero_mag_cut
+        print(f"  Filtering ERO to G >= {args.ero_mag_cut}: "
+              f"{mask.sum():,} / {len(mask):,} sources kept")
+        X_ero = X_ero[mask]
+        y_ero = y_ero[mask]
+        mag_ero = mag_ero[mask]
 
     n_q1_star   = (y_q1 == 0).sum()
     n_q1_galaxy = (y_q1 == 1).sum()
@@ -785,15 +870,107 @@ def main():
     print(f"    Total stars:  {n_q1_star + n_ero:,}")
     print(f"    STAR:GALAXY ratio (full pool): {(n_q1_star + n_ero) / n_q1_galaxy:.1f}:1")
 
-    # ── Compute output directory from actual data ratio ──────────────────────
-    global OUTPUT_DIR, SEED_MODELS_DIR
-    if args.target_ratio is not None:
-        ratio_tag = f'ratio_sg{args.target_ratio:.0f}'
+    # ── Compute ratio list ─────────────────────────────────────────────────────
+    if args.target_ratio is None and not args.no_sweep:
+        n_train_gal = int(n_q1_galaxy * 0.85 * 0.824)
+        n_train_star = int(n_q1_star * 0.85 * 0.824)
+        q1_ratio = n_q1_star / n_q1_galaxy
+        max_ratio = (n_train_star + n_ero) / max(n_train_gal, 1)
+        min_ratio_int = int(np.ceil(q1_ratio))
+        max_ratio_int = int(np.floor(max_ratio))
+        # 0 = Q1 only (no ERO), integers = ERO-augmented, None = all ERO
+        sweep_ratios = [0] + list(range(min_ratio_int, max_ratio_int + 1)) + [None]
+        print(f"\n  Sweeping ratios: Q1 only, {min_ratio_int}:1 to {max_ratio_int}:1, "
+              f"+ all ERO ({max_ratio:.1f}:1)")
+        for sr in sweep_ratios:
+            if sr == 0:
+                label = "Q1 only (no ERO)"
+                print(f"\n{'='*70}")
+                print(f"  SWEEP: {label} — linking to output/xgboost_q1/")
+                print(f"{'='*70}")
+                _link_q1_baseline(args, n_q1_star, n_q1_galaxy)
+            else:
+                if sr is not None:
+                    label = f"{sr}:1"
+                else:
+                    label = f"all ERO ({max_ratio:.1f}:1)"
+                print(f"\n{'='*70}")
+                print(f"  SWEEP: training ratio {label}")
+                print(f"{'='*70}")
+                _train_one_ratio(sr, args, username, X_q1, y_q1, mag_q1, X_ero, y_ero,
+                                 n_q1_star, n_q1_galaxy, n_ero)
+        return 0
+
+    # Single ratio or --no-sweep
+    if args.target_ratio == 0:
+        _link_q1_baseline(args, n_q1_star, n_q1_galaxy)
     else:
-        # Compute actual training ratio: (70% Q1 stars + all ERO) / (70% Q1 galaxies)
+        _train_one_ratio(args.target_ratio, args, username, X_q1, y_q1, mag_q1,
+                         X_ero, y_ero, n_q1_star, n_q1_galaxy, n_ero)
+    return 0
+
+
+def _link_q1_baseline(args, n_q1_star, n_q1_galaxy):
+    """Create a symlink to output/xgboost_q1/ for the Q1-only baseline.
+    This ensures the mix sweep uses the exact same models as the Q1-only training,
+    avoiding any inconsistency from retraining."""
+    import shutil
+
+    q1_ratio = n_q1_star / n_q1_galaxy
+    # Output directory: base varies by ERO filtering
+    base_dir = 'xgboost_mix_q1_ero'
+    suffixes = []
+    if args.ero_mag_cut:
+        suffixes.append(f'g{args.ero_mag_cut:g}')
+    if args.class_star != 0.9:
+        suffixes.append(f'cs{args.class_star}' if args.class_star > 0 else 'nocs')
+    if suffixes:
+        base_dir += '_' + '_'.join(suffixes)
+    link_dir = PROJECT_DIR / 'output' / base_dir / f'ratio_sg{q1_ratio:.1f}_q1_only'
+    q1_dir = PROJECT_DIR / 'output' / 'xgboost_q1'
+
+    link_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    if link_dir.is_symlink():
+        link_dir.unlink()
+    elif link_dir.exists():
+        shutil.rmtree(link_dir)
+
+    link_dir.symlink_to(q1_dir.resolve())
+    print(f"  -> {link_dir} -> {q1_dir}")
+    print(f"  Q1-only baseline: using existing models from {q1_dir}")
+
+
+def _train_one_ratio(target_ratio, args, username, X_q1, y_q1, mag_q1,
+                     X_ero, y_ero, n_q1_star, n_q1_galaxy, n_ero):
+    """Train 10-seed ensemble at a single STAR:GALAXY ratio."""
+    global OUTPUT_DIR, SEED_MODELS_DIR
+
+    if target_ratio == 0:
+        ratio_desc = 'Q1 only (no ERO)'
+    elif target_ratio is not None:
+        ratio_desc = f'{target_ratio:.0f}:1 target'
+    else:
+        ratio_desc = 'all ERO stars'
+
+    if target_ratio == 0:
+        q1_ratio = n_q1_star / n_q1_galaxy
+        ratio_tag = f'ratio_sg{q1_ratio:.1f}_q1_only'
+    elif target_ratio is not None:
+        ratio_tag = f'ratio_sg{target_ratio:.0f}'
+    else:
         actual_ratio = (0.7 * n_q1_star + n_ero) / (0.7 * n_q1_galaxy)
-        ratio_tag = f'ratio_all_sg{actual_ratio:.2f}'
-    OUTPUT_DIR = PROJECT_DIR / 'output' / 'xgboost_mix_q1_ero' / ratio_tag
+        ratio_tag = f'ratio_sg{actual_ratio:.2f}_all_ero'
+    # Output directory: base varies by ERO filtering
+    base_dir = 'xgboost_mix_q1_ero'
+    suffixes = []
+    if args.ero_mag_cut:
+        suffixes.append(f'g{args.ero_mag_cut:g}')
+    if args.class_star != 0.9:
+        suffixes.append(f'cs{args.class_star}' if args.class_star > 0 else 'nocs')
+    if suffixes:
+        base_dir += '_' + '_'.join(suffixes)
+    OUTPUT_DIR = PROJECT_DIR / 'output' / base_dir / ratio_tag
     SEED_MODELS_DIR = OUTPUT_DIR / 'seed_models'
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -806,8 +983,6 @@ def main():
     all_importances = []
     all_models = []
     all_test_idx = []
-    all_y_test_proba = []
-    y_test_ref = None
     split_summary = None
     idx_all = np.arange(len(X_q1))
 
@@ -815,7 +990,7 @@ def main():
         print(f"\n[2] Splitting Q1 data (70/15/15), adding ERO to train (seed={seed})...")
         X_train, X_val, X_test, y_train, y_val, y_test, n_q1_train, n_ero_used = \
             split_data_with_ero(X_q1, y_q1, X_ero, y_ero, seed,
-                                target_ratio=args.target_ratio)
+                                target_ratio=target_ratio)
 
         # Track Q1 test indices for per-bin evaluation
         _, idx_test, _, _ = train_test_split(
@@ -849,9 +1024,6 @@ def main():
         all_metrics.append(metrics_clean)
         all_importances.append(model.feature_importances_)
         all_models.append(model)
-        all_y_test_proba.append(model.predict_proba(X_test)[:, 1])
-        if y_test_ref is None:
-            y_test_ref = y_test
 
         if seed == 42:
             split_summary = {
@@ -899,7 +1071,7 @@ def main():
     )
 
     print("\n[6b] Generating threshold analysis plot...")
-    plot_threshold_analysis(y_test_ref, np.array(all_y_test_proba), OUTPUT_DIR)
+    plot_threshold_analysis(X_q1, y_q1, all_models, seeds, OUTPUT_DIR)
 
     print("\n[6c] Generating per-bin performance plot...")
     extrap = query_q1_extrap(username)
@@ -982,10 +1154,9 @@ def main():
             print(f"  {label:<18} {q1_val:>10.4f} {ero_val:>10.4f} {sign}{delta:>9.4f}")
 
     print("\n" + "=" * 70)
-    print("Q1+ERO model training complete!")
+    print(f"Q1+ERO model training complete! ({ratio_desc})")
     print(f"All results saved to: {OUTPUT_DIR}")
     print("=" * 70)
-    return 0
 
 
 if __name__ == '__main__':

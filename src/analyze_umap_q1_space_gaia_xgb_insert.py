@@ -38,8 +38,25 @@ MAG_CUT   = 17
 GAL_THRESH = 0.5
 
 
+def _add_cluster_labels(ax, centroids):
+    """Add subtle cluster reference labels (C0–C4) at centroid positions."""
+    import matplotlib.patheffects as pe
+    y_offsets = {0: -3, 1: -3, 2: -3}
+    outside = {0, 1, 2}
+    for k, (cx, cy) in centroids.items():
+        cy_adj = cy + y_offsets.get(k, 0)
+        if k in outside:
+            ax.text(cx, cy_adj, f"C{k}", fontsize=13, fontweight="bold",
+                    color="dimgray", alpha=1, ha="center", va="center", zorder=5)
+        else:
+            ax.text(cx, cy_adj, f"C{k}", fontsize=13, fontweight="bold",
+                    color="dimgray", alpha=1, ha="center", va="center", zorder=5,
+                    path_effects=[pe.withStroke(linewidth=2, foreground="white", alpha=0.3)])
+
+
 def plot(q1_emb, gaia_emb, gal_prob, output_dir, n_gaia, suffix="",
-         density_vmax=None, label="Gaia random subset"):
+         density_vmax=None, label="Gaia random subset",
+         cluster_centroids=None):
     x_all = np.concatenate([q1_emb[:, 0], gaia_emb[:, 0]])
     y_all = np.concatenate([q1_emb[:, 1], gaia_emb[:, 1]])
     xlim  = (x_all.min() - 1, x_all.max() + 1)
@@ -49,7 +66,7 @@ def plot(q1_emb, gaia_emb, gal_prob, output_dir, n_gaia, suffix="",
     MAX_PTS = 20_000
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.subplots_adjust(wspace=0.28)
+    fig.subplots_adjust(wspace=0.32)
 
     def _style(ax, title):
         ax.set_xlim(*xlim); ax.set_ylim(*ylim)
@@ -74,6 +91,8 @@ def plot(q1_emb, gaia_emb, gal_prob, output_dir, n_gaia, suffix="",
     fig.colorbar(sc0, ax=ax, pad=0.02, fraction=0.046,
                  label="Count (log)").ax.tick_params(labelsize=11)
     _style(ax, f"Projected density  (n={n_gaia:,})")
+    if cluster_centroids is not None:
+        _add_cluster_labels(ax, cluster_centroids)
 
     # Panel 1: All Gaia coloured by P(gal)
     ax = axes[1]
@@ -94,9 +113,108 @@ def plot(q1_emb, gaia_emb, gal_prob, output_dir, n_gaia, suffix="",
     cb.ax.tick_params(labelsize=11)
     _style(ax, f"XGBoost P(gal)  (n={n_gaia:,})")
 
-    fig.suptitle(label, fontsize=14, fontweight="bold", y=1.02)
+    # fig.suptitle(label, fontsize=14, fontweight="bold", y=1.02)
 
     out = output_dir / f"q1_space_gaia_xgb{suffix}.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> Saved: {out}")
+
+
+def plot_stacked(q1_emb, datasets, output_dir, density_vmax,
+                 cluster_centroids=None):
+    """2×2 stacked figure: rows = random/hilat, cols = density/P(gal)."""
+    # Use bounds from all data
+    all_x = [q1_emb[:, 0]]
+    all_y = [q1_emb[:, 1]]
+    for gaia_emb, _, _, _, _ in datasets:
+        all_x.append(gaia_emb[:, 0])
+        all_y.append(gaia_emb[:, 1])
+    x_cat = np.concatenate(all_x)
+    y_cat = np.concatenate(all_y)
+    xlim = (x_cat.min() - 1, x_cat.max() + 1)
+    ylim = (y_cat.min() - 1, y_cat.max() + 1)
+
+    rng = np.random.RandomState(0)
+    MAX_PTS = 20_000
+    n_bins = 250
+    x_edges = np.linspace(xlim[0], xlim[1], n_bins + 1)
+    y_edges = np.linspace(ylim[0], ylim[1], n_bins + 1)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 5.8))
+    fig.subplots_adjust(wspace=0.22, hspace=0.1)
+
+    density_norm = LogNorm(vmin=1, vmax=density_vmax)
+    last_density_im = None
+    last_pgal_sc = None
+
+    for row, (gaia_emb, gal_prob, n_gaia, suffix, label) in enumerate(datasets):
+        # Left: density
+        ax = axes[row, 0]
+        H, _, _ = np.histogram2d(gaia_emb[:, 0], gaia_emb[:, 1],
+                                  bins=[x_edges, y_edges])
+        H = np.where(H > 0, H, np.nan)
+        last_density_im = ax.pcolormesh(x_edges, y_edges, H.T,
+                            cmap="Blues", norm=density_norm,
+                            rasterized=True)
+        if cluster_centroids is not None:
+            _add_cluster_labels(ax, cluster_centroids)
+
+        # Right: P(gal)
+        ax = axes[row, 1]
+        q1_idx = rng.choice(len(q1_emb), min(MAX_PTS, len(q1_emb)), replace=False)
+        ax.scatter(q1_emb[q1_idx, 0], q1_emb[q1_idx, 1], c="lightgrey", s=2,
+                   alpha=0.15, linewidths=0, rasterized=True)
+        idx = rng.choice(len(gaia_emb), min(MAX_PTS, len(gaia_emb)), replace=False)
+        last_pgal_sc = ax.scatter(
+            gaia_emb[idx, 0], gaia_emb[idx, 1],
+            c=gal_prob[idx], cmap="RdYlBu_r",
+            vmin=0, vmax=1, s=5, alpha=0.7,
+            linewidths=0, rasterized=True,
+        )
+
+        # Style both panels in this row
+        for col in range(2):
+            a = axes[row, col]
+            a.set_xlim(*xlim)
+            a.set_ylim(*ylim)
+            a.tick_params(labelsize=10)
+            a.grid(alpha=0.2)
+            # Bottom row gets x-labels
+            if row == 1:
+                a.set_xlabel("UMAP 1", fontsize=11)
+            else:
+                a.set_xticklabels([])
+            # Left column gets y-labels
+            if col == 0:
+                a.set_ylabel("")
+                a.text(-0.18, 0.5, label,
+                       transform=a.transAxes, rotation=90,
+                       fontsize=12, fontweight='bold',
+                       ha='center', va='center')
+                a.text(-0.1, 0.5, "UMAP 2",
+                       transform=a.transAxes, rotation=90,
+                       fontsize=10,
+                       ha='center', va='center')
+            else:
+                a.set_ylabel("")
+
+    # Shared colorbars spanning both rows — full panel height
+    cb0 = fig.colorbar(last_density_im, ax=axes[:, 0].tolist(),
+                       pad=0.02, fraction=0.046, shrink=1.0, aspect=30)
+    cb0.set_label("Count (log)", fontsize=11)
+    cb0.ax.tick_params(labelsize=10)
+
+    cb1 = fig.colorbar(last_pgal_sc, ax=axes[:, 1].tolist(),
+                       pad=0.02, fraction=0.046, shrink=1.0, aspect=30)
+    cb1.set_label("XGBoost P(gal)", fontsize=11)
+    cb1.ax.tick_params(labelsize=10)
+
+    # Column titles
+    axes[0, 0].set_title("Projected density", fontsize=13, fontweight="bold")
+    axes[0, 1].set_title("XGBoost P(gal)", fontsize=13, fontweight="bold")
+
+    out = output_dir / "q1_space_gaia_xgb_stacked.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  -> Saved: {out}")
@@ -127,6 +245,20 @@ def main() -> int:
     q1     = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
     q1_emb = q1["embedding"]
     print(f"  Q1: {len(q1_emb):,} sources")
+
+    # Load cluster centroids for reference labels
+    cluster_centroids = None
+    clabel_path = ARRAYS_DIR / "q1_cluster_labels.npy"
+    if clabel_path.exists():
+        labels = np.load(clabel_path)
+        cluster_centroids = {}
+        for k in sorted(set(labels[labels >= 0])):
+            mask_k = labels == k
+            cluster_centroids[k] = (
+                q1_emb[mask_k, 0].mean(),
+                q1_emb[mask_k, 1].mean(),
+            )
+        print(f"  Loaded cluster centroids: {list(cluster_centroids.keys())}")
 
     variants = [
         ("gaia_random_projected.csv", "", "Gaia random subset"),
@@ -159,7 +291,14 @@ def main() -> int:
     for gaia_emb, gal_prob, n_gaia, suffix, label in datasets:
         print(f"\n[3] Plotting{suffix}...")
         plot(q1_emb, gaia_emb, gal_prob, OUTPUT_DIR, n_gaia=n_gaia,
-             suffix=suffix, density_vmax=shared_vmax, label=label)
+             suffix=suffix, density_vmax=shared_vmax, label=label,
+             cluster_centroids=cluster_centroids)
+
+    # Stacked 2×2 figure (only when both variants are available)
+    if len(datasets) == 2:
+        print("\n[4] Plotting stacked 2×2...")
+        plot_stacked(q1_emb, datasets, OUTPUT_DIR, density_vmax=shared_vmax,
+                     cluster_centroids=cluster_centroids)
 
     return 0
 

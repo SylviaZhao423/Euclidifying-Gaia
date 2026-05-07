@@ -39,6 +39,23 @@ OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual" / "insert"
 
 MAG_CUT = 17
 
+
+def _add_cluster_labels(ax, centroids):
+    """Add subtle cluster reference labels (C0–C4) at centroid positions."""
+    import matplotlib.patheffects as pe
+    # C0,C1,C2 shifted outside clusters -> dark text; C3,C4 inside -> white text
+    y_offsets = {0: -4.4, 1: -4.2, 2: -4}
+    outside = {0, 1, 2}
+    for k, (cx, cy) in centroids.items():
+        cy_adj = cy + y_offsets.get(k, 0)
+        if k in outside:
+            ax.text(cx, cy_adj, f"C{k}", fontsize=7, fontweight="bold",
+                    color="dimgray", alpha=1, ha="center", va="center", zorder=5)
+        else:
+            ax.text(cx, cy_adj, f"C{k}", fontsize=7, fontweight="bold",
+                    color="white", alpha=0.7, ha="center", va="center", zorder=5,
+                    path_effects=[pe.withStroke(linewidth=2, foreground="black", alpha=0.3)])
+
 FEATURE_GROUPS = [
     (
         "quality",
@@ -63,7 +80,7 @@ SNR_FEATURES = ["parallax_over_error", "pm_significance", "phot_g_mean_flux_over
 
 def plot_all_features(embedding, X_raw, y, output_dir,
                       filename="q1_features.png",
-                      xlim=None, ylim=None):
+                      xlim=None, ylim=None, cluster_centroids=None):
     """4-column grid of all 14 Gaia features, star (top) / galaxy (bottom) per panel."""
     n_features = len(SELECTED_GAIA_PARAMETERS)
     ncols = 4
@@ -133,6 +150,9 @@ def plot_all_features(embedding, X_raw, y, output_dir,
 
         fig.colorbar(sc, ax=[ax_top, ax_bot], pad=0.02, fraction=0.046).ax.tick_params(labelsize=9)
         ax_top.set_title(feat_name, fontsize=10, fontweight="bold", pad=6)
+        if cluster_centroids is not None:
+            for ax in (ax_top, ax_bot):
+                _add_cluster_labels(ax, cluster_centroids)
 
     for fi in range(n_features, nfeature_rows * ncols):
         feat_row = fi // ncols
@@ -148,7 +168,8 @@ def plot_all_features(embedding, X_raw, y, output_dir,
 
 def plot_feature_group(embedding, X_raw, y, features, group_label,
                        output_dir, filename,
-                       xlim=None, ylim=None, mag_label=None):
+                       xlim=None, ylim=None, mag_label=None,
+                       cluster_centroids=None):
     """1 row × N columns, each with star (top) + galaxy (bottom) sub-panels."""
     ncols = len(features)
     feat_indices = [list(SELECTED_GAIA_PARAMETERS).index(f) for f in features]
@@ -168,7 +189,7 @@ def plot_feature_group(embedding, X_raw, y, features, group_label,
     fig = plt.figure(figsize=(fig_width, fig_height))
     gs  = GridSpec(len(height_ratios), ncols,
                    figure=fig, height_ratios=height_ratios,
-                   hspace=0, wspace=0.35)
+                   hspace=0, wspace=0.22)
 
     for col, (feat_name, fi) in enumerate(zip(features, feat_indices)):
         ax_top = fig.add_subplot(gs[0, col])
@@ -179,8 +200,8 @@ def plot_feature_group(embedding, X_raw, y, features, group_label,
         vals_clipped = np.clip(vals, lo, hi)
 
         for ax, mask, label in [
-                (ax_top, m_star, "Q1 Stars"),
-                (ax_bot, m_gal,  "Q1 Galaxies")]:
+                (ax_top, m_star, "Stars"),
+                (ax_bot, m_gal,  "Galaxies")]:
             ax.scatter(
                 embedding[mask, 0], embedding[mask, 1],
                 c="lightgrey", s=4, alpha=0.18, marker="o",
@@ -199,10 +220,16 @@ def plot_feature_group(embedding, X_raw, y, features, group_label,
                 ax.set_xlim(xlim)
             if ylim is not None:
                 ax.set_ylim(ylim)
-            ax.set_ylabel(f"{label}\n(n={mask.sum():,})", fontsize=9)
+            if col == 0:
+                ax.set_ylabel(label, fontsize=9, fontweight="bold", labelpad=10)
+            else:
+                ax.set_ylabel("")
 
         fig.colorbar(sc, ax=[ax_top, ax_bot], pad=0.02, fraction=0.046).ax.tick_params(labelsize=9)
-        ax_top.set_title(feat_name, fontsize=11, fontweight="bold", pad=4)
+        ax_top.set_title(feat_name, fontsize=10, fontweight="bold", pad=6)
+        if cluster_centroids is not None:
+            for ax in (ax_top, ax_bot):
+                _add_cluster_labels(ax, cluster_centroids)
 
     # fig.suptitle(
     #     f"Q1 UMAP — {group_label}  ({mag_label or f'G ≥ {MAG_CUT}'})  |  Upper = stars, Lower = galaxies",
@@ -217,7 +244,8 @@ def plot_feature_group(embedding, X_raw, y, features, group_label,
 
 def plot_gmag(embedding, g_mag, y, output_dir,
               filename="q1_features_gmag.png",
-              xlim=None, ylim=None, mag_label=None):
+              xlim=None, ylim=None, mag_label=None,
+              cluster_centroids=None):
     """Single panel pair (star top, galaxy bottom) coloured by G magnitude."""
     m_star = y == 0
     m_gal  = y == 1
@@ -243,8 +271,8 @@ def plot_gmag(embedding, g_mag, y, output_dir,
     vals_clipped = np.clip(g_mag, lo, hi)
 
     for ax, mask, label in [
-            (ax_top, m_star, "Q1 Stars"),
-            (ax_bot, m_gal,  "Q1 Galaxies")]:
+            (ax_top, m_star, "Stars"),
+            (ax_bot, m_gal,  "Galaxies")]:
         ax.scatter(
             embedding[mask, 0], embedding[mask, 1],
             c="lightgrey", s=4, alpha=0.18, marker="o",
@@ -263,10 +291,13 @@ def plot_gmag(embedding, g_mag, y, output_dir,
             ax.set_xlim(xlim)
         if ylim is not None:
             ax.set_ylim(ylim)
-        ax.set_ylabel(f"{label}\n(n={mask.sum():,})", fontsize=9)
+        ax.set_ylabel(label, fontsize=9, fontweight="bold", labelpad=10)
 
     fig.colorbar(sc, ax=[ax_top, ax_bot], pad=0.02, fraction=0.046).ax.tick_params(labelsize=9)
-    ax_top.set_title("phot_g_mean_mag", fontsize=11, fontweight="bold", pad=4)
+    ax_top.set_title("phot_g_mean_mag", fontsize=10, fontweight="bold", pad=6)
+    if cluster_centroids is not None:
+        for ax in (ax_top, ax_bot):
+            _add_cluster_labels(ax, cluster_centroids)
 
     # fig.suptitle(
     #     f"Q1 UMAP — G magnitude  ({mag_label or f'G ≥ {MAG_CUT}'})  |  Upper = stars, Lower = galaxies",
@@ -300,6 +331,22 @@ def main() -> int:
     xlim = (embedding[:, 0].min() - 1.0, embedding[:, 0].max() + 1.0)
     ylim = (embedding[:, 1].min() - 1.0, embedding[:, 1].max() + 1.0)
 
+    # Load cluster labels for reference annotations
+    cluster_centroids = None
+    clabel_path = ARRAYS_DIR / "q1_cluster_labels.npy"
+    if clabel_path.exists():
+        labels = np.load(clabel_path)
+        cluster_centroids = {}
+        for k in sorted(set(labels[labels >= 0])):
+            mask_k = labels == k
+            cluster_centroids[k] = (
+                embedding[mask_k, 0].mean(),
+                embedding[mask_k, 1].mean(),
+            )
+        print(f"  Loaded cluster centroids: {list(cluster_centroids.keys())}")
+    else:
+        print("  WARNING: q1_cluster_labels.npy not found, skipping cluster labels")
+
     print("\nPlotting Q1 UMAP — all 14 features grid...")
     plot_all_features(embedding, X_raw, y, OUTPUT_DIR, xlim=xlim, ylim=ylim)
 
@@ -309,6 +356,7 @@ def main() -> int:
             embedding, X_raw, y, features, group_label,
             OUTPUT_DIR, filename=f"q1_features_{group_key}.png",
             xlim=xlim, ylim=ylim, mag_label=mag_label,
+            cluster_centroids=cluster_centroids,
         )
 
     print("\nPlotting Q1 UMAP — SNR features...")
@@ -316,12 +364,14 @@ def main() -> int:
         embedding, X_raw, y, SNR_FEATURES, "SNR features",
         OUTPUT_DIR, filename="q1_features_snr.png",
         xlim=xlim, ylim=ylim, mag_label=mag_label,
+        cluster_centroids=cluster_centroids,
     )
 
     if g_mag is not None:
         print("\nPlotting Q1 UMAP — G magnitude...")
         plot_gmag(embedding, g_mag, y, OUTPUT_DIR,
-                  xlim=xlim, ylim=ylim, mag_label=mag_label)
+                  xlim=xlim, ylim=ylim, mag_label=mag_label,
+                  cluster_centroids=cluster_centroids)
     else:
         print("\n  WARNING: g_mag not found in q1_indiv.npz, skipping G mag plot.")
 

@@ -104,7 +104,8 @@ def _fmt_frac(ax):
     ax.set_ylabel("Class fraction", fontsize=13, fontweight="bold")
     ax.set_xlim(XLIM)
     ax.set_ylim(-0.02, 1.02)
-    ax.axhline(y=0.5, color="gray", ls="--", alpha=0.4)
+    # ax.axhline(y=0.5, color="gray", ls="--", alpha=0.4)
+    ax.axhline(y=0.25, color="gray", ls="--", alpha=0.4, label="25%")
     ax.xaxis.set_major_locator(ticker.MultipleLocator(2))
     ax.yaxis.set_major_locator(ticker.MultipleLocator(0.25))
     ax.tick_params(labelsize=11)
@@ -159,7 +160,7 @@ def main():
     count_ylim_q1  = int(np.ceil(c_q1_all.max()  * 1.12 / 1000) * 1000)
 
     fig, axes = plt.subplots(
-        2, 2, figsize=(12, 6),
+        2, 2, figsize=(12, 5.4),
         gridspec_kw={"height_ratios": [2.5, 1.5], "wspace": 0.25, "hspace": 0.22},
     )
     fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.09)
@@ -193,8 +194,8 @@ def main():
     # title omitted — ylabel "Class Fraction" is sufficient
     ax.axvline(x=17, color="black", linestyle="--", linewidth=1.2, alpha=0.6,
                label="$G = 17$")
-    ax.legend(fontsize=10, loc="upper left")
     _fmt_frac(ax)
+    ax.legend(fontsize=10, loc="upper left")
 
     # ── Q1: count ─────────────────────────────────────────────────────────────
     ax = axes[0, 1]
@@ -241,8 +242,8 @@ def main():
     # title omitted — ylabel "Class Fraction" is sufficient
     ax.axvline(x=17, color="black", linestyle="--", linewidth=1.2, alpha=0.6,
                label="$G = 17$")
-    ax.legend(fontsize=10, loc="upper left")
     _fmt_frac(ax)
+    ax.legend(fontsize=10, loc="upper left")
     ax.set_ylabel("")  # shared with left column
 
     # suptitle removed — covered by LaTeX caption

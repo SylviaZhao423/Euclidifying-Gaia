@@ -103,8 +103,8 @@ def _plot_panel(ax, xvals, yvals, ylabel, title, hline_y, hline_label,
     h_masked = np.ma.masked_where(h == 0, h)
     im = ax.pcolormesh(xedges, yedges, h_masked.T, cmap=truncate_cmap("PuBu", 0.3, 1.0), alpha=0.8,
                        norm=LogNorm(vmin=1), rasterized=True)
-    ax.axvline(x=17, color="black", ls="--", linewidth=1.2, alpha=0.6, label="$G = 17$")
-    ax.axhline(y=hline_y, color="tomato", ls="--", linewidth=1.5, label=hline_label)
+    ax.axvline(x=17, color="dimgray", ls="--", linewidth=1.2, alpha=0.6, label="$G = 17$")
+    ax.axhline(y=hline_y, color="sandybrown", ls="--", linewidth=1.5, label=hline_label)
     ax.set_xlabel("Gaia G (mag)", fontsize=13, fontweight="bold")
     if show_ylabel:
         ax.set_ylabel(ylabel, fontsize=13, fontweight="bold", labelpad=10)
@@ -138,6 +138,15 @@ def main():
         title="ERO \u00d7 Gaia",
         hline_y=0.65, hline_label="threshold = 0.65",
     )
+    # Box: G > 17, class_star > 0.9
+    from matplotlib.patches import Rectangle
+    rect0 = Rectangle(
+        (17, 0.9), 23 - 17, 1.0 - 0.9,
+        linewidth=2.5, edgecolor="orangered", facecolor="none",
+        ls="--", clip_on=False, zorder=10,
+    )
+    axes[0].add_patch(rect0)
+
     im2 = _plot_panel(
         axes[1],
         xvals=df_q1["gaia_g"].values,
@@ -147,6 +156,13 @@ def main():
         hline_y=0.5, hline_label="threshold = 0.5",
         show_ylabel=True,
     )
+    # Box: G > 17, full y range
+    rect1 = Rectangle(
+        (17, 0), 23 - 17, 1.0,
+        linewidth=2.5, edgecolor="orangered", facecolor="none",
+        ls="--", clip_on=False, zorder=10,
+    )
+    axes[1].add_patch(rect1)
     # Single shared colorbar
     cbar_ax = fig.add_axes([0.91, 0.14, 0.014, 0.76])
     cb = fig.colorbar(im2, cax=cbar_ax)

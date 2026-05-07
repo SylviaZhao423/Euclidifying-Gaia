@@ -97,7 +97,7 @@ def query_ero(username):
         WHERE e_v_class_star IS NOT NULL
           AND g_phot_g_mean_mag IS NOT NULL
           AND g_phot_g_mean_mag >= 15
-        ORDER BY g_source_id
+        ORDER BY g_random_index
     """
     print("  Querying ERO training data (G >= 15, class_star IS NOT NULL)...")
     df = pd.read_sql_query(query, conn)

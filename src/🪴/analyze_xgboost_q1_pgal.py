@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Investigate XGBoost P(gal) threshold on random Gaia sources
-using the Optuna F1-tuned model.
+using the Original Q1-only model.
 
 Two plots:
   1. P(gal) distribution of the 50k random Gaia sample, with threshold
@@ -11,19 +11,20 @@ Two plots:
 
 Reads:
   output/umap/arrays/gaia_random.npz          (Gaia features)
-  output/umap/arrays/q1_indiv.npz             (Q1 labels for TPR/FPR)
-  output/xgboost_q1_op_f1/xgb_classifier_q1.json
+  WSDB (Q1 data for per-seed TPR/FPR evaluation)
+  output/xgboost_q1/seed_models/*.json
 
-Writes (into output/xgboost_q1_op_f1/):
+Writes (into output/xgboost_q1/):
   gaia_pgal_distribution.png
   gaia_base_rate_recalibration.png
 
 Usage:
-  python src/analyze_gaia_pgal_threshold_op_f1.py
+  PGUSER=siwei_zhao_2025 python src/analyze_pgal_gaia.py
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -31,14 +32,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-MODEL_DIR   = PROJECT_DIR / "output" / "xgboost_q1_op_f1"
-MODEL_LABEL = "Q1-only (Optuna F1)"
+MODEL_DIR   = PROJECT_DIR / "output" / "xgboost_q1"
+MODEL_LABEL = "Q1-only"
+
+WSDB_HOST = 'wsdb.ast.cam.ac.uk'
+WSDB_DB   = 'wsdb'
+MAG_CUT   = 17
+CLASS_MAPPING = {'STAR': 0, 'GALAXY': 1}
+SEEDS = [42, 123, 456, 789, 2025, 314, 999, 1337, 7777, 31415]
 
 
 # ── Plot 1: P(gal) distribution ─────────────────────────────────────────────
@@ -55,7 +62,7 @@ def plot_pgal_distribution(p: np.ndarray, output_dir: Path) -> None:
 
     # [0] Full histogram
     ax = axes[0]
-    bins = np.linspace(0, 1, 201)
+    bins = np.linspace(0, 1, 101)
     ax.hist(p, bins=bins, color="steelblue", alpha=0.8, edgecolor="none")
     for t, col, lab in thresholds_mark:
         ax.axvline(t, color=col, lw=2, ls="--", label=lab)
@@ -75,13 +82,12 @@ def plot_pgal_distribution(p: np.ndarray, output_dir: Path) -> None:
                label="1% of sample")
     for t, col, _ in thresholds_mark:
         ax.axvline(t, color=col, lw=1.5, ls="--")
+    bbox_gap = dict(boxstyle='round,pad=0.15', facecolor='white',
+                    edgecolor='none', alpha=0.7)
     for t, col, _ in thresholds_mark:
         c = int((p >= t).sum())
-        ax.annotate(
-            f"{c:,}", xy=(t, c), xytext=(t + 0.04, c * 1.5),
-            fontsize=9, color=col, fontweight="bold",
-            arrowprops=dict(arrowstyle="->", color=col, lw=1.2),
-        )
+        ax.text(t, c, f"{c:,}", fontsize=9, fontweight="bold",
+                color=col, ha='center', va='center', bbox=bbox_gap, zorder=10)
     ax.set_xlabel("P(gal) threshold", fontsize=11)
     ax.set_ylabel("N predicted galaxies", fontsize=11)
     ax.set_title("Predicted galaxy count vs threshold",
@@ -115,20 +121,17 @@ def plot_base_rate_recalibration(
 
     # [0] Purity vs galaxy fraction
     ax = axes[0]
+    bbox_gap = dict(boxstyle='round,pad=0.15', facecolor='white',
+                    edgecolor='none', alpha=0.7)
     for thresh, tpr, fpr, col in threshold_curves:
         prec = tpr * pi_range / (tpr * pi_range + fpr * (1 - pi_range))
         ax.plot(pi_range * 100, prec * 100, color=col, lw=2.5,
                 label=f"Threshold {thresh} (TPR={tpr:.3f}, FPR={fpr:.4f})")
         for pi_mark, pi_label in mark_points:
             p_mark = tpr * pi_mark / (tpr * pi_mark + fpr * (1 - pi_mark))
-            ax.scatter(pi_mark * 100, p_mark * 100, s=40, zorder=5,
-                       color=col, edgecolors="k", linewidths=0.5)
-            oxy = (5, -12) if thresh >= 0.9 else (5, 2)
-            ax.annotate(
-                f" {p_mark:.0%}", xy=(pi_mark * 100, p_mark * 100),
-                xytext=oxy, textcoords="offset points",
-                fontsize=7, color=col, fontweight="bold",
-            )
+            ax.text(pi_mark * 100, p_mark * 100, f"{p_mark:.0%}",
+                    fontsize=7, fontweight="bold", color=col,
+                    ha='center', va='center', bbox=bbox_gap, zorder=10)
     ax.axhline(50, color="grey", lw=1, ls=":", alpha=0.5, label="50% purity")
     ax.axvspan(1, 3, color="steelblue", alpha=0.12, zorder=0,
                label="Est. Gaia gal. fraction (1\u20133%)")
@@ -153,14 +156,9 @@ def plot_base_rate_recalibration(
         for pi_mark, pi_label in mark_points:
             p_mark = tpr * pi_mark / (tpr * pi_mark + fpr * (1 - pi_mark))
             contam = 1 - p_mark
-            ax.scatter(pi_mark * 100, contam * 100, s=40, zorder=5,
-                       color=col, edgecolors="k", linewidths=0.5)
-            oxy = (5, 8) if thresh >= 0.9 else (5, 2)
-            ax.annotate(
-                f" {contam:.0%}", xy=(pi_mark * 100, contam * 100),
-                xytext=oxy, textcoords="offset points",
-                fontsize=7, color=col, fontweight="bold",
-            )
+            ax.text(pi_mark * 100, contam * 100, f"{contam:.0%}",
+                    fontsize=7, fontweight="bold", color=col,
+                    ha='center', va='center', bbox=bbox_gap, zorder=10)
     ax.axhline(50, color="grey", lw=1, ls=":", alpha=0.5)
     ax.axvspan(1, 3, color="steelblue", alpha=0.12, zorder=0,
                label="Est. Gaia gal. fraction (1\u20133%)")
@@ -192,52 +190,82 @@ def main() -> int:
     output_dir = MODEL_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. Load Gaia features from gaia_random.npz ─────────────────────────
-    npz_path = ARRAYS_DIR / "gaia_random.npz"
-    if not npz_path.exists():
-        print(f"ERROR: {npz_path} not found.")
-        print("Run query_umap_q1_50k.py first.")
+    # ── 1. Load random Gaia sources ─────────────────────────────────────────
+    gaia_path = PROJECT_DIR / "output" / "gaia_50k" / "gaia_random_50k.npz"
+    if not gaia_path.exists():
+        print(f"ERROR: {gaia_path} not found. Run query_gaia_random.py first.")
         return 1
 
     print(f"[1] Loading Gaia sources ({MODEL_LABEL})...")
-    g = np.load(npz_path, allow_pickle=True)
     feat_names = list(SELECTED_GAIA_PARAMETERS)
-    X_gaia = g["X_features"].astype(float)
+    X_gaia = np.load(gaia_path)["X"].astype(float)
     print(f"  {len(X_gaia):,} sources, {len(feat_names)} features")
 
-    # ── 2. Load model and predict P(gal) ───────────────────────────────────
-    model_path = MODEL_DIR / "xgb_classifier_q1.json"
-    q1_path    = ARRAYS_DIR / "q1_indiv.npz"
-    if not model_path.exists():
-        print(f"ERROR: {model_path} not found.")
-        print("Run train_xgboost_q1_op_F1.py first.")
-        return 1
-    if not q1_path.exists():
-        print(f"ERROR: {q1_path} not found.")
+    # ── 2. Ensemble predict P(gal) ───────────────────────────────────────────
+    seed_dir = MODEL_DIR / "seed_models"
+    if not seed_dir.exists():
+        print(f"ERROR: {seed_dir} not found. Run train_xgboost_q1.py first.")
         return 1
 
-    print(f"\n[2] Predicting P(gal) on Gaia sample...")
-    model = xgb.XGBClassifier()
-    model.load_model(str(model_path))
-
-    dmat_gaia = xgb.DMatrix(X_gaia, feature_names=feat_names)
-    p = model.get_booster().predict(dmat_gaia)
+    print(f"\n[2] Ensemble prediction on Gaia sample...")
+    probas = []
+    for seed in SEEDS:
+        mp = seed_dir / f"xgb_classifier_q1_seed{seed}.json"
+        if not mp.exists():
+            continue
+        m = xgb.XGBClassifier()
+        m.load_model(str(mp))
+        probas.append(m.predict_proba(X_gaia)[:, 1])
+    p = np.mean(probas, axis=0)
+    print(f"  {len(probas)} seed models")
 
     print(f"  P(gal) range: [{p.min():.4f}, {p.max():.4f}]")
     print(f"  P(gal) > 0.5: {(p >= 0.5).sum():,}  ({100*(p >= 0.5).mean():.1f}%)")
     print(f"  P(gal) > 0.7: {(p >= 0.7).sum():,}  ({100*(p >= 0.7).mean():.1f}%)")
     print(f"  P(gal) > 0.9: {(p >= 0.9).sum():,}  ({100*(p >= 0.9).mean():.1f}%)")
 
-    # ── 3. Compute TPR / FPR at multiple thresholds on Q1 data ─────────────
+    # ── 3. Compute TPR / FPR via per-seed evaluation on Q1 data ─────────────
     print(f"\n[3] Computing TPR / FPR at multiple thresholds on Q1 data...")
-    q1    = np.load(q1_path, allow_pickle=True)
-    X_raw = q1["X_raw"]
-    y     = q1["y"]
+    username = os.environ.get("PGUSER")
+    if not username:
+        print("ERROR: PGUSER not set.")
+        return 1
 
-    dmat_q1 = xgb.DMatrix(X_raw, feature_names=feat_names)
-    proba_q1 = model.get_booster().predict(dmat_q1)
+    import psycopg2
+    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
+    gaia_cols = ', '.join([f'g_{col} AS {col}' for col in feat_names])
+    query = f"""
+        SELECT {gaia_cols},
+               CASE WHEN p_phz_classification = 1 THEN 'STAR'
+                    WHEN p_phz_classification = 2 THEN 'GALAXY' END AS label
+        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia_sep
+        WHERE p_phz_classification IN (1, 2)
+          AND g_phot_g_mean_mag >= {MAG_CUT}
+        ORDER BY g_random_index
+    """
+    df_q1 = pd.read_sql_query(query, conn)
+    conn.close()
+    for c in feat_names:
+        df_q1[c] = pd.to_numeric(df_q1[c].replace('NOT_AVAILABLE', np.nan), errors='coerce')
+    X_q1 = df_q1[feat_names].values
+    y_q1 = df_q1['label'].map(CLASS_MAPPING).values
+    print(f"  Q1: {len(X_q1):,} sources  STAR: {(y_q1==0).sum():,}  GALAXY: {(y_q1==1).sum():,}")
 
-    pi_q1 = (y == 1).sum() / len(y)
+    pi_q1 = (y_q1 == 1).sum() / len(y_q1)
+
+    # Per-seed predictions
+    seed_dir = MODEL_DIR / "seed_models"
+    seed_preds = []
+    for seed in SEEDS:
+        mp = seed_dir / f"xgb_classifier_q1_seed{seed}.json"
+        if not mp.exists():
+            continue
+        _, X_ts, _, y_ts = train_test_split(
+            X_q1, y_q1, test_size=0.15, random_state=seed, stratify=y_q1)
+        m = xgb.XGBClassifier()
+        m.load_model(str(mp))
+        seed_preds.append((y_ts, m.predict_proba(X_ts)[:, 1]))
+    print(f"  Loaded {len(seed_preds)} seed models")
 
     thresholds_to_plot = [
         (0.5, "red"),
@@ -246,14 +274,17 @@ def main() -> int:
     ]
     threshold_curves = []
     for thresh, col in thresholds_to_plot:
-        pred_gal = proba_q1 >= thresh
-        tp  = (pred_gal & (y == 1)).sum()
-        fp  = (pred_gal & (y == 0)).sum()
-        fn  = (~pred_gal & (y == 1)).sum()
-        tn  = (~pred_gal & (y == 0)).sum()
-        tpr = tp / (tp + fn)
-        fpr = fp / (fp + tn)
-        prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+        tp_s, fp_s, fn_s, tn_s = 0, 0, 0, 0
+        for y_ts, p_ts in seed_preds:
+            pred_gal = p_ts >= thresh
+            tp_s += (pred_gal & (y_ts == 1)).sum()
+            fp_s += (pred_gal & (y_ts == 0)).sum()
+            fn_s += (~pred_gal & (y_ts == 1)).sum()
+            tn_s += (~pred_gal & (y_ts == 0)).sum()
+        n = len(seed_preds)
+        tpr = (tp_s/n) / max(tp_s/n + fn_s/n, 1)
+        fpr = (fp_s/n) / max(fp_s/n + tn_s/n, 1)
+        prec = (tp_s/n) / max(tp_s/n + fp_s/n, 1)
         threshold_curves.append((thresh, tpr, fpr, col))
         print(f"  Threshold {thresh}:  TPR={tpr:.4f}  FPR={fpr:.4f}  Precision={prec:.4f}")
 
