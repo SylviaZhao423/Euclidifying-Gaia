@@ -140,10 +140,10 @@ plt.savefig(out, dpi=150, bbox_inches="tight")
 plt.close()
 print(f"  -> {out}")
 
-# ── 3-panel plot: Random (left), High-lat (middle), Difference (right) ──
-print("\n[3] Plotting 3-panel split...")
-fig, (ax_r, ax_h, ax_d) = plt.subplots(1, 3, figsize=(22, 5))
-fig.subplots_adjust(wspace=0.3)
+# ── 2-panel plot: Random (left) and High-lat (right) ──
+print("\n[3] Plotting 2-panel split...")
+fig, (ax_r, ax_h) = plt.subplots(1, 2, figsize=(16, 5))
+fig.subplots_adjust(wspace=0.25)
 
 # Group traces by sample
 sample_traces = {"Random": [], "High-lat": []}
@@ -157,7 +157,7 @@ for ax, sample_name in zip([ax_r, ax_h], ["Random", "High-lat"]):
 
     # Left y-axis: histograms
     for label, p, color, ls, n in reversed(st):
-        ax.hist(p, bins=bins, alpha=0.25, color=color,
+        ax.hist(p, bins=bins, alpha=0.5, color=color,
                 histtype='stepfilled', linewidth=0)
         ax.hist(p, bins=bins, color=color, histtype='step',
                 linewidth=1.5, ls=ls, label=label)
@@ -202,43 +202,6 @@ for ax, sample_name in zip([ax_r, ax_h], ["Random", "High-lat"]):
                      color=color, ha='center', va='center', bbox=bbox_gap2, zorder=10)
 
     ax.legend(fontsize=9, loc='upper right')
-
-# ── Panel 3: Difference (Q1-only minus 8.6:1 ERO fraction curves) ──
-ax = ax_d
-diff_colors = {"Random": "#2196F3", "High-lat": "lightpink"}
-bbox_gap3 = dict(boxstyle='round,pad=0.15', facecolor='white',
-                 edgecolor='none', alpha=1.0)
-
-for sample_name in ["Random", "High-lat"]:
-    st = sample_traces[sample_name]
-    # Find Q1-only and ERO traces
-    p_q1 = [p for label, p, _, _, _ in st if "Q1-only" in label][0]
-    p_ero = [p for label, p, _, _, _ in st if "ERO" in label][0]
-
-    # Fraction above threshold curves
-    frac_q1 = np.array([(p_q1 >= t).mean() * 100 for t in t_range])
-    frac_ero = np.array([(p_ero >= t).mean() * 100 for t in t_range])
-    diff = frac_q1 - frac_ero  # positive = Q1-only predicts more galaxies
-
-    ax.plot(t_range, diff, color=diff_colors[sample_name], lw=2,
-            label=sample_name)
-
-    # Inline labels at 0.5 and 0.9
-    for t in [0.5, 0.9]:
-        ti = np.argmin(np.abs(t_range - t))
-        ax.text(t, diff[ti], f"{diff[ti]:.1f}%", fontsize=11, fontweight="bold",
-                color=diff_colors[sample_name], ha='center', va='bottom',
-                bbox=bbox_gap3, zorder=10)
-
-ax.axhline(0, color="grey", lw=1, ls=":", alpha=0.5)
-for t, col, mls in [(0.5, 'black', '--'), (0.9, 'green', '--')]:
-    ax.axvline(t, color=col, lw=1.5, ls=mls, alpha=0.5)
-ax.set_xlabel("P(gal)", fontsize=14, fontweight="bold")
-ax.set_ylabel("Fraction difference (%)\n(Q1-only \u2212 8.6:1 ERO)", fontsize=12, fontweight="bold")
-ax.set_title("Reduction in predicted galaxy fraction", fontsize=14, fontweight="bold")
-ax.tick_params(labelsize=12)
-ax.legend(fontsize=11)
-ax.grid(alpha=0.3)
 
 out2 = PROJECT_DIR / "output" / "pgal_gaia_whilat_split.png"
 fig.savefig(out2, dpi=150, bbox_inches="tight")

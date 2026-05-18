@@ -328,13 +328,13 @@ def plot_sweep_thresholds(ratio_vals, ratio_labels, tpr_grid, fpr_grid,
         # Set y-axis: Precision gets round bounds, others auto
         all_vals = grid.ravel()
         if metric_name == 'Precision':
-            ax.set_ylim(0.83, 1.03)
+            ax.set_ylim(0.81, 1.04)
             ax.set_yticks([0.9, 1.0])
         elif metric_name == 'F1':
-            ax.set_ylim(0.48, 0.68)
+            ax.set_ylim(0.45, 0.68)
             ax.set_yticks([0.5, 0.6])
         else:
-            ax.set_ylim(0.32, 0.52)
+            ax.set_ylim(0.30, 0.53)
             ax.set_yticks([0.4, 0.5])
         ax.grid(alpha=0.3)
         ax.tick_params(labelsize=11)

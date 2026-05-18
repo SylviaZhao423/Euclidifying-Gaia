@@ -81,18 +81,18 @@ SNR_FEATURES = ["parallax_over_error", "pm_significance", "phot_g_mean_flux_over
 def plot_all_features(embedding, X_raw, y, output_dir,
                       filename="q1_features.png",
                       xlim=None, ylim=None, cluster_centroids=None):
-    """4-column grid of all 14 Gaia features, star (top) / galaxy (bottom) per panel."""
+    """3-column grid of all 14 Gaia features, star (top) / galaxy (bottom) per panel."""
     n_features = len(SELECTED_GAIA_PARAMETERS)
-    ncols = 4
+    ncols = 3
     nfeature_rows = int(np.ceil(n_features / ncols))
 
     m_star = y == 0
     m_gal  = y == 1
 
-    per_panel_height = 1.2
+    per_panel_height = 1.8
     panel_h   = 1.0
-    inner_gap = 0.04
-    outer_gap = 0.32
+    inner_gap = 0.08
+    outer_gap = 0.34
 
     height_ratios = []
     for i in range(nfeature_rows):
@@ -101,13 +101,13 @@ def plot_all_features(embedding, X_raw, y, output_dir,
             height_ratios.append(outer_gap)
 
     panel_fraction = panel_h / sum(height_ratios)
-    fig_width  = ncols * 3.8
+    fig_width  = ncols * 5
     fig_height = per_panel_height / panel_fraction
 
     fig = plt.figure(figsize=(fig_width, fig_height))
     gs  = GridSpec(len(height_ratios), ncols,
                    figure=fig, height_ratios=height_ratios,
-                   hspace=0, wspace=0.22)
+                   hspace=0, wspace=0.2)
 
     def _gs_top(feat_row): return feat_row * 4
     def _gs_bot(feat_row): return feat_row * 4 + 2
@@ -144,12 +144,12 @@ def plot_all_features(embedding, X_raw, y, output_dir,
             if ylim is not None:
                 ax.set_ylim(ylim)
             if col == 0:
-                ax.set_ylabel(label, fontsize=9, fontweight="bold", labelpad=10)
+                ax.set_ylabel(label, fontsize=14, fontweight="bold", labelpad=12)
             else:
                 ax.set_ylabel("")
 
-        fig.colorbar(sc, ax=[ax_top, ax_bot], pad=0.02, fraction=0.046).ax.tick_params(labelsize=9)
-        ax_top.set_title(feat_name, fontsize=10, fontweight="bold", pad=6)
+        fig.colorbar(sc, ax=[ax_top, ax_bot], pad=0.02, fraction=0.046).ax.tick_params(labelsize=11)
+        ax_top.set_title(feat_name, fontsize=14, fontweight="bold", pad=10)
         if cluster_centroids is not None:
             for ax in (ax_top, ax_bot):
                 _add_cluster_labels(ax, cluster_centroids)
@@ -161,7 +161,7 @@ def plot_all_features(embedding, X_raw, y, output_dir,
         fig.add_subplot(gs[_gs_bot(feat_row), col]).set_visible(False)
 
     out = output_dir / filename
-    plt.savefig(out, dpi=150, bbox_inches="tight")
+    plt.savefig(out, dpi=200, bbox_inches="tight")
     plt.close()
     print(f"  -> Saved: {out}")
 
@@ -178,10 +178,10 @@ def plot_feature_group(embedding, X_raw, y, features, group_label,
     m_gal  = y == 1
 
     panel_h   = 1.0
-    inner_gap = 0.04
+    inner_gap = 0.08
     height_ratios = [panel_h, inner_gap, panel_h]
 
-    per_panel_height = 1.3
+    per_panel_height = 1.5
     panel_fraction = panel_h / sum(height_ratios)
     fig_width  = ncols * 3.8
     fig_height = per_panel_height / panel_fraction

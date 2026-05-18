@@ -63,7 +63,7 @@ def main():
     euclid_tx[euclid_wl < 530] = 0.0
     euclid_tx = euclid_tx / euclid_tx.max()
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 4.3))
 
     # Gaia bands — matching Jordi+2010 style
     ax.plot(gaia_BP_wl, gaia_BP_tx, color="royalblue",  lw=2.0, ls=":",

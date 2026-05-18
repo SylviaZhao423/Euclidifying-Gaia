@@ -13,14 +13,17 @@ Each panel shows one Gaia feature with:
 
 Reads:
   output/umap/arrays/q1_indiv.npz
-  output/umap/arrays/projected/gaia_random_projected.csv
+  output/umap/arrays/projected/gaia_random_projected.csv  (always)
+  output/umap/arrays/projected/gaia_hilat_projected.csv   (unless --no-hilat)
+  output/umap/arrays/projected/gaia_lolat_projected.csv   (unless --no-lolat)
 
 Writes:
-  output/umap/q1_individual/q1_space_gaia_features.png
+  output/umap/q1_individual/q1_space_gaia_features{,_hilat,_lolat}.png
 
 Usage:
   python src/analyze_umap_q1_space_gaia_features.py
-  python src/analyze_umap_q1_space_gaia_features.py --hilat
+  python src/analyze_umap_q1_space_gaia_features.py --no-hilat
+  python src/analyze_umap_q1_space_gaia_features.py --no-lolat
 """
 
 from __future__ import annotations
@@ -57,7 +60,7 @@ def plot_gaia_features(
     output_dir: Path,
     filename:   str = "q1_space_gaia_features.png",
     xlim=None, ylim=None,
-    hilat:      bool = False,
+    lat_mode:   str  = "all",   # "all" | "hilat" | "lolat" — drives subset_label
     feat_ranges: dict = None,
 ):
     features      = [f for f in SELECTED_GAIA_PARAMETERS if f in feat_vals
@@ -146,7 +149,11 @@ def plot_gaia_features(
         fig.add_subplot(gs[_gs_top(feat_row), col]).set_visible(False)
         fig.add_subplot(gs[_gs_bot(feat_row), col]).set_visible(False)
 
-    subset_label = "High-latitude Gaia" if hilat else "Random Gaia"
+    subset_label = {
+        "hilat": "High-latitude Gaia",
+        "lolat": "Low-latitude Gaia",
+        "all":   "Random Gaia",
+    }[lat_mode]
     fig.suptitle(
         f"{subset_label} sources in Q1 UMAP space coloured by Gaia features  "
         f"(G ≥ {MAG_CUT}, {n_features} features)\n"
@@ -168,6 +175,8 @@ def main() -> int:
     )
     parser.add_argument("--no-hilat", action="store_true",
                         help="Skip high-latitude subset.")
+    parser.add_argument("--no-lolat", action="store_true",
+                        help="Skip low-latitude subset.")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -179,12 +188,18 @@ def main() -> int:
     print(f"  Q1: {len(q1_emb):,} sources")
 
     # ── 2. Variants to run ───────────────────────────────────────────────────
+    # variant tuple: (csv_name, file_suffix, latitude_mode) where
+    # latitude_mode is "all"|"hilat"|"lolat" — controls subset_label in plot.
     variants = [
-        ("gaia_random_projected.csv", "", False),
+        ("gaia_random_projected.csv", "", "all"),
     ]
     if not args.no_hilat:
         variants.append(
-            ("gaia_hilat_projected.csv", "_hilat", True),
+            ("gaia_hilat_projected.csv", "_hilat", "hilat"),
+        )
+    if not args.no_lolat:
+        variants.append(
+            ("gaia_lolat_projected.csv", "_lolat", "lolat"),
         )
 
     # ── Pre-compute shared feature color ranges across all variants ──────────
@@ -212,7 +227,7 @@ def main() -> int:
             feat_ranges[col] = (lo, hi)
     print(f"  Computed ranges for {len(feat_ranges)} features")
 
-    for csv_name, suffix, hilat in variants:
+    for csv_name, suffix, lat_mode in variants:
         csv_path = PROJECTED_DIR / csv_name
         if not csv_path.exists():
             print(f"ERROR: {csv_path} not found.")
@@ -257,7 +272,7 @@ def main() -> int:
             q1_emb, gaia_emb, gal_prob, feat_vals, OUTPUT_DIR,
             filename=f"q1_space_gaia_features{suffix}.png",
             xlim=xlim, ylim=ylim,
-            hilat=hilat,
+            lat_mode=lat_mode,
             feat_ranges=feat_ranges,
         )
 

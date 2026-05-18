@@ -14,6 +14,7 @@ Projections:
   E. ERO×DESI         — ERO×DESI cross-match projected (ero_desi.npz)
   F. Gaia random      — Gaia DR3 random subset projected (gaia_random.npz)
   G. Gaia high-lat    — Gaia DR3 high-lat subset projected (gaia_hilat.npz)
+  H. Gaia low-lat     — Gaia DR3 low-lat subset projected (gaia_lolat.npz)
 
 Output CSVs (under output/umap/arrays/projected/):
   q1_allphz_projected.csv
@@ -23,6 +24,7 @@ Output CSVs (under output/umap/arrays/projected/):
   ero_desi_projected.csv
   gaia_random_projected.csv
   gaia_hilat_projected.csv
+  gaia_lolat_projected.csv
 
 Usage:
   python src/query_umap_q1_projections.py
@@ -396,6 +398,17 @@ def main() -> int:
             print("  gaia_hilat.npz not found — skipping.")
         else:
             df = project_gaia("gaia_hilat.npz", q1_mean, std_safe, reducer,
+                              q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
+
+        # ── H. Gaia low-lat ──────────────────────────────────────────────────
+        csv_path = PROJECTED_DIR / "gaia_lolat_projected.csv"
+        print(f"\n[H] Gaia low-lat projection...")
+        if not (ARRAYS_DIR / "gaia_lolat.npz").exists():
+            print("  gaia_lolat.npz not found — skipping.")
+        else:
+            df = project_gaia("gaia_lolat.npz", q1_mean, std_safe, reducer,
                               q1_emb, q1_labels)
             df.to_csv(csv_path, index=False, float_format="%.17g")
             print(f"  Saved -> {csv_path}  ({len(df):,} sources)")

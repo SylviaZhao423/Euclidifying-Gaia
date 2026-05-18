@@ -262,6 +262,13 @@ var _priorityReady = Promise.all([
     var _selFeat2 = document.getElementById('color-mode-select');
     recolorOverlayTraces(_selFeat2 ? _selFeat2.value : 'model_pgal');
   }
+  /* CRITICAL: re-run visibility + z-axis init now that DATASET_BASE is loaded.
+     The synchronous switchOverlay() call at page-load time ran with DATASET_BASE={},
+     which caused switchBaseDataset()'s early-return guard to skip the gaia-XGB layer
+     setup. Re-applying both ensures the projected Gaia traces are visible + at the
+     correct normalised z values. */
+  if (typeof applyVisibility === 'function') applyVisibility();
+  if (typeof applyZAxis === 'function') applyZAxis(_currentZ || 'g_mag');
   if (typeof plotDiv !== 'undefined') Plotly.redraw(plotDiv);
   /* Init sky panel */
   var _firstKey = Object.keys(SKY_DATASETS)[0] || 'gaia_random';

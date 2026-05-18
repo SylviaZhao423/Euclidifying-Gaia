@@ -225,7 +225,7 @@ def _vlines(ax, dm, sep, radii_marks, colors, sep_for_count=None):
     n_r = (np.isfinite(sc) & (sc <= r)).sum()
     pct = 100 * n_r / n_finite if n_finite else 0
     ax.axvline(r, color="black", linewidth=1.2, linestyle="--", alpha=0.85,
-               label=f'{r:.1f}″  n={n_r:,} ({pct:.0f}%)')
+               label=f'{r:.1f}″  n={n_r:,} / {n_finite:,} ({pct:.0f}%)')
 
 
 def _panel_density(ax, sep, dm, title, ylabel=True, sep_raw=None, xlabel=True):

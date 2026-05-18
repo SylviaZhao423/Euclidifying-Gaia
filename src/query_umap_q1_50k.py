@@ -379,81 +379,87 @@ def query_ero_desi(username: str) -> pd.DataFrame:
 
 
 def query_gaia_subset(username: str, n_sample: int,
-                      hilat: bool = False) -> pd.DataFrame:
+                      mode: str = "all") -> pd.DataFrame:
     """Query a random Gaia DR3 subset with the UMAP/XGBoost feature columns.
 
-    Derived columns (corrected_bp_rp_excess, pm_significance, position_error)
-    are computed in SQL since they aren't pre-computed in gaia_source.
+    Pulls from the pre-built {username}.gaia_source_hilat / _lolat tables,
+    which already contain the derived columns (corrected_bp_rp_excess,
+    pm_significance, position_error, bp_g, g_rp) — no SQL recomputation.
+
+      mode="all"    → UNION ALL of gaia_source_hilat + gaia_source_lolat
+                       (covers all of Gaia DR3, ~1.65B sources)
+      mode="hilat"  → only gaia_source_hilat  (140M sources, high galactic |b|)
+      mode="lolat"  → only gaia_source_lolat  (1.5B sources, low galactic |b|)
     """
     import psycopg2
 
-    raw_select = """
+    if mode not in ("all", "hilat", "lolat"):
+        raise ValueError(f"mode must be all/hilat/lolat (got {mode!r})")
+
+    SELECT_COLS = """
+        source_id,
+        random_index,
+        ra, dec,
+        b, ecl_lat,
+        phot_g_mean_mag,
         parallax_over_error, astrometric_gof_al, astrometric_chi2_al,
         astrometric_excess_noise_sig, ipd_gof_harmonic_amplitude, ruwe,
         phot_g_mean_flux_over_error, phot_bp_mean_flux_over_error,
         phot_rp_mean_flux_over_error,
-        phot_bp_mean_mag - phot_g_mean_mag AS bp_g,
-        phot_g_mean_mag - phot_rp_mean_mag AS g_rp,
-        phot_bp_rp_excess_factor - (
-            CASE
-                WHEN bp_rp < 0.5 THEN 1.154360 + 0.033772*bp_rp + 0.032277*bp_rp*bp_rp
-                WHEN bp_rp < 4.0 THEN 1.162004 + 0.011464*bp_rp + 0.049255*bp_rp*bp_rp
-                                       - 0.005879*bp_rp*bp_rp*bp_rp
-                ELSE 1.057572 + 0.140537*bp_rp
-            END
-        ) AS corrected_bp_rp_excess,
-        SQRT(
-            (pmra*pmra*pmdec_error*pmdec_error
-             - 2.0*pmra_pmdec_corr*pmra_error*pmdec_error*pmra*pmdec
-             + pmdec*pmdec*pmra_error*pmra_error)
-            / NULLIF(pmra_error*pmra_error*pmdec_error*pmdec_error
-                     *(1.0 - pmra_pmdec_corr*pmra_pmdec_corr), 0)
-        ) AS pm_significance,
-        SQRT(ra_error*ra_error*dec_error*dec_error
-             *(1.0 - ra_dec_corr*ra_dec_corr)) AS position_error
+        bp_g, g_rp, corrected_bp_rp_excess,
+        pm_significance, position_error
     """
 
     conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
 
-    if hilat:
-        hilat_table = f"{username}.gaia_source_hilat"
+    if mode == "hilat":
+        # High-latitude only: hilat is ~140M rows (~7.8% of full Gaia)
+        # threshold scaling 15× ≈ ri ~ 750k for 50k sample (fast)
         ri_threshold = int(n_sample * 15)
         query = f"""
-            SELECT
-                source_id,
-                ra, dec,
-                b, ecl_lat,
-                phot_g_mean_mag,
-                parallax_over_error, astrometric_gof_al, astrometric_chi2_al,
-                astrometric_excess_noise_sig, ipd_gof_harmonic_amplitude, ruwe,
-                phot_g_mean_flux_over_error, phot_bp_mean_flux_over_error,
-                phot_rp_mean_flux_over_error,
-                bp_g, g_rp, corrected_bp_rp_excess,
-                pm_significance, position_error
-            FROM {hilat_table}
+            SELECT {SELECT_COLS}
+            FROM {username}.gaia_source_hilat
             WHERE random_index < {ri_threshold}
+              AND phot_g_mean_mag >= {MAG_CUT}
             ORDER BY random_index
             LIMIT {n_sample}
         """
-    else:
+    elif mode == "lolat":
+        # Low-latitude only: lolat is ~1.5B rows (~92% of full Gaia)
+        # threshold scaling 3× is enough for a 50k sample
         ri_threshold = int(n_sample * 3)
         query = f"""
-            SELECT
-                source_id,
-                ra, dec,
-                b, ecl_lat,
-                phot_g_mean_mag,
-                {raw_select}
-            FROM gaia_dr3.gaia_source
+            SELECT {SELECT_COLS}
+            FROM {username}.gaia_source_lolat
             WHERE random_index < {ri_threshold}
               AND phot_g_mean_mag >= {MAG_CUT}
-              AND phot_g_mean_mag IS NOT NULL
+            ORDER BY random_index
+            LIMIT {n_sample}
+        """
+    else:  # mode == "all"
+        # All-sky: UNION ALL of hilat + lolat covers full Gaia DR3.
+        # random_index is preserved across both tables, so a global
+        # threshold yields a representative all-sky random sample.
+        ri_threshold = int(n_sample * 3)
+        query = f"""
+            SELECT * FROM (
+                SELECT {SELECT_COLS}
+                FROM {username}.gaia_source_hilat
+                WHERE random_index < {ri_threshold}
+                  AND phot_g_mean_mag >= {MAG_CUT}
+                UNION ALL
+                SELECT {SELECT_COLS}
+                FROM {username}.gaia_source_lolat
+                WHERE random_index < {ri_threshold}
+                  AND phot_g_mean_mag >= {MAG_CUT}
+            ) AS u
             ORDER BY random_index
             LIMIT {n_sample}
         """
 
-    label = "high-lat " if hilat else ""
-    print(f"  Querying ~{n_sample:,} {label}Gaia DR3 sources (G >= {MAG_CUT})...")
+    label = {"all": "all-sky ", "hilat": "high-lat ", "lolat": "low-lat "}[mode]
+    print(f"  Querying ~{n_sample:,} {label}Gaia DR3 sources (G >= {MAG_CUT}) "
+          f"from pre-built hi/lolat tables...")
     df = pd.read_sql_query(query, conn)
     conn.close()
 
@@ -480,6 +486,8 @@ def main() -> int:
                         help="Number of random Gaia sources (default: 50000)")
     parser.add_argument("--no-hilat", action="store_true",
                         help="Skip high-latitude Gaia subset")
+    parser.add_argument("--no-lolat", action="store_true",
+                        help="Skip low-latitude Gaia subset")
     args = parser.parse_args()
 
     username = os.getenv("PGUSER")
@@ -673,9 +681,9 @@ def main() -> int:
              cat_value=ero_desi_df["cat_value"].values)
     print(f"  -> ero_desi.npz  ({len(ero_desi_df):,} sources)")
 
-    # ── 12. Query Gaia random ───────────────────────────────────────────
-    print(f"\n[12] Querying Gaia DR3 random subset...")
-    df_gaia = query_gaia_subset(username, args.n_sample)
+    # ── 12. Query Gaia random (all-sky) ─────────────────────────────────
+    print(f"\n[12] Querying Gaia DR3 random subset (all-sky)...")
+    df_gaia = query_gaia_subset(username, args.n_sample, mode="all")
     np.savez(ARRAYS_DIR / "gaia_random.npz",
              source_ids=df_gaia["source_id"].values.astype(str),
              ra=df_gaia["ra"].values.astype(float),
@@ -687,7 +695,7 @@ def main() -> int:
     # ── 13. Query Gaia high-lat ─────────────────────────────────────────
     if not args.no_hilat:
         print(f"\n[13] Querying Gaia DR3 high-lat subset...")
-        df_hilat = query_gaia_subset(username, args.n_sample, hilat=True)
+        df_hilat = query_gaia_subset(username, args.n_sample, mode="hilat")
         np.savez(ARRAYS_DIR / "gaia_hilat.npz",
                  source_ids=df_hilat["source_id"].values.astype(str),
                  ra=df_hilat["ra"].values.astype(float),
@@ -695,6 +703,18 @@ def main() -> int:
                  phot_g_mean_mag=df_hilat["phot_g_mean_mag"].values.astype(float),
                  X_features=df_hilat[SELECTED_GAIA_PARAMETERS].values.astype(float))
         print(f"  -> gaia_hilat.npz  ({len(df_hilat):,} sources)")
+
+    # ── 14. Query Gaia low-lat ──────────────────────────────────────────
+    if not args.no_lolat:
+        print(f"\n[14] Querying Gaia DR3 low-lat subset...")
+        df_lolat = query_gaia_subset(username, args.n_sample, mode="lolat")
+        np.savez(ARRAYS_DIR / "gaia_lolat.npz",
+                 source_ids=df_lolat["source_id"].values.astype(str),
+                 ra=df_lolat["ra"].values.astype(float),
+                 dec=df_lolat["dec"].values.astype(float),
+                 phot_g_mean_mag=df_lolat["phot_g_mean_mag"].values.astype(float),
+                 X_features=df_lolat[SELECTED_GAIA_PARAMETERS].values.astype(float))
+        print(f"  -> gaia_lolat.npz  ({len(df_lolat):,} sources)")
 
     print("\n" + "=" * 60)
     print("Done.")

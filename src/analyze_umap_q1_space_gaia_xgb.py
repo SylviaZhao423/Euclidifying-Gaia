@@ -18,15 +18,17 @@ Pipeline:
 Reads:
   output/umap/arrays/q1_indiv.npz
   output/umap/arrays/q1_cluster_labels.npy
-  output/umap/arrays/xgb_gaia_projected.csv       (from query_umap_q1_projections.py)
-  output/umap/arrays/xgb_gaia_hilat_projected.csv  (with --hilat)
+  output/umap/arrays/projected/gaia_random_projected.csv  (always)
+  output/umap/arrays/projected/gaia_hilat_projected.csv   (unless --no-hilat)
+  output/umap/arrays/projected/gaia_lolat_projected.csv   (unless --no-lolat)
 
 Writes:
-  output/umap/q1_individual/q1_space_gaia_xgb.png
+  output/umap/q1_individual/q1_space_gaia_xgb{,_hilat,_lolat}.png
 
 Usage:
   python src/analyze_umap_q1_space_gaia_xgb.py
-  python src/analyze_umap_q1_space_gaia_xgb.py --hilat
+  python src/analyze_umap_q1_space_gaia_xgb.py --no-hilat
+  python src/analyze_umap_q1_space_gaia_xgb.py --no-lolat
 """
 
 from __future__ import annotations
@@ -166,6 +168,8 @@ def main() -> int:
     )
     parser.add_argument("--no-hilat", action="store_true",
                         help="Skip high-latitude subset.")
+    parser.add_argument("--no-lolat", action="store_true",
+                        help="Skip low-latitude subset.")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -189,6 +193,10 @@ def main() -> int:
     if not args.no_hilat:
         variants.append(
             ("gaia_hilat_projected.csv", "_hilat", "  |  |b|>10, |ecl_lat|>45"),
+        )
+    if not args.no_lolat:
+        variants.append(
+            ("gaia_lolat_projected.csv", "_lolat", "  |  low galactic latitude"),
         )
 
     # ── Pre-compute shared density vmax across all variants ─────────────────

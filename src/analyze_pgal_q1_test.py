@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -43,11 +44,8 @@ MAG_CUT   = 17
 CLASS_MAPPING = {"STAR": 0, "GALAXY": 1}
 SEEDS     = [42, 123, 456, 789, 2025, 314, 999, 1337, 7777, 31415]
 
-MODELS = [
-    ("Original",
-     PROJECT_DIR / "output" / "xgboost_q1" / "seed_models",
-     "#2196F3", "#1565C0"),
-]
+DEFAULT_MODEL_DIR = PROJECT_DIR / "output" / "xgboost_q1" / "seed_models"
+DEFAULT_OUTPUT    = PROJECT_DIR / "output" / "pgal_q1_test.png"
 
 
 def query_q1(username):
@@ -73,15 +71,40 @@ def query_q1(username):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Q1 test-set P(gal) histogram + threshold metrics for any "
+                    "10-seed XGBoost ensemble.")
+    parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR,
+                        help="Directory containing xgb_classifier_q1_seed*.json files. "
+                             f"Default: {DEFAULT_MODEL_DIR.relative_to(PROJECT_DIR)}")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Output PNG path. Default: output/pgal_q1_test.png "
+                             "(or pgal_q1_test_<model_dir.parent.name>.png if --model-dir is non-default)")
+    parser.add_argument("--label", type=str, default="Original",
+                        help="Display label for the model (default: 'Original')")
+    args = parser.parse_args()
+
+    seed_dir = args.model_dir.resolve()
+    if args.output is not None:
+        out_path = args.output
+    elif seed_dir == DEFAULT_MODEL_DIR.resolve():
+        out_path = DEFAULT_OUTPUT
+    else:
+        # Derive output name from the model dir's parent (e.g. ratio_sg8.63_all_ero)
+        tag = seed_dir.parent.name
+        out_path = PROJECT_DIR / "output" / f"pgal_q1_test_{tag}.png"
+
     username = os.environ.get("PGUSER")
     if not username:
         print("ERROR: PGUSER not set.")
         return 1
 
     feat_names = list(SELECTED_GAIA_PARAMETERS)
+    print(f"[0] Model dir : {seed_dir}")
+    print(f"    Output    : {out_path}")
 
     # ── 1. Load Q1 data ──
-    print("[1] Loading Q1 data from WSDB...")
+    print("\n[1] Loading Q1 data from WSDB...")
     X, y = query_q1(username)
     print(f"  {len(X):,} sources  STAR: {(y==0).sum():,}  GALAXY: {(y==1).sum():,}")
 
@@ -89,7 +112,7 @@ def main():
     thresholds = np.linspace(0, 1, 201)
     bins = np.linspace(0, 1, 101)
 
-    for label, seed_dir, col_light, col_dark in MODELS:
+    for label, seed_dir, col_light, col_dark in [(args.label, seed_dir, "#2196F3", "#1565C0")]:
         print(f"\n[2] Per-seed evaluation: {label} ({len(SEEDS)} seeds)...")
 
         # Accumulators for averaging across seeds
@@ -229,10 +252,9 @@ def main():
     #              f'(ensemble mean, {len(SEEDS)} seeds)',
     #              fontsize=14, fontweight='bold', y=1.0)
 
-    out = PROJECT_DIR / "output" / "pgal_q1_test.png"
-    plt.savefig(out, dpi=200, bbox_inches='tight')
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close()
-    print(f"  -> {out}")
+    print(f"  -> {out_path}")
     return 0
 
 

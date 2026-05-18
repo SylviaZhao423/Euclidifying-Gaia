@@ -4,7 +4,7 @@ Sankey diagram showing how ERO training data is refined through successive filte
 
 Pipeline:
     ERO merge_cat
-      → × Gaia at 0.3″ (crossmatch_ero_gaia_0_3)
+      → × Gaia at 0.3″ (PM-corrected AND raw — intersection canonical)
       → Gaia G ≥ 17
       → Point-like (class_star ≥ 0.65) / Extended (class_star < 0.65)
 
@@ -47,9 +47,10 @@ def query_counts(username):
     c["merge"] = n("euclid_ero.merge_cat")
     print(f"  ERO merge_cat (total):      {c['merge']:>10,}")
 
+    # Canonical _0_3 = intersection (PM-corrected sep ≤ 0.3 AND raw sep ≤ 0.3)
     c["gaia"] = n("siwei_zhao_2025.crossmatch_ero_gaia_0_3",
                   "e_v_class_star IS NOT NULL")
-    print(f"  After × Gaia 0.3\":          {c['gaia']:>10,}")
+    print(f"  After × Gaia 0.3\" (PM+raw): {c['gaia']:>10,}")
 
     c["gmag"] = n("siwei_zhao_2025.crossmatch_ero_gaia_0_3",
                   "e_v_class_star IS NOT NULL AND g_phot_g_mean_mag >= 17")
@@ -95,7 +96,7 @@ def build_sankey(c):
     labels = [
         # 0–2 pipeline
         f"ERO MER<br>{c['merge']:,}",
-        f"× Gaia 0.3\"<br>{c['gaia']:,}",
+        f"× Gaia 0.3\"<br>(PM + raw)<br>{c['gaia']:,}",
         f"Training set<br>G ≥ 17<br>{c['gmag']:,}",
         # 3–4 terminals
         f"Point-like<br>≥ 0.65<br>{c['point']:,}",
@@ -159,20 +160,20 @@ def build_sankey(c):
     ))
 
     fig.update_layout(
-        title=dict(
-            text=(
-                "ERO Training Data Filter Pipeline<br>"
-                "<sup>Euclid ERO × Gaia DR3 — source counts at each selection stage  |  band widths are log-scaled</sup>"
-            ),
-            font=dict(size=24),
-            x=0.5,
-            xanchor="center",
-        ),
-        font=dict(size=18, family="Arial"),
+        # title=dict(
+        #     text=(
+        #         "ERO Training Data Filter Pipeline<br>"
+        #         "<sup>Euclid ERO × Gaia DR3 — source counts at each selection stage  |  band widths are log-scaled</sup>"
+        #     ),
+        #     font=dict(size=32, weight="bold"),
+        #     x=0.5,
+        #     xanchor="center",
+        # ),
+        font=dict(size=26, family="Arial", weight="bold"),
         width=1600,
         height=800,
         paper_bgcolor="white",
-        margin=dict(l=20, r=0, t=60, b=90),
+        margin=dict(l=0, r=0, t=20, b=90),
     )
 
     return fig
@@ -195,8 +196,8 @@ def main():
             "toImageButtonOptions": {
                 "format": "png",
                 "filename": "ero_filter_sankey",
-                "width": 1600,
-                "height": 800,
+                "width": 820,
+                "height": 400,
                 "scale": 2,
             }
         },

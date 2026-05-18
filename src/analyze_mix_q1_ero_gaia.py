@@ -215,14 +215,20 @@ def main() -> int:
     df_thresh.to_csv(save_dir / "mix_threshold_analysis.csv", index=False)
     print(f"\n  -> {save_dir / 'mix_threshold_analysis.csv'}")
 
-    # ── 3. P(gal) overlay plot ──────────────────────────────────────────────
+    # ── 3. P(gal) overlay plot — split into two panels ──────────────────────
+    # Left  : source-count histogram per ratio (log y)
+    # Right : fraction above threshold per ratio (log y, %)
+    # The original twinx layout collided two y-axes; splitting lets each
+    # have its own colour-free y label.
     if all_pgal:
         colors = cm.viridis(np.linspace(0, 0.9, len(all_pgal)))
-        fig, ax1 = plt.subplots(figsize=(10, 5.5))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4.8),
+                                       gridspec_kw={"wspace": 0.22})
 
         bins = np.linspace(0, 1, 101)
         t_range = np.linspace(0, 1, 501)
 
+        # ── Left panel: source-count histograms ─────────────────────────────
         for (label, p_gaia), color in zip(all_pgal, colors):
             ax1.hist(p_gaia, bins=bins, alpha=0.3, color=color,
                      histtype='stepfilled', linewidth=0)
@@ -232,44 +238,48 @@ def main() -> int:
         ax1.set_yscale("log")
         ax1.set_ylim(0.5, 2e4)
         ax1.set_xlabel("P(gal)", fontsize=14, fontweight='bold')
-        ax1.set_ylabel("Source count", fontsize=14, fontweight='bold', color='steelblue', labelpad=10)
-        ax1.tick_params(axis='y', labelcolor='steelblue', labelsize=12)
+        ax1.set_ylabel("Source count", fontsize=14, fontweight='bold', labelpad=10)
+        ax1.tick_params(axis='both', labelsize=12)
         plt.setp(ax1.get_yticklabels(), fontweight='bold')
-        ax1.tick_params(axis='x', labelsize=12)
+        for t, col, ls in [(0.5, 'black', '--'), (0.9, 'green', '--')]:
+            ax1.axvline(t, color=col, lw=1.5, ls=ls, alpha=0.5)
         ax1.grid(alpha=0.3)
+        ax1.legend(fontsize=10, loc='upper right', ncols=2)
+        # ax1.set_title("Source-count distribution", fontsize=14, fontweight='bold')
 
-        ax2 = ax1.twinx()
+        # ── Right panel: fraction above threshold ───────────────────────────
         for (label, p_gaia), color in zip(all_pgal, colors):
             counts = np.array([(p_gaia >= t).sum() for t in t_range])
             frac = counts / len(X_gaia) * 100
-            ax2.plot(t_range, frac, color=color, lw=1.5)
+            ax2.plot(t_range, frac, color=color, lw=1.5, label=label)
 
         ax2.set_yscale("log")
         ax2.set_ylim(0.05, 100)
+        ax2.set_xlabel("P(gal) threshold", fontsize=14, fontweight='bold')
         ax2.set_ylabel("Fraction above threshold (%)", fontsize=14,
-                        fontweight='bold', color='#E53935', labelpad=10)
+                       fontweight='bold', labelpad=10)
         ax2.set_yticks([0.1, 0.5, 1, 2, 5, 10, 20, 50, 100])
         ax2.set_yticklabels(["0.1", "0.5", "1", "2", "5", "10", "20", "50", "100"])
-        ax2.tick_params(axis='y', labelcolor='#E53935', labelsize=12)
+        ax2.tick_params(axis='both', labelsize=12)
         plt.setp(ax2.get_yticklabels(), fontweight='bold')
-
         for t, col, ls in [(0.5, 'black', '--'), (0.9, 'green', '--')]:
-            ax1.axvline(t, color=col, lw=1.5, ls=ls, alpha=0.5)
+            ax2.axvline(t, color=col, lw=1.5, ls=ls, alpha=0.5)
+        ax2.grid(alpha=0.3)
+        # ax2.set_title("Cumulative fraction above threshold", fontsize=14, fontweight='bold')
 
-        # Inline fraction labels for first (2.8:1) and last (8.6:1) ratio
+        # Inline labels at t=0.5/0.9 on the right panel only (since y is %)
         bbox_gap = dict(boxstyle='round,pad=0.15', facecolor='white',
                         edgecolor='none', alpha=1.0)
-        for idx_label in [0, -1]:  # first and last
+        for idx_label in [0, -1]:
             label_l, p_gaia_l = all_pgal[idx_label]
             color_l = colors[idx_label]
             for t in [0.5, 0.9]:
                 pct = 100 * (p_gaia_l >= t).mean()
-                ax2.text(t, pct, f"{label_l}: {pct:.1f}%", fontsize=13, fontweight="bold",
-                         color=color_l, ha='center', va='center', bbox=bbox_gap, zorder=10)
+                ax2.text(t, pct, f"{label_l}: {pct:.1f}%",
+                         fontsize=13, fontweight="bold",
+                         color=color_l, ha='center', va='center',
+                         bbox=bbox_gap, zorder=10)
 
-        ax1.legend(fontsize=10, loc='upper right', ncols=2)
-        # fig.suptitle("P(gal) on Gaia sources — effect of ERO mixing ratio",
-        #              fontsize=13, fontweight='bold', y=0.98)
         out = save_dir / "mix_threshold_pgal_overlay.png"
         plt.savefig(out, dpi=150, bbox_inches='tight'); plt.close()
         print(f"  -> {out}")

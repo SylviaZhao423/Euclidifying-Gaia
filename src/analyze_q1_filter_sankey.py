@@ -5,7 +5,7 @@ Sankey diagram showing how Q1 training data is refined through successive filter
 Pipeline:
     Q1 × Gaia crossmatch
       → m_vis_det = 1
-      → angular sep ≤ 0.3″
+      → angular sep ≤ 0.3″ (PM-corrected AND raw — intersection canonical)
       → PHZ classification available
       → PHZ ∈ {Star (1), Galaxy (2)}
       → Gaia G ≥ 17
@@ -64,8 +64,9 @@ def query_counts(username):
     c["total"]        = n_table("siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia")
     print(f"  After × Gaia:            {c['total']:>10,}")
 
+    # Canonical _sep = intersection (PM-corrected sep ≤ 0.3 AND raw sep ≤ 0.3)
     c["sep"]          = n_table("siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia_sep")
-    print(f"  After sep ≤ 0.3\":        {c['sep']:>10,}")
+    print(f"  After sep ≤ 0.3\" (PM+raw): {c['sep']:>10,}")
 
     c["phz_notnull"]  = n_sep("p_phz_classification IS NOT NULL")
     print(f"  After PHZ not null:      {c['phz_notnull']:>10,}")
@@ -118,7 +119,7 @@ def build_sankey(c):
         f"× PHZ<br>{c['mer_phz']:,}",
         f"VIS detected<br>{c['vis_phz']:,}",
         f"× Gaia<br>{c['total']:,}",
-        f"Sep ≤ 0.3\"<br>{c['sep']:,}",
+        f"Sep ≤ 0.3\"<br>(PM + raw)<br>{c['sep']:,}",
         f"PHZ {{1,2}}<br>{c['phz_12']:,}",
         f"Training set<br>G ≥ 17<br>{c['gmag']:,}",
         # 7–8 terminal
