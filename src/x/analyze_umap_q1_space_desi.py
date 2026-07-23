@@ -110,7 +110,7 @@ def main() -> int:
         return emb
 
     # ── Load DESI arrays ──────────────────────────────────────────────────────
-    q1_desi_path  = ARRAYS_DIR / "q1_allphz_desi.npz"
+    q1_desi_path  = ARRAYS_DIR / "q1_desi.npz"
     ero_desi_path = ARRAYS_DIR / "ero_desi.npz"
     for p in [q1_desi_path, ero_desi_path]:
         if not p.exists():
@@ -174,11 +174,14 @@ def main() -> int:
         H, _, _ = np.histogram2d(emb[:, 0], emb[:, 1], bins=[x_edges, y_edges])
         return np.where(H > 0, H, np.nan)
 
-    H_q1      = _hist(q1_emb)
-    H_q1_desi = _hist(q1_desi_emb)
+    # Combined projected density (all DESI sources)
+    all_desi_emb = np.vstack([q1_desi_emb, ero_desi_emb])
+    n_desi_total = len(all_desi_emb)
+    H_all_desi = _hist(all_desi_emb)
+    H_q1_desi  = _hist(q1_desi_emb)
     H_ero_desi = _hist(ero_desi_emb)
 
-    q1_norm = LogNorm(vmin=np.nanmin(H_q1), vmax=np.nanmax(H_q1))
+    all_desi_norm = LogNorm(vmin=np.nanmin(H_all_desi), vmax=np.nanmax(H_all_desi))
 
     finite_desi = [h for h in [H_q1_desi, H_ero_desi] if not np.all(np.isnan(h))]
     shared_norm = LogNorm(
@@ -206,14 +209,14 @@ def main() -> int:
     ax_q1d_dn  = fig.add_subplot(gs[1, 1])
     ax_erod_dn = fig.add_subplot(gs[1, 2])
 
-    # Col 0: Q1 source density
-    sc = ax_q1_d.pcolormesh(x_edges, y_edges, H_q1.T,
-                             cmap=cmap_dens, norm=q1_norm, rasterized=True)
+    # Col 0: All DESI projected density
+    sc = ax_q1_d.pcolormesh(x_edges, y_edges, H_all_desi.T,
+                             cmap=cmap_dens, norm=all_desi_norm, rasterized=True)
     fig.colorbar(sc, ax=ax_q1_d, label="Count (log)", pad=0.02, fraction=0.046)
     ax_q1_d.set_xlim(x_lo, x_hi); ax_q1_d.set_ylim(y_lo, y_hi)
     ax_q1_d.set_xlabel("UMAP 1", fontsize=FS_LABEL)
     ax_q1_d.set_ylabel("UMAP 2", fontsize=FS_LABEL)
-    ax_q1_d.set_title(f"Q1: source density  (n={len(q1_y):,})",
+    ax_q1_d.set_title(f"All DESI projected density  (n={n_desi_total:,})",
                       fontsize=FS_TITLE, fontweight="bold")
     ax_q1_d.tick_params(labelsize=FS_TICK)
     ax_q1_d.grid(alpha=0.2)

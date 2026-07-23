@@ -450,7 +450,8 @@ def make_cutout_image(fits_path_vis: Path, ra: float, dec: float,
                       dpi: int = 75,
                       c_star: float | None = None,
                       fits_path_nisp_j: Path | None = None,
-                      fits_path_nisp_h: Path | None = None) -> np.ndarray:
+                      fits_path_nisp_h: Path | None = None,
+                      draw_crosshair: bool = True) -> np.ndarray:
     """Render a cutout stamp.
 
     Grayscale (log stretch) by default.  When fits_path_nisp_j and
@@ -548,14 +549,15 @@ def make_cutout_image(fits_path_vis: Path, ra: float, dec: float,
     # ── Crosshair ─────────────────────────────────────────────────────────────
     gap = n * 0.10
     cx  = cy = n / 2
-    kw  = dict(color=crosshair_color, lw=1.0, alpha=0.8, solid_capstyle="butt")
-    ax.plot([0,        cx - gap], [cy, cy],      **kw)
-    ax.plot([cx + gap, n - 1],   [cy, cy],       **kw)
-    ax.plot([cx, cx],  [0,        cy - gap],     **kw)
-    ax.plot([cx, cx],  [cy + gap, n - 1],        **kw)
+    if draw_crosshair:
+        kw  = dict(color=crosshair_color, lw=1.0, alpha=0.8, solid_capstyle="butt")
+        ax.plot([0,        cx - gap], [cy, cy],      **kw)
+        ax.plot([cx + gap, n - 1],   [cy, cy],       **kw)
+        ax.plot([cx, cx],  [0,        cy - gap],     **kw)
+        ax.plot([cx, cx],  [cy + gap, n - 1],        **kw)
 
     # ── Scale bar ─────────────────────────────────────────────────────────────
-    _add_scale_bar(ax, n, size_arcsec, VIS_PIXEL_SCALE, color=crosshair_color)
+    _add_scale_bar(ax, n, size_arcsec, VIS_PIXEL_SCALE, color="white")
 
     fig.tight_layout()
     buf = io.BytesIO()

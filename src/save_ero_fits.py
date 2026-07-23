@@ -15,8 +15,8 @@ Cache directory:
 Already-downloaded fields are skipped automatically.
 
 Usage:
-  python src/download_ero_fits.py
-  python src/download_ero_fits.py --fields "NGC 6397" "Perseus"
+  python src/save_ero_fits.py
+  python src/save_ero_fits.py --fields "NGC 6397" "Perseus"
 """
 
 from __future__ import annotations

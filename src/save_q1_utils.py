@@ -410,7 +410,36 @@ def _cutout_data_remote(url: str, ra: float, dec: float,
     row_off = half - (yc - y1)
     col_off = half - (xc - x1)
     image[row_off:row_off + (y2 - y1), col_off:col_off + (x2 - x1)] = patch
-    return image
+    # WCS for the RETURNED image (source at pixel (half, half)) — so callers can place
+    # overlay markers (e.g. deblended MER positions) via world_to_pixel.
+    cutout_wcs = wcs.deepcopy()
+    cutout_wcs.wcs.crpix[0] += half - xc
+    cutout_wcs.wcs.crpix[1] += half - yc
+    return image, cutout_wcs
+
+
+def _cutout_data(src, ra: float, dec: float, size_arcsec: float,
+                 pixel_scale: float = VIS_PIXEL_SCALE):
+    """Cutout from a remote tile URL (HTTP range reads) OR a local FITS Path (memory-mapped
+    Cutout2D). Returns (image, wcs) where wcs.world_to_pixel gives pixel coords IN the
+    returned image (for overlay markers). Lets Q1 (IRSA URLs) and ERO (cached full-field
+    FITS) share the same renderer, incl. the NISP colour bands."""
+    if isinstance(src, str):
+        return _cutout_data_remote(src, ra, dec, size_arcsec, pixel_scale=pixel_scale)
+    from astropy.coordinates import SkyCoord
+    from astropy.io import fits as afits
+    from astropy.nddata import Cutout2D
+    from astropy.wcs import WCS
+    import astropy.units as u
+    with afits.open(src, memmap=True) as hdul:
+        hdu = next((h for h in hdul if hasattr(h, "data") and isinstance(h.data, np.ndarray)
+                    and h.data.ndim == 2), None)
+        if hdu is None:
+            raise RuntimeError(f"No 2D image HDU in {getattr(src, 'name', src)}")
+        cutout = Cutout2D(hdu.data, SkyCoord(ra=ra, dec=dec, unit="deg"),
+                          u.Quantity([size_arcsec, size_arcsec], unit=u.arcsec),
+                          wcs=WCS(hdu.header), mode="partial", fill_value=np.nan)
+    return cutout.data.astype(float), cutout.wcs
 
 
 # ── Cutout rendering ──────────────────────────────────────────────────────────
@@ -419,7 +448,9 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
                    size_arcsec: float, title: str, dpi: int = 75,
                    c_star: float | None = None,
                    nisp_j_url: str | None = None,
-                   nisp_h_url: str | None = None) -> np.ndarray:
+                   nisp_h_url: str | None = None,
+                   draw_crosshair: bool = True,
+                   companions: list | None = None) -> np.ndarray:
     """Render a cutout stamp to a numpy array using log stretch.
 
     Accepts either a URL (uses HTTP range requests, ~3–5 MB per stamp) or a
@@ -436,28 +467,7 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
     import io
     from astropy.visualization import LogStretch, ImageNormalize, ManualInterval
 
-    if isinstance(tile_url_or_path, str):
-        image = _cutout_data_remote(tile_url_or_path, ra, dec, size_arcsec,
-                                    pixel_scale=VIS_PIXEL_SCALE)
-    else:
-        from astropy.coordinates import SkyCoord
-        from astropy.io import fits as afits
-        from astropy.nddata import Cutout2D
-        from astropy.wcs import WCS
-        import astropy.units as u
-
-        with afits.open(tile_url_or_path, memmap=True) as hdul:
-            hdu = next((h for h in hdul
-                        if hasattr(h, "data") and isinstance(h.data, np.ndarray)
-                        and h.data.ndim == 2), None)
-            if hdu is None:
-                raise RuntimeError(f"No 2D image HDU in {tile_url_or_path.name}")
-            wcs    = WCS(hdu.header)
-            coord  = SkyCoord(ra=ra, dec=dec, unit="deg")
-            size   = u.Quantity([size_arcsec, size_arcsec], unit=u.arcsec)
-            cutout = Cutout2D(hdu.data, coord, size, wcs=wcs,
-                              mode="partial", fill_value=np.nan)
-        image = cutout.data.astype(float)
+    image, cut_wcs = _cutout_data(tile_url_or_path, ra, dec, size_arcsec, pixel_scale=VIS_PIXEL_SCALE)
 
     image = np.asarray(image, dtype=float)
     finite = np.isfinite(image)
@@ -496,11 +506,12 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
     if use_color:
         try:
             from scipy.ndimage import zoom as _zoom
-            # NISP tiles are 0.3"/px — fetch at native resolution then upsample 3×
-            nisp_j_raw = _cutout_data_remote(nisp_j_url, ra, dec, size_arcsec,
-                                             pixel_scale=NISP_PIXEL_SCALE)
-            nisp_h_raw = _cutout_data_remote(nisp_h_url, ra, dec, size_arcsec,
-                                             pixel_scale=NISP_PIXEL_SCALE)
+            # NISP tiles are 0.3"/px — fetch at native resolution then upsample 3×.
+            # _cutout_data accepts a URL (Q1 IRSA tiles) OR a local FITS Path (ERO).
+            nisp_j_raw, _ = _cutout_data(nisp_j_url, ra, dec, size_arcsec,
+                                         pixel_scale=NISP_PIXEL_SCALE)
+            nisp_h_raw, _ = _cutout_data(nisp_h_url, ra, dec, size_arcsec,
+                                         pixel_scale=NISP_PIXEL_SCALE)
             scale = NISP_PIXEL_SCALE / VIS_PIXEL_SCALE  # 3.0
 
             def _match(arr, tgt):
@@ -543,12 +554,45 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
     n   = img_s.shape[0]
     gap = n * 0.10
     cx  = cy = n / 2
-    kw  = dict(color=crosshair_color, lw=1.0, alpha=0.8, solid_capstyle="butt")
-    ax.plot([0,        cx - gap], [cy, cy],      **kw)
-    ax.plot([cx + gap, n - 1],   [cy, cy],       **kw)
-    ax.plot([cx, cx],  [0,        cy - gap],     **kw)
-    ax.plot([cx, cx],  [cy + gap, n - 1],        **kw)
-    _add_scale_bar(ax, n, size_arcsec, VIS_PIXEL_SCALE, crosshair_color)
+    if draw_crosshair:
+        kw  = dict(color=crosshair_color, lw=1.0, alpha=0.8, solid_capstyle="butt")
+        ax.plot([0,        cx - gap], [cy, cy],      **kw)
+        ax.plot([cx + gap, n - 1],   [cy, cy],       **kw)
+        ax.plot([cx, cx],  [0,        cy - gap],     **kw)
+        ax.plot([cx, cx],  [cy + gap, n - 1],        **kw)
+    # Overlay deblended MER companions [(ra, dec, label), ...] as cyan circles; each
+    # label (the Euclid MER object id) is parked at the stamp corner matching the
+    # detection's own quadrant — clear of the source — exactly like the Gaia-blend
+    # source_id corner labels. Multiple labels sharing a corner stack outward.
+    if companions:
+        import matplotlib.patheffects as _pe
+        from astropy.coordinates import SkyCoord
+        m = n * 0.03                 # corner margin (pixels)
+        used: dict = {}              # (ha, va) -> stack count
+        for cra, cdec, clabel in companions:
+            try:
+                px, py = cut_wcs.world_to_pixel(SkyCoord(cra, cdec, unit="deg"))
+                px, py = float(px), float(py)
+            except Exception:
+                continue
+            if not (0 <= px < n and 0 <= py < n):
+                continue
+            ax.add_patch(plt.Circle((px, py), n * 0.05, fill=False, ec="#00e5ff",
+                                    lw=1.0, zorder=6))
+            if not clabel:
+                continue
+            right = px >= cx                                   # image x quadrant
+            upper = py >= cy                                   # origin='lower' → larger y is up
+            ha = "right" if right else "left"
+            va = "top" if upper else "bottom"
+            xt = (n - m) if right else m
+            yt = (n - m) if upper else m
+            k = used.get((ha, va), 0); used[(ha, va)] = k + 1  # stack same-corner labels
+            yt += (-1 if upper else 1) * k * n * 0.10          # grow inward, away from corner
+            t = ax.text(xt, yt, str(clabel), color="#00e5ff", fontsize=11,  # <- label size knob
+                        ha=ha, va=va, zorder=7)
+            t.set_path_effects([_pe.Stroke(linewidth=2.4, foreground="black"), _pe.Normal()])
+    _add_scale_bar(ax, n, size_arcsec, VIS_PIXEL_SCALE, "white")
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")

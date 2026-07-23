@@ -183,15 +183,25 @@ def main() -> int:
         "--faint-cut", type=int, default=None, metavar="MAG",
         help="Upper G-mag limit (e.g. 21, 22). Omit for no faint cut (G >= 17).",
     )
+    parser.add_argument(
+        "--model", choices=["q1", "q1_op_f1"], default="q1",
+        help="Which model to use: q1 (original) or q1_op_f1 (Optuna F1 tuned)",
+    )
     args = parser.parse_args()
 
     if args.faint_cut is not None:
         MAG_CUT_FAINT = args.faint_cut
 
+    model_dirs = {
+        "q1":        ("xgboost_q1",       "q1_individual"),
+        "q1_op_f1":  ("xgboost_q1_op_f1", "q1_individual_op_f1"),
+    }
+    xgb_dir, umap_out = model_dirs[args.model]
+
     mag_dir = _mag_range_dir(MAG_CUT_FAINT)
-    ARRAYS_DIR      = PROJECT_DIR / "output" / "umap"       / "arrays"
-    SEED_MODELS_DIR = PROJECT_DIR / "output" / "xgboost_q1" / "seed_models"
-    OUTPUT_DIR      = PROJECT_DIR / "output" / "umap"       / "q1_individual"
+    ARRAYS_DIR      = PROJECT_DIR / "output" / "umap"    / "arrays"
+    SEED_MODELS_DIR = PROJECT_DIR / "output" / xgb_dir   / "seed_models"
+    OUTPUT_DIR      = PROJECT_DIR / "output" / "umap"    / umap_out
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -267,6 +277,8 @@ def main() -> int:
         *CMAP_SLICE["density"],
     )
     cmap_dens_q1 = slice_cmap(get_plot_cmap(CMAP["density"], bad_alpha_zero=True), 0.3, 1.0)
+    # cmap_dens = "viridis"
+    # cmap_dens_q1 = "viridis"
     cmap_pgal = slice_cmap(get_plot_cmap(CMAP["pgal"]), *CMAP_SLICE["pgal"])
 
     # ── Font size constants (change here to affect all panels) ────────────────
@@ -404,7 +416,7 @@ def main() -> int:
 
     for ax_d, key in [(ax_phz_star_d, "PHZ_STAR"), (ax_phz_gal_d, "PHZ_GAL")]:
         sc2 = ax_d.pcolormesh(x_edges, y_edges, histograms[key].T,
-                              cmap=cmap_dens, norm=shared_norm, rasterized=True)
+                              cmap=cmap_dens, norm=shared_norm, rasterized=True, alpha=0.7)
         _style_dn(ax_d)
         fig.colorbar(sc2, ax=ax_d, label="Count (log)", pad=0.02, fraction=0.046)
 
@@ -446,13 +458,13 @@ def main() -> int:
 
     # Col 0 row-group 1: Q1 source density (same as col 1)
     sc_blank = ax_blank.pcolormesh(x_edges, y_edges, H_all.T,
-                                   cmap=cmap_dens_q1, norm=q1_dens_norm, rasterized=True)
+                                   cmap=cmap_dens_q1, norm=q1_dens_norm, rasterized=True, alpha=0.7)
     fig.colorbar(sc_blank, ax=ax_blank, label="Count (log)", pad=0.02, fraction=0.046)
     _style_sum(ax_blank, f"Q1: source density  (n={len(y_true):,})")
 
     # Col 1 row-group 1: All source density
     sc_all = ax_all_d.pcolormesh(x_edges, y_edges, H_all.T,
-                                  cmap=cmap_dens_q1, norm=q1_dens_norm, rasterized=True)
+                                  cmap=cmap_dens_q1, norm=q1_dens_norm, rasterized=True, alpha=0.7)
     fig.colorbar(sc_all, ax=ax_all_d, label="Count (log)", pad=0.02, fraction=0.046)
     _style_sum(ax_all_d, f"Q1: source density  (n={len(y_true):,})")
 
@@ -462,7 +474,7 @@ def main() -> int:
         (ax_fn_d, "FN"), (ax_tp_d, "TP"),
     ]:
         sc2 = ax_d.pcolormesh(x_edges, y_edges, histograms[key].T,
-                              cmap=cmap_dens, norm=shared_norm, rasterized=True)
+                              cmap=cmap_dens, norm=shared_norm, rasterized=True, alpha=0.7)
         _style_dn(ax_d)
         fig.colorbar(sc2, ax=ax_d, label="Count (log)", pad=0.02, fraction=0.046)
 

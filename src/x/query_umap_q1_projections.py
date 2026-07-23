@@ -1,34 +1,41 @@
 #!/usr/bin/env python3
 """
-Query and project external sources into Q1 UMAP space, and cache as CSV.
+Project ALL external sources into Q1 UMAP space and cache as CSV.
 
 This is the single source of truth for all projected coordinates.
-Downstream analyze_* scripts load these CSVs instead of re-projecting.
+Downstream scripts (compile_umap_combined.py, analyze_*) load these CSVs
+instead of re-projecting.
 
 Projections:
-  A. Q1 features     — query Euclid features for Q1 sources (no projection)
-  B. ERO features     — query ERO VIS morphological features (no projection)
-  C. Gaia random      — query random Gaia DR3, project + run XGBoost
-  D. Gaia high-lat    — same as C but |b|>10 and |ecl_lat|>45
+  A. Q1 allphz       — all PHZ classes (0-7, -1) projected into Q1 UMAP space
+  B. Q1×DESI         — Q1×DESI cross-match projected
+  C. ERO regular      — ERO sources projected (ero_regular.npz)
+  D. ERO rebalanced   — ERO rebalanced projected (ero_rebal.npz)
+  E. ERO×DESI         — ERO×DESI cross-match projected (ero_desi.npz)
+  F. Gaia random      — Gaia DR3 random subset projected (gaia_random.npz)
+  G. Gaia high-lat    — Gaia DR3 high-lat subset projected (gaia_hilat.npz)
+  H. Gaia low-lat     — Gaia DR3 low-lat subset projected (gaia_lolat.npz)
 
-Output CSVs:
-  output/umap/arrays/q1_features.csv
-  output/umap/arrays/ero_features.csv
-  output/umap/arrays/xgb_gaia_projected.csv
-  output/umap/arrays/xgb_gaia_hilat_projected.csv  (unless --no-hilat)
+Output CSVs (under output/umap/arrays/projected/):
+  q1_allphz_projected.csv
+  q1_desi_projected.csv
+  ero_regular_projected.csv
+  ero_rebal_projected.csv
+  ero_desi_projected.csv
+  gaia_random_projected.csv
+  gaia_hilat_projected.csv
+  gaia_lolat_projected.csv
 
 Usage:
-  PGUSER=siwei_zhao_2025 python src/query_umap_q1_projections.py
-  PGUSER=siwei_zhao_2025 python src/query_umap_q1_projections.py --no-hilat
-  PGUSER=siwei_zhao_2025 python src/query_umap_q1_projections.py --only q1
-  PGUSER=siwei_zhao_2025 python src/query_umap_q1_projections.py --only ero
-  PGUSER=siwei_zhao_2025 python src/query_umap_q1_projections.py --only gaia
+  python src/query_umap_q1_projections.py
+  python src/query_umap_q1_projections.py --only gaia
+  python src/query_umap_q1_projections.py --only allphz
+  python src/query_umap_q1_projections.py --only ero
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -39,37 +46,23 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-MODEL_PATH  = PROJECT_DIR / "output" / "xgboost_q1" / "xgb_classifier_q1.json"
-
-WSDB_HOST = "wsdb.ast.cam.ac.uk"
-WSDB_DB   = "wsdb"
-MAG_CUT   = 17
-
-# Q1 Euclid features to query
-Q1_DB_COLS = ["ellipticity", "flux_vis_psf", "fluxerr_vis_psf"]
-
-# ERO VIS features to query
-ERO_FEATURES = [
-    "e_v_class_star", "e_v_flux_radius",
-    "e_v_ellipticity", "e_v_elongation",
-]
+PROJECT_DIR   = Path(__file__).resolve().parents[1]
+ARRAYS_DIR    = PROJECT_DIR / "output" / "umap" / "arrays"
+PROJECTED_DIR = ARRAYS_DIR / "projected"
+MODEL_DIR     = PROJECT_DIR / "output" / "xgboost_q1"
+MODEL_PATH    = MODEL_DIR / "xgb_classifier_q1.json"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _get_connection(username: str):
-    import psycopg2
-    return psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-
 
 def _load_q1():
-    """Load Q1 embedding, mean, std, and reducer."""
+    """Load Q1 embedding, labels, mean, std, and reducer."""
     q1 = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
     reducer = joblib.load(ARRAYS_DIR / "q1_indiv_reducer.joblib")
+    labels = np.load(ARRAYS_DIR / "q1_cluster_labels.npy")
     std_safe = np.where(q1["std"] > 0, q1["std"], 1.0)
-    return q1, reducer, q1["mean"], std_safe
+    return q1, reducer, q1["mean"], std_safe, q1["embedding"], labels
 
 
 def _project(X_raw: np.ndarray, q1_mean, std_safe, reducer) -> np.ndarray:
@@ -79,176 +72,211 @@ def _project(X_raw: np.ndarray, q1_mean, std_safe, reducer) -> np.ndarray:
     return reducer.transform(X_scaled)
 
 
-# ── A. Q1 features ──────────────────────────────────────────────────────────
-
-def query_q1_features(username: str) -> pd.DataFrame:
-    """Query Euclid features for Q1 sources."""
-    conn = _get_connection(username)
-    select = ",\n            ".join([f"m_{c} AS {c}" for c in Q1_DB_COLS])
-    query = f"""
-        SELECT
-            g_source_id          AS source_id,
-            g_phot_g_mean_mag    AS phot_g_mean_mag,
-            p_phz_classification AS phz,
-            {select}
-        FROM siwei_zhao_2025.crossmatch_q1_mer_phz_vis_gaia_sep
-        WHERE g_phot_g_mean_mag >= {MAG_CUT}
-          AND g_source_id IS NOT NULL
-        ORDER BY g_source_id
-    """
-    print("  Querying crossmatch_q1_mer_phz_vis_gaia_sep for Euclid features...")
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-
-    # Compute flux significance
-    df["fluxsig_vis_psf"] = (
-        df["flux_vis_psf"] / df["fluxerr_vis_psf"].replace(0, np.nan)
-    )
-
-    df["source_id"] = df["source_id"].astype(str)
-    print(f"  -> {len(df):,} sources")
-    return df
+def _assign_to_clusters(src_emb, q1_emb, q1_labels):
+    """Assign each projected source to the nearest Q1 cluster via KNN."""
+    from sklearn.neighbors import NearestNeighbors
+    valid_mask = q1_labels >= 0
+    if valid_mask.sum() == 0:
+        return np.full(len(src_emb), -1, dtype=int)
+    nn = NearestNeighbors(n_neighbors=1, algorithm="auto")
+    nn.fit(q1_emb[valid_mask])
+    _, idx = nn.kneighbors(src_emb)
+    idx = idx.ravel()
+    return q1_labels[np.where(valid_mask)[0][idx]]
 
 
-# ── B. ERO features ─────────────────────────────────────────────────────────
-
-def query_ero_features(username: str) -> pd.DataFrame:
-    """Query ERO VIS morphological features."""
-    conn = _get_connection(username)
-    feats = ", ".join(ERO_FEATURES)
-    query = f"""
-        SELECT
-            g_source_id       AS source_id,
-            g_phot_g_mean_mag AS phot_g_mean_mag,
-            e_v_class_star    AS ero_class,
-            {feats}
-        FROM siwei_zhao_2025.crossmatch_ero_gaia_0_3
-        WHERE g_phot_g_mean_mag >= {MAG_CUT}
-          AND g_source_id IS NOT NULL
-        ORDER BY g_source_id
-    """
-    print("  Querying crossmatch_ero_gaia_0_3 for VIS features...")
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-
-    for col in ERO_FEATURES:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.loc[~np.isfinite(df[col]), col] = np.nan
-
-    df["source_id"] = df["source_id"].astype(str)
-    print(f"  -> {len(df):,} sources")
-    return df
-
-
-# ── C/D. Gaia random ────────────────────────────────────────────────────────
-
-def query_gaia_subset(username: str, n_sample: int,
-                      extra_where: str = "") -> pd.DataFrame:
-    """Query a random Gaia DR3 subset with the UMAP/XGBoost feature columns."""
-    import psycopg2
-
-    raw_select = """
-        parallax_over_error, astrometric_gof_al, astrometric_chi2_al,
-        astrometric_excess_noise_sig, ipd_gof_harmonic_amplitude, ruwe,
-        phot_g_mean_flux_over_error, phot_bp_mean_flux_over_error,
-        phot_rp_mean_flux_over_error,
-        phot_bp_mean_mag - phot_g_mean_mag AS bp_g,
-        phot_g_mean_mag - phot_rp_mean_mag AS g_rp,
-        phot_bp_rp_excess_factor - (
-            CASE
-                WHEN bp_rp < 0.5 THEN 1.154360 + 0.033772*bp_rp + 0.032277*bp_rp*bp_rp
-                WHEN bp_rp < 4.0 THEN 1.162004 + 0.011464*bp_rp + 0.049255*bp_rp*bp_rp
-                                       - 0.005879*bp_rp*bp_rp*bp_rp
-                ELSE 1.057572 + 0.140537*bp_rp
-            END
-        ) AS corrected_bp_rp_excess,
-        SQRT(
-            (pmra*pmra*pmdec_error*pmdec_error
-             - 2.0*pmra_pmdec_corr*pmra_error*pmdec_error*pmra*pmdec
-             + pmdec*pmdec*pmra_error*pmra_error)
-            / NULLIF(pmra_error*pmra_error*pmdec_error*pmdec_error
-                     *(1.0 - pmra_pmdec_corr*pmra_pmdec_corr), 0)
-        ) AS pm_significance,
-        SQRT(ra_error*ra_error*dec_error*dec_error
-             *(1.0 - ra_dec_corr*ra_dec_corr)) AS position_error
-    """
-
-    conn = psycopg2.connect(host=WSDB_HOST, database=WSDB_DB, user=username)
-
-    if extra_where:
-        # Use pre-filtered hilat table (derived columns already computed).
-        # The table has ~140M of ~1.8B Gaia rows (~1 in 13), so we need a
-        # wider random_index window to collect enough sources.
-        hilat_table = f"{username}.gaia_source_hilat"
-        ri_threshold = int(n_sample * 15)
-        query = f"""
-            SELECT
-                source_id,
-                ra, dec,
-                b, ecl_lat,
-                phot_g_mean_mag,
-                parallax_over_error, astrometric_gof_al, astrometric_chi2_al,
-                astrometric_excess_noise_sig, ipd_gof_harmonic_amplitude, ruwe,
-                phot_g_mean_flux_over_error, phot_bp_mean_flux_over_error,
-                phot_rp_mean_flux_over_error,
-                bp_g, g_rp, corrected_bp_rp_excess,
-                pm_significance, position_error
-            FROM {hilat_table}
-            WHERE random_index < {ri_threshold}
-            ORDER BY random_index
-            LIMIT {n_sample}
-        """
-    else:
-        ri_threshold = int(n_sample * 3)
-        where_clause = (f"WHERE random_index < {ri_threshold}"
-                        f" AND phot_g_mean_mag >= {MAG_CUT}"
-                        f" AND phot_g_mean_mag IS NOT NULL")
-        query = f"""
-            SELECT
-                source_id,
-                ra, dec,
-                b, ecl_lat,
-                phot_g_mean_mag,
-                {raw_select}
-            FROM gaia_dr3.gaia_source
-            {where_clause}
-            ORDER BY random_index
-            LIMIT {n_sample}
-        """
-    label = "high-lat " if extra_where else ""
-    print(f"  Querying ~{n_sample:,} {label}Gaia DR3 sources (G >= {MAG_CUT})...")
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-
-    for col in SELECTED_GAIA_PARAMETERS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df["source_id"] = df["source_id"].astype(str)
-    print(f"  -> {len(df):,} sources")
-    return df
-
-
-def project_and_predict_gaia(df: pd.DataFrame, q1_mean, std_safe, reducer):
-    """Project Gaia sources into Q1 UMAP space and run XGBoost."""
+def _xgb_ensemble_pgal(X: np.ndarray) -> np.ndarray:
+    """Run Q1 XGBoost seed ensemble → P(gal) array."""
     import xgboost as xgb
+    seed_paths = sorted(MODEL_DIR.glob("xgb_classifier_q1_seed*.json"))
+    if not seed_paths:
+        # Fallback to single model
+        if MODEL_PATH.exists():
+            m = xgb.XGBClassifier()
+            m.load_model(str(MODEL_PATH))
+            X_clean = X.astype(np.float32).copy()
+            for c in range(X_clean.shape[1]):
+                bad = ~np.isfinite(X_clean[:, c])
+                if bad.any():
+                    X_clean[bad, c] = np.nanmedian(X_clean[:, c])
+            return m.predict_proba(X_clean)[:, 1]
+        return np.full(X.shape[0], np.nan)
+
+    X_clean = X.astype(np.float32).copy()
+    for c in range(X_clean.shape[1]):
+        bad = ~np.isfinite(X_clean[:, c])
+        if bad.any():
+            med = np.nanmedian(X_clean[:, c])
+            X_clean[bad, c] = med if np.isfinite(med) else 0.0
+    all_probs = []
+    for p in seed_paths:
+        m = xgb.XGBClassifier()
+        m.load_model(str(p))
+        all_probs.append(m.predict_proba(X_clean)[:, 1])
+    pgal = np.mean(all_probs, axis=0)
+    print(f"  XGB ensemble ({len(seed_paths)} seeds) → P(gal) range "
+          f"[{pgal.min():.3f}, {pgal.max():.3f}]  ({X.shape[0]:,} sources)")
+    return pgal
+
+
+# ── A. Q1 allphz ────────────────────────────────────────────────────────────
+
+def project_allphz(q1_mean, std_safe, reducer, q1_emb, q1_labels) -> pd.DataFrame:
+    """Load q1_allphz.npz, project into Q1 UMAP space, assign clusters, run XGB."""
+    print("  Loading q1_allphz.npz...")
+    data = np.load(ARRAYS_DIR / "q1_allphz.npz", allow_pickle=True)
+    df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"]       = data["source_ids"].astype(str)
+    df["ra"]              = data["ra"].astype(float)
+    df["dec"]             = data["dec"].astype(float)
+    df["phot_g_mean_mag"] = data["phot_g_mean_mag"].astype(float)
+    df["phz"]             = data["phz"].astype(int)
+    df["phz_pgal"]        = data["phz_gal_prob"].astype(float)
+    print(f"  {len(df):,} allphz sources")
 
     X = df[SELECTED_GAIA_PARAMETERS].values.astype(float)
+    print("  Projecting into Q1 UMAP space...")
+    emb = _project(X, q1_mean, std_safe, reducer)
+    df["umap1"] = emb[:, 0]
+    df["umap2"] = emb[:, 1]
+    df["cluster"] = _assign_to_clusters(emb, q1_emb, q1_labels)
+
+    print("  Running XGB P(gal)...")
+    df["model_pgal"] = _xgb_ensemble_pgal(X)
+
+    return df
+
+
+# ── B. Q1×DESI ──────────────────────────────────────────────────────────────
+
+def project_q1_desi(q1_mean, std_safe, reducer, q1_emb, q1_labels) -> pd.DataFrame:
+    """Load q1_desi.npz, project, assign clusters, run XGB."""
+    print("  Loading q1_desi.npz...")
+    data = np.load(ARRAYS_DIR / "q1_desi.npz", allow_pickle=True)
+    df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"]       = data["source_ids"].astype(str)
+    df["ra"]              = data["ra"].astype(float)
+    df["dec"]             = data["dec"].astype(float)
+    df["phot_g_mean_mag"] = data["phot_g_mean_mag"].astype(float)
+    df["phz"]             = data["phz"].astype(int)
+    df["phz_pgal"]        = data["phz_gal_prob"].astype(float)
+    df["desi_z"]          = data["desi_z"].astype(float)
+    df["spectype"]        = data["spectype"].astype(str)
+    print(f"  {len(df):,} Q1×DESI sources")
+
+    X = df[SELECTED_GAIA_PARAMETERS].values.astype(float)
+    print("  Projecting into Q1 UMAP space...")
+    emb = _project(X, q1_mean, std_safe, reducer)
+    df["umap1"] = emb[:, 0]
+    df["umap2"] = emb[:, 1]
+    df["cluster"] = _assign_to_clusters(emb, q1_emb, q1_labels)
+
+    print("  Running XGB P(gal)...")
+    df["model_pgal"] = _xgb_ensemble_pgal(X)
+
+    return df
+
+
+# ── C/D. ERO regular / rebalanced ───────────────────────────────────────────
+
+def project_ero(npz_name: str, q1_mean, std_safe, reducer,
+                q1_emb, q1_labels) -> pd.DataFrame:
+    """Load ERO npz, project into Q1 UMAP space, assign clusters, run XGB.
+
+    npz_name: 'ero_regular.npz' or 'ero_rebal.npz'
+    """
+    npz_path = ARRAYS_DIR / npz_name
+    print(f"  Loading {npz_name}...")
+    npz = np.load(npz_path, allow_pickle=True)
+    X_raw    = npz["X_raw"].astype(float)
+    y        = npz["y"]
+    sids     = npz["source_ids"].astype(str)
+    gmag     = npz["g_mag"].astype(float) if "g_mag" in npz else None
+    ra       = npz["ra"].astype(float) if "ra" in npz else None
+    dec      = npz["dec"].astype(float) if "dec" in npz else None
+    cs       = npz["class_star"].astype(float) if "class_star" in npz else None
+
+    df = pd.DataFrame(X_raw, columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"] = sids
+    df["y"] = y
+    if gmag is not None:
+        df["phot_g_mean_mag"] = gmag
+    if ra is not None:
+        df["ra"] = ra
+    if dec is not None:
+        df["dec"] = dec
+    if cs is not None:
+        df["class_star"] = cs
+    print(f"  {len(df):,} sources  (STAR={(y==0).sum():,}  GAL={(y==1).sum():,})")
+
+    print("  Projecting into Q1 UMAP space...")
+    emb = _project(X_raw, q1_mean, std_safe, reducer)
+    df["umap1"] = emb[:, 0]
+    df["umap2"] = emb[:, 1]
+    df["cluster"] = _assign_to_clusters(emb, q1_emb, q1_labels)
+
+    print("  Running XGB P(gal)...")
+    df["model_pgal"] = _xgb_ensemble_pgal(X_raw)
+
+    return df
+
+
+# ── E. ERO×DESI ─────────────────────────────────────────────────────────────
+
+def project_ero_desi(q1_mean, std_safe, reducer, q1_emb, q1_labels) -> pd.DataFrame:
+    """Load ero_desi.npz, project, assign clusters, run XGB."""
+    print("  Loading ero_desi.npz...")
+    npz = np.load(ARRAYS_DIR / "ero_desi.npz", allow_pickle=True)
+    X = npz["X_features"].astype(float)
+    df = pd.DataFrame(X, columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"]       = npz["source_ids"].astype(str)
+    df["phot_g_mean_mag"] = npz["phot_g_mean_mag"].astype(float)
+    df["ra"]              = npz["ra"].astype(float)
+    df["dec"]             = npz["dec"].astype(float)
+    df["spectype"]        = npz["spectype"].astype(str)
+    df["desi_z"]          = npz["desi_z"].astype(float)
+    df["class_star"]      = npz["class_star"].astype(float)
+    df["cat_value"]       = npz["cat_value"].astype(int)
+    print(f"  {len(df):,} ERO×DESI sources  "
+          f"(cat=2: {(df['cat_value']==2).sum():,},  "
+          f"cat=3: {(df['cat_value']==3).sum():,})")
 
     print("  Projecting into Q1 UMAP space...")
     emb = _project(X, q1_mean, std_safe, reducer)
-    df = df.copy()
     df["umap1"] = emb[:, 0]
     df["umap2"] = emb[:, 1]
-    print(f"  Projected {len(emb):,} sources")
+    df["cluster"] = _assign_to_clusters(emb, q1_emb, q1_labels)
 
-    print("  Applying XGBoost classifier...")
-    bst = xgb.Booster()
-    bst.load_model(str(MODEL_PATH))
-    dmat = xgb.DMatrix(X, feature_names=SELECTED_GAIA_PARAMETERS)
-    df["gal_prob"] = bst.predict(dmat)
-    n_gal = (df["gal_prob"] >= 0.5).sum()
-    n_star = (df["gal_prob"] < 0.5).sum()
-    print(f"  Predicted galaxies (P>=0.5): {n_gal:,}  |  stars: {n_star:,}")
+    print("  Running XGB P(gal)...")
+    df["model_pgal"] = _xgb_ensemble_pgal(X)
+
+    return df
+
+
+# ── F/G. Gaia random / high-lat ─────────────────────────────────────────────
+
+def project_gaia(npz_name: str, q1_mean, std_safe, reducer,
+                 q1_emb, q1_labels) -> pd.DataFrame:
+    """Load Gaia npz, project into Q1 UMAP space, assign clusters, run XGB."""
+    npz_path = ARRAYS_DIR / npz_name
+    print(f"  Loading {npz_name}...")
+    npz = np.load(npz_path, allow_pickle=True)
+    X = npz["X_features"].astype(float)
+    df = pd.DataFrame(X, columns=SELECTED_GAIA_PARAMETERS)
+    df["source_id"]       = npz["source_ids"].astype(str)
+    df["ra"]              = npz["ra"].astype(float)
+    df["dec"]             = npz["dec"].astype(float)
+    df["phot_g_mean_mag"] = npz["phot_g_mean_mag"].astype(float)
+    print(f"  {len(df):,} Gaia sources")
+
+    print("  Projecting into Q1 UMAP space...")
+    emb = _project(X, q1_mean, std_safe, reducer)
+    df["umap1"] = emb[:, 0]
+    df["umap2"] = emb[:, 1]
+    df["cluster"] = _assign_to_clusters(emb, q1_emb, q1_labels)
+
+    print("  Running XGB P(gal)...")
+    df["gal_prob"] = _xgb_ensemble_pgal(X)
 
     return df
 
@@ -256,67 +284,138 @@ def project_and_predict_gaia(df: pd.DataFrame, q1_mean, std_safe, reducer):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    global MODEL_DIR, MODEL_PATH, PROJECTED_DIR
+
     parser = argparse.ArgumentParser(
-        description="Query and project external sources into Q1 UMAP space.")
-    parser.add_argument("--only", choices=["q1", "ero", "gaia"],
-                        help="Run only one projection (default: all).")
-    parser.add_argument("--no-hilat", action="store_true",
-                        help="Skip high-latitude Gaia subset.")
-    parser.add_argument("--n-sample", type=int, default=50_000,
-                        help="Number of random Gaia sources (default: 50000).")
+        description="Project all datasets into Q1 UMAP space and cache as CSV.")
+    parser.add_argument("--only", choices=["allphz", "desi", "ero", "ero_desi", "gaia"],
+                        help="Run only one projection group (default: all).")
+    parser.add_argument(
+        "--model", choices=["q1", "q1_op_f1"], default="q1",
+        help="Which model to use: q1 (original) or q1_op_f1 (Optuna F1 tuned)",
+    )
     args = parser.parse_args()
 
-    username = os.getenv("PGUSER")
-    if not username:
-        print("ERROR: PGUSER not set.")
-        return 1
+    if args.model == "q1_op_f1":
+        MODEL_DIR     = PROJECT_DIR / "output" / "xgboost_q1_op_f1"
+        MODEL_PATH    = MODEL_DIR / "xgb_classifier_q1.json"
+        PROJECTED_DIR = ARRAYS_DIR / "projected_op_f1"
+
+    PROJECTED_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print("Q1 UMAP Projections")
+    print("=" * 60)
+
+    # Check prerequisite files
+    for f in ["q1_indiv.npz", "q1_indiv_reducer.joblib", "q1_cluster_labels.npy"]:
+        if not (ARRAYS_DIR / f).exists():
+            print(f"ERROR: {ARRAYS_DIR / f} not found.")
+            print("Run query_umap_q1_50k.py first.")
+            return 1
+
+    # Load Q1 base data
+    print("\n  Loading Q1 base (embedding, reducer, labels)...")
+    q1, reducer, q1_mean, std_safe, q1_emb, q1_labels = _load_q1()
+    print(f"  Q1 base: {len(q1_emb):,} sources, "
+          f"{len(set(q1_labels[q1_labels >= 0]))} clusters")
 
     do_all = args.only is None
-    print("=" * 60)
 
-    # ── A. Q1 features ───────────────────────────────────────────────────────
-    if do_all or args.only == "q1":
-        csv_path = ARRAYS_DIR / "q1_features.csv"
-        print("[A] Q1 Euclid features...")
-        df_q1 = query_q1_features(username)
-        save_cols = (["source_id", "phot_g_mean_mag", "phz"]
-                     + Q1_DB_COLS + ["fluxsig_vis_psf"])
-        df_q1[save_cols].to_csv(csv_path, index=False)
-        print(f"  Saved -> {csv_path}\n")
+    # ── A. Q1 allphz ─────────────────────────────────────────────────────────
+    if do_all or args.only == "allphz":
+        csv_path = PROJECTED_DIR / "q1_allphz_projected.csv"
+        print(f"\n[A] Q1 allphz projection...")
+        if not (ARRAYS_DIR / "q1_allphz.npz").exists():
+            print("  q1_allphz.npz not found — skipping.")
+        else:
+            df = project_allphz(q1_mean, std_safe, reducer, q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
 
-    # ── B. ERO features ──────────────────────────────────────────────────────
+    # ── B. Q1×DESI ───────────────────────────────────────────────────────────
+    if do_all or args.only == "desi":
+        csv_path = PROJECTED_DIR / "q1_desi_projected.csv"
+        print(f"\n[B] Q1×DESI projection...")
+        if not (ARRAYS_DIR / "q1_desi.npz").exists():
+            print("  q1_desi.npz not found — skipping.")
+        else:
+            df = project_q1_desi(q1_mean, std_safe, reducer, q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
+
+    # ── C. ERO regular ───────────────────────────────────────────────────────
     if do_all or args.only == "ero":
-        csv_path = ARRAYS_DIR / "ero_features.csv"
-        print("[B] ERO VIS features...")
-        df_ero = query_ero_features(username)
-        df_ero.to_csv(csv_path, index=False)
-        print(f"  Saved -> {csv_path}\n")
+        csv_path = PROJECTED_DIR / "ero_regular_projected.csv"
+        print(f"\n[C] ERO regular projection...")
+        if not (ARRAYS_DIR / "ero_regular.npz").exists():
+            print("  ero_regular.npz not found — skipping.")
+        else:
+            df = project_ero("ero_regular.npz", q1_mean, std_safe, reducer,
+                             q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
 
-    # ── C. Gaia random ───────────────────────────────────────────────────────
+    # ── D. ERO rebalanced ────────────────────────────────────────────────────
+    if do_all or args.only == "ero":
+        csv_path = PROJECTED_DIR / "ero_rebal_projected.csv"
+        print(f"\n[D] ERO rebalanced projection...")
+        if not (ARRAYS_DIR / "ero_rebal.npz").exists():
+            print("  ero_rebal.npz not found — skipping.")
+        else:
+            df = project_ero("ero_rebal.npz", q1_mean, std_safe,
+                             reducer, q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
+
+    # ── E. ERO×DESI ──────────────────────────────────────────────────────────
+    if do_all or args.only == "ero_desi":
+        csv_path = PROJECTED_DIR / "ero_desi_projected.csv"
+        print(f"\n[E] ERO×DESI projection...")
+        if not (ARRAYS_DIR / "ero_desi.npz").exists():
+            print("  ero_desi.npz not found — skipping.")
+        else:
+            df = project_ero_desi(q1_mean, std_safe, reducer, q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
+
+    # ── F. Gaia random ───────────────────────────────────────────────────────
     if do_all or args.only == "gaia":
-        _, reducer, q1_mean, std_safe = _load_q1()
+        csv_path = PROJECTED_DIR / "gaia_random_projected.csv"
+        print(f"\n[F] Gaia random projection...")
+        if not (ARRAYS_DIR / "gaia_random.npz").exists():
+            print("  gaia_random.npz not found — skipping.")
+        else:
+            df = project_gaia("gaia_random.npz", q1_mean, std_safe, reducer,
+                              q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
 
-        csv_path = ARRAYS_DIR / "xgb_gaia_projected.csv"
-        print("[C] Gaia random subset...")
-        df_gaia = query_gaia_subset(username, args.n_sample)
-        df_gaia = project_and_predict_gaia(df_gaia, q1_mean, std_safe, reducer)
-        df_gaia.to_csv(csv_path, index=False)
-        print(f"  Saved -> {csv_path}\n")
+        # ── G. Gaia high-lat ─────────────────────────────────────────────────
+        csv_path = PROJECTED_DIR / "gaia_hilat_projected.csv"
+        print(f"\n[G] Gaia high-lat projection...")
+        if not (ARRAYS_DIR / "gaia_hilat.npz").exists():
+            print("  gaia_hilat.npz not found — skipping.")
+        else:
+            df = project_gaia("gaia_hilat.npz", q1_mean, std_safe, reducer,
+                              q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
 
-        # ── D. Gaia high-lat ─────────────────────────────────────────────────
-        if not args.no_hilat:
-            csv_path = ARRAYS_DIR / "xgb_gaia_hilat_projected.csv"
-            print("[D] Gaia high-lat subset...")
-            df_hilat = query_gaia_subset(
-                username, args.n_sample,
-                extra_where="ABS(b) > 10 AND ABS(ecl_lat) > 45")
-            df_hilat = project_and_predict_gaia(
-                df_hilat, q1_mean, std_safe, reducer)
-            df_hilat.to_csv(csv_path, index=False)
-            print(f"  Saved -> {csv_path}\n")
+        # ── H. Gaia low-lat ──────────────────────────────────────────────────
+        csv_path = PROJECTED_DIR / "gaia_lolat_projected.csv"
+        print(f"\n[H] Gaia low-lat projection...")
+        if not (ARRAYS_DIR / "gaia_lolat.npz").exists():
+            print("  gaia_lolat.npz not found — skipping.")
+        else:
+            df = project_gaia("gaia_lolat.npz", q1_mean, std_safe, reducer,
+                              q1_emb, q1_labels)
+            df.to_csv(csv_path, index=False, float_format="%.17g")
+            print(f"  Saved -> {csv_path}  ({len(df):,} sources)")
 
-    print("=" * 60)
-    print("Done. Downstream analyze_* scripts can now use --csv to skip DB queries.")
+    print("\n" + "=" * 60)
+    print("Done. All projected CSVs saved to:")
+    print(f"  {PROJECTED_DIR}")
     return 0
 
 

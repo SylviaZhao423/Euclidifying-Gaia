@@ -16,7 +16,7 @@ Methodological choices vs the legacy
      PM-propagated Gaia position (Gaia DR3 epoch 2016.0 → Q1 epoch
      2024.0) instead of the raw Gaia catalogue position. Sources without
      published PM (Gaia 2-par solutions) fall back to a neighbour-PM
-     proxy ({username}.gaia_pm_proxy); 2-par sources with no proxy use
+     proxy ({username}.gaia_pm_proxy_q1); 2-par sources with no proxy use
      zero PM (no shift).
 
   2. The separation is computed with q3c_dist_pm (exact great-circle
@@ -54,8 +54,8 @@ DELTA_T_YEARS  = Q1_OBS_EPOCH - GAIA_REF_EPOCH    # = 8.0
 # pmra* convention).
 #
 # For 2-par Gaia sources (no published PM), we COALESCE into the
-# pre-computed neighbour-PM proxy table {username}.gaia_pm_proxy
-# (built by build_gaia_pm_proxy.py — median pmra/pmdec of 5/6-par
+# pre-computed neighbour-PM proxy table {username}.gaia_pm_proxy_q1
+# (built by crossmatch_q1_mer_phz_vis_gaia_pm_proxy.py — median pmra/pmdec of 5/6-par
 # neighbours within 30"). 2-par sources without enough neighbours fall
 # back to zero PM (no propagation).
 SEPCOR_EXPR = (
@@ -78,7 +78,7 @@ def main():
     cursor = conn.cursor()
 
     source_table = f"{username}.crossmatch_q1_mer_phz_vis_gaia"
-    proxy_table  = f"{username}.gaia_pm_proxy"
+    proxy_table  = f"{username}.gaia_pm_proxy_q1"
     output_table = f"{username}.crossmatch_q1_mer_phz_vis_gaia_sep_pmcor"
 
     print("=" * 70)

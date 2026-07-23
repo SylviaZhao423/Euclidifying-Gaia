@@ -26,10 +26,11 @@ import astropy.units as u
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
+OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "web"
 
-RANDOM_CSV = ARRAYS_DIR / "xgb_gaia_projected.csv"
-HILAT_CSV  = ARRAYS_DIR / "xgb_gaia_hilat_projected.csv"
+RANDOM_CSV = ARRAYS_DIR / "projected" / "gaia_random_projected.csv"
+HILAT_CSV  = ARRAYS_DIR / "projected" / "gaia_hilat_projected.csv"
+LOLAT_CSV  = ARRAYS_DIR / "projected" / "gaia_lolat_projected.csv"
 SKY_IMG    = ARRAYS_DIR / "gaia_dr3_aitoff_gal_8k.jpg"
 
 # Image WCS: GLON-AIT / GLAT-AIT, 8000×4000

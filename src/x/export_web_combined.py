@@ -5,7 +5,7 @@ Post-process umap_combined.html: externalize embedded image/sky data for web dep
 Reads the monolithic umap_combined.html (~1 GB, mostly base64 cutout/contact-sheet
 images + sky data) and produces a deployable directory:
 
-    output/umap/q1_individual/web_combined/
+    output/umap/web/web_combined/
         index.html          (~17 MB — plot data + JS code)
         data/
             cutouts.json
@@ -19,7 +19,7 @@ directory can be served from any static host (GitHub Pages, Netlify, etc.).
 
 Usage:
     python src/export_web_combined.py
-    # then:  cd output/umap/q1_individual/web_combined && python -m http.server 8100
+    # then:  cd output/umap/web/web_combined && python -m http.server 8100
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ import sys
 import time
 from pathlib import Path
 
-INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "umap_combined.html"
-OUTDIR = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "web_combined"
+INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "web" / "umap_combined.html"
+OUTDIR = Path(__file__).resolve().parents[1] / "output" / "umap" / "web" / "web_combined"
 
 # Loaded at startup (contact sheets for transposition + cutouts for hover).
 # Plot initialises only after all of these arrive.
@@ -43,6 +43,7 @@ EAGER_VARS = [
     "ero_desi_contact_sheets",
     "cutouts",
     "ero_cutouts",
+    "DATASET_BASE",
 ]
 
 # Extra contact-sheet pages — large, rarely needed (only when clicking
@@ -216,7 +217,7 @@ def main() -> int:
 var _loadingExtras = new Set();
 
 /* Non-blocking sidebar loading indicator */
-var _loadedCount = 0, _totalEager = 8;
+var _loadedCount = 0, _totalEager = 9;
 function _updateLoadHint(name) {
   _loadedCount++;
   var el = document.getElementById('sidebar-hint');
@@ -240,30 +241,61 @@ setTimeout(function() {
     el.innerHTML = 'Loading data... <span style="color:#666">0/' + _totalEager + '</span>';
 }, 0);
 
-var _dataReady = Promise.all([
-  _jfetch('contact_sheets'),
-  _jfetch('desi_contact_sheets'),
-  _jfetch('ero_contact_sheets'),
-  _jfetch('ero_desi_contact_sheets'),
-  _jfetch('cutouts'),
-  _jfetch('ero_cutouts'),
+/* Priority fetches: DATASET_BASE + sky_datasets load first for immediate display */
+var _priorityReady = Promise.all([
+  _jfetch('DATASET_BASE'),
   _jfetch('sky_datasets'),
   new Promise(function(resolve) { _updateLoadHint('sky_image'); resolve(); }),
 ]).then(function(arr) {
-  contact_sheets = arr[0];
-  desi_contact_sheets = arr[1];
-  ero_contact_sheets = arr[2];
-  ero_desi_contact_sheets = arr[3];
-  cutouts = arr[4];
-  ero_cutouts = arr[5];
-  /* Restore sky datasets and re-init sky panel */
-  SKY_DATASETS = arr[6];
+  DATASET_BASE = arr[0];
+  SKY_DATASETS = arr[1];
+  /* Apply base dataset projection + colors immediately */
+  var _curBase = (typeof OVERLAY_TO_BASE !== 'undefined' && typeof activeOverlay !== 'undefined')
+    ? (OVERLAY_TO_BASE[activeOverlay] || 'allphz') : 'allphz';
+  _activeBaseDS = '';
+  if (typeof switchBaseDataset === 'function') switchBaseDataset(_curBase);
+  if (typeof recolorQ1Base === 'function') {
+    var _selFeat = document.getElementById('color-mode-select');
+    recolorQ1Base(_selFeat ? _selFeat.value : 'model_pgal');
+  }
+  if (typeof recolorOverlayTraces === 'function') {
+    var _selFeat2 = document.getElementById('color-mode-select');
+    recolorOverlayTraces(_selFeat2 ? _selFeat2.value : 'model_pgal');
+  }
+  /* CRITICAL: re-run visibility + z-axis init now that DATASET_BASE is loaded.
+     The synchronous switchOverlay() call at page-load time ran with DATASET_BASE={},
+     which caused switchBaseDataset()'s early-return guard to skip the gaia-XGB layer
+     setup. Re-applying both ensures the projected Gaia traces are visible + at the
+     correct normalised z values. */
+  if (typeof applyVisibility === 'function') applyVisibility();
+  if (typeof applyZAxis === 'function') applyZAxis(_currentZ || 'g_mag');
+  if (typeof plotDiv !== 'undefined') Plotly.redraw(plotDiv);
+  /* Init sky panel */
   var _firstKey = Object.keys(SKY_DATASETS)[0] || 'gaia_random';
   D = SKY_DATASETS[_firstKey] || {ra:[],dec:[],gl:[],gb:[],ipx:[],ipy:[],u1:[],u2:[],sid:[]};
   N = D.ra ? D.ra.length : 0;
   selected = new Uint8Array(N);
   hasSelection = false; selCircle = null;
   resizeCanvases(); renderAll(); clearStats();
+});
+
+/* Remaining fetches: start AFTER priority data is rendered */
+var _dataReady = _priorityReady.then(function() {
+  return Promise.all([
+    _jfetch('contact_sheets'),
+    _jfetch('desi_contact_sheets'),
+    _jfetch('ero_contact_sheets'),
+    _jfetch('ero_desi_contact_sheets'),
+    _jfetch('cutouts'),
+    _jfetch('ero_cutouts'),
+  ]);
+}).then(function(arr) {
+  contact_sheets = arr[0];
+  desi_contact_sheets = arr[1];
+  ero_contact_sheets = arr[2];
+  ero_desi_contact_sheets = arr[3];
+  cutouts = arr[4];
+  ero_cutouts = arr[5];
   /* Transpose contact sheets */
   Object.keys(contact_sheets).forEach(function(v) {
     Object.keys(contact_sheets[v]).forEach(function(k) {

@@ -12,7 +12,7 @@ The closest-match selection here is computed against the per-source
 PM-propagated Gaia position (Gaia DR3 epoch 2016.0 → ERO epoch 2023.5)
 instead of the raw Gaia 2016 position. Sources without published PM
 (Gaia 2-par solutions) fall back to a neighbour-PM proxy
-({username}.gaia_pm_proxy); 2-par sources with no proxy use zero PM.
+({username}.gaia_pm_proxy_ero); 2-par sources with no proxy use zero PM.
 
 The legacy uncorrected pipeline is preserved as
 `crossmatch_ero_gaia_uncor.py`, which writes to `..._uncor` table names.
@@ -76,8 +76,8 @@ WIDE_RADIUS_FACTOR     = 5.0
 # pmra1 as cos(dec)-corrected (Gaia's pmra* convention).
 #
 # 2-par sources (no published PM) get a neighbour-PM proxy via the
-# pre-built {username}.gaia_pm_proxy table (built by
-# build_gaia_pm_proxy.py — median of 5/6-par neighbour PMs within 30").
+# pre-built {username}.gaia_pm_proxy_ero table (built by
+# crossmatch_ero_gaia_1_0_pm_proxy.py — median of 5/6-par neighbour PMs within 30").
 # 2-par sources without enough neighbours fall back to zero PM.
 def _pm_dist_expr(g_alias='g', proxy_alias='proxy',
                    m_ra_col='m.v_alpha_j2000',
@@ -110,7 +110,7 @@ def crossmatch_corrected(ero_columns, gaia_columns, username, radius_arcsec):
 
     radius_suffix = str(radius_arcsec).replace('.', '_')
     table_name    = f'{username}.crossmatch_ero_gaia_{radius_suffix}_pmcor'
-    proxy_table   = f'{username}.gaia_pm_proxy'
+    proxy_table   = f'{username}.gaia_pm_proxy_ero'
     radius_deg    = radius_arcsec / 3600.0
 
     # Pre-filter radius: 5× final_radius, capped at WIDE_RADIUS_CAP_ARCSEC

@@ -40,7 +40,7 @@ Writes:
   output/umap/arrays/projected/ero_regular_projected.csv
   output/umap/arrays/projected/ero_rebal_projected.csv
   output/umap/arrays/projected/ero_desi_projected.csv
-  output/umap/q1_individual/umap_3d.html
+  output/umap/web/umap_3d.html
 
 Usage:
   python src/compile_umap_3d.py
@@ -65,7 +65,7 @@ from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
+OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "web"
 CUTOUTS_DIR     = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "phz"
 ERO_CUTOUTS_DIR = PROJECT_DIR / "output" / "euclid_cutouts" / "ero_cutouts" / "q1_to_ero"
 

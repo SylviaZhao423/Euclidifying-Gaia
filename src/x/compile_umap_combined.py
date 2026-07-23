@@ -10,21 +10,21 @@ Color dropdown updates sky + 3D scatter + Q1 base simultaneously.
 Reads:
   output/umap/arrays/q1_indiv.npz
   output/umap/arrays/q1_allphz.npz
-  output/umap/arrays/q1_allphz_desi.npz
+  output/umap/arrays/q1_desi.npz
   output/umap/arrays/q1_indiv_reducer.joblib
   output/umap/arrays/q1_cluster_labels.npy
   output/umap/arrays/q1_features.csv
-  output/umap/arrays/ero_indiv.npz
-  output/umap/arrays/ero_indiv_rebalanced.npz
+  output/umap/arrays/ero_regular.npz
+  output/umap/arrays/ero_rebal.npz
   output/umap/arrays/ero_features.csv
-  output/umap/arrays/xgb_gaia_projected.csv
-  output/umap/arrays/xgb_gaia_hilat_projected.csv
+  output/umap/arrays/gaia_random_projected.csv
+  output/umap/arrays/gaia_hilat_projected.csv
   output/umap/arrays/ero_desi.npz
   output/umap/arrays/projected/*.csv
   output/umap/arrays/gaia_dr3_aitoff_gal_8k.jpg
 
 Writes:
-  output/umap/q1_individual/umap_combined.html
+  output/umap/web/umap_combined.html
 
 Usage:
   python src/compile_umap_combined.py
@@ -53,9 +53,38 @@ from sklearn.neighbors import NearestNeighbors
 sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS
 
+# Plotly 6+ defaults to binary typed-array encoding (`{"dtype":"f8","bdata":<base64>}`)
+# for numpy arrays passed to traces. This format breaks Scatter3d rendering for the
+# Gaia XGB projected layer in our setup. Monkey-patch Scatter3d/Scatter to convert
+# numpy arrays → Python lists at trace-creation time, which forces plotly to emit
+# plain JSON arrays instead of the typed-array binary form.
+import plotly.graph_objects as _go  # noqa: E402
+_orig_s3_init = _go.Scatter3d.__init__
+_orig_s_init  = _go.Scatter.__init__
+
+def _arr_to_list(v):
+    if hasattr(v, "tolist"):
+        return v.tolist()
+    return v
+
+def _patched_s3_init(self, **kwargs):
+    for _k in ("x", "y", "z"):
+        if _k in kwargs:
+            kwargs[_k] = _arr_to_list(kwargs[_k])
+    _orig_s3_init(self, **kwargs)
+
+def _patched_s_init(self, **kwargs):
+    for _k in ("x", "y"):
+        if _k in kwargs:
+            kwargs[_k] = _arr_to_list(kwargs[_k])
+    _orig_s_init(self, **kwargs)
+
+_go.Scatter3d.__init__ = _patched_s3_init
+_go.Scatter.__init__   = _patched_s_init
+
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
+OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "web"
 CUTOUTS_DIR     = PROJECT_DIR / "output" / "euclid_cutouts" / "q1_cutouts" / "phz"
 ERO_CUTOUTS_DIR = PROJECT_DIR / "output" / "euclid_cutouts" / "ero_cutouts" / "q1_to_ero"
 
@@ -160,8 +189,9 @@ ERO_DESI_CATEGORY_DIRS = {
 Q1_TO_ERO_DIR      = PROJECT_DIR / "output" / "q1_to_ero"
 Q1_SEED_MODELS_DIR = PROJECT_DIR / "output" / "xgboost_q1" / "seed_models"
 PROJECTED_DIR      = ARRAYS_DIR  / "projected"
-GAIA_XGB_CSV       = ARRAYS_DIR  / "xgb_gaia_projected.csv"
-GAIA_HILAT_CSV     = ARRAYS_DIR  / "xgb_gaia_hilat_projected.csv"
+GAIA_XGB_CSV       = PROJECTED_DIR / "gaia_random_projected.csv"
+GAIA_HILAT_CSV     = PROJECTED_DIR / "gaia_hilat_projected.csv"
+GAIA_LOLAT_CSV     = PROJECTED_DIR / "gaia_lolat_projected.csv"
 
 GAL_THRESH = 0.5   # XGBoost galaxy probability threshold
 
@@ -349,8 +379,8 @@ def load_allphz_from_npz() -> pd.DataFrame:
 
 
 def load_desi_from_npz() -> pd.DataFrame:
-    """Load DESI-confirmed galaxies from q1_allphz_desi.npz."""
-    data = np.load(ARRAYS_DIR / "q1_allphz_desi.npz", allow_pickle=True)
+    """Load DESI-confirmed galaxies from q1_desi.npz."""
+    data = np.load(ARRAYS_DIR / "q1_desi.npz", allow_pickle=True)
     df = pd.DataFrame(data["X_features"], columns=SELECTED_GAIA_PARAMETERS)
     df["source_id"]       = data["source_ids"].astype(str)
     df["ra"]              = data["ra"].astype(float)
@@ -359,7 +389,7 @@ def load_desi_from_npz() -> pd.DataFrame:
     df["phz"]             = data["phz"].astype(int)
     df["d_desi_z"]        = data["desi_z"].astype(float)
     df["phz_pgal"]        = data["phz_gal_prob"].astype(float)
-    print(f"  -> {len(df):,} DESI sources (from q1_allphz_desi.npz)")
+    print(f"  -> {len(df):,} DESI sources (from q1_desi.npz)")
     return df
 
 
@@ -433,8 +463,6 @@ def load_ero_feats(csv_path: Path, source_ids: np.ndarray) -> tuple[np.ndarray |
 
 def load_cutout_cache(cutouts_dir: Path) -> dict:
     import base64
-    from io import BytesIO
-    from PIL import Image
     cache = {}
     for manifest_path in sorted(cutouts_dir.rglob("manifest*.csv")):
         cell_dir = manifest_path.parent
@@ -451,9 +479,7 @@ def load_cutout_cache(cutouts_dir: Path) -> dict:
             if not png_path.exists():
                 continue
             try:
-                img = Image.open(png_path).convert("RGB")
-                buf = BytesIO(); img.save(buf, format="PNG")
-                cache[str(row["source_id"])] = base64.b64encode(buf.getvalue()).decode()
+                cache[str(row["source_id"])] = base64.b64encode(png_path.read_bytes()).decode()
             except Exception:
                 continue
     print(f"  Loaded {len(cache)} cached cutout thumbnails")
@@ -468,8 +494,6 @@ def load_cutout_cache_ero(ero_cutouts_dir: Path) -> dict:
     Returns {source_id_str: base64_png}.
     """
     import base64
-    from io import BytesIO
-    from PIL import Image
     cache: dict[str, str] = {}
     for manifest_path in sorted(ero_cutouts_dir.rglob("manifest*.csv")):
         cell_dir = manifest_path.parent
@@ -490,9 +514,7 @@ def load_cutout_cache_ero(ero_cutouts_dir: Path) -> dict:
             if not png_path.exists():
                 continue
             try:
-                img = Image.open(png_path).convert("RGB")
-                buf = BytesIO(); img.save(buf, format="PNG")
-                cache[str(row["source_id"])] = base64.b64encode(buf.getvalue()).decode()
+                cache[str(row["source_id"])] = base64.b64encode(png_path.read_bytes()).decode()
             except Exception:
                 continue
     print(f"  Loaded {len(cache)} ERO individual cutout thumbnail(s)")
@@ -515,15 +537,12 @@ def _load_all_sheet_pages(cluster_dir: Path) -> list[str]:
     """
     import base64 as _b64
     from io import BytesIO
-    from PIL import Image
     pages: list[str] = []
     # Single-page case
     single = cluster_dir / "contact_sheet.png"
     if single.exists():
         try:
-            img = Image.open(single).convert("RGB")
-            buf = BytesIO(); img.save(buf, format="PNG")
-            pages.append(_b64.b64encode(buf.getvalue()).decode())
+            pages.append(_b64.b64encode(single.read_bytes()).decode())
         except Exception:
             pass
         return pages  # single page only
@@ -533,9 +552,7 @@ def _load_all_sheet_pages(cluster_dir: Path) -> list[str]:
         if not p.exists():
             break
         try:
-            img = Image.open(p).convert("RGB")
-            buf = BytesIO(); img.save(buf, format="PNG")
-            pages.append(_b64.b64encode(buf.getvalue()).decode())
+            pages.append(_b64.b64encode(p.read_bytes()).decode())
         except Exception:
             continue
     return pages
@@ -834,6 +851,195 @@ def _filter_gaia_xgb_hilat(df_gxgb, min_abs_gal_lat=10.0, min_abs_ecl_lat=45.0):
     return df_gxgb[mask].reset_index(drop=True)
 
 
+# ── Per-dataset base data builder ─────────────────────────────────────────────
+
+def _build_dataset_base(q1_emb, q1_labels, cluster_ids):
+    """Build DATASET_BASE dict: per-dataset per-cluster arrays for JS base restyle.
+
+    Reads projected CSVs directly to get full (un-subsampled) data for each dataset.
+    Returns a dict keyed by dataset name, each containing per-cluster sub-dicts with
+    x, y, gmag, model_pgal, cd (customdata = 14 Gaia features per point).
+    """
+    def _round_arr(arr):
+        """Round a numpy array to 4 decimals, replacing non-finite with None. Returns a list."""
+        a = np.asarray(arr, dtype=np.float64)
+        finite = np.isfinite(a)
+        rounded = np.round(a, 4)
+        return [float(rounded[i]) if finite[i] else None for i in range(len(a))]
+
+    def _entry_from_df(df, legend_colors=None):
+        """Group a DataFrame by cluster and extract per-cluster arrays.
+
+        legend_colors: optional array of per-point hex color strings for
+        the "Legend" color mode.  When provided, stored as ``lc`` per cluster.
+        """
+        cl = df["cluster"].values.astype(int)
+        # Pre-extract all columns as numpy arrays once
+        umap1_all = df["umap1"].values.astype(np.float64)
+        umap2_all = df["umap2"].values.astype(np.float64)
+        gmag_all = df["phot_g_mean_mag"].values.astype(np.float64) \
+                   if "phot_g_mean_mag" in df.columns else None
+        mp_all = None
+        for pcol in ("model_pgal", "gal_prob"):
+            if pcol in df.columns:
+                mp_all = df[pcol].values.astype(np.float64)
+                break
+        phz_all = df["phz_pgal"].values.astype(np.float64) if "phz_pgal" in df.columns else None
+        feat_cols = [fn for fn in SELECTED_GAIA_PARAMETERS if fn in df.columns]
+        has_feats = len(feat_cols) == len(SELECTED_GAIA_PARAMETERS)
+        if has_feats:
+            feat_matrix = df[feat_cols].values.astype(np.float64)
+
+        result = {}
+        for k in [-1] + list(cluster_ids):
+            m = cl == k
+            if not m.any():
+                result[str(k)] = {"x": [], "y": [], "gmag": [], "model_pgal": [], "cd": []}
+                continue
+            d = {
+                "x": _round_arr(umap1_all[m]),
+                "y": _round_arr(umap2_all[m]),
+                "gmag": _round_arr(gmag_all[m]) if gmag_all is not None else [],
+                "model_pgal": _round_arr(mp_all[m]) if mp_all is not None else [],
+            }
+            if has_feats:
+                sub = np.round(feat_matrix[m], 4)
+                finite = np.isfinite(sub)
+                d["cd"] = [[float(sub[i, j]) if finite[i, j] else None
+                            for j in range(sub.shape[1])] for i in range(sub.shape[0])]
+            else:
+                d["cd"] = []
+            if phz_all is not None:
+                d["phz_pgal"] = _round_arr(phz_all[m])
+            if legend_colors is not None:
+                d["lc"] = legend_colors[m].tolist()
+            result[str(k)] = d
+        return result
+
+    # -- Legend color helpers per dataset type --
+    _phz_color_map = {v: c for v, (_, c, _) in PHZ_LABELS.items()}
+    _ero_group_colors = {g: color for g, (_, color) in ERO_GROUP_CONFIGS.items()}
+    _ero_desi_colors = {v: c for v, (_, c) in ERO_DESI_LABELS.items()}
+
+    def _phz_legend_colors(df):
+        """Per-point hex color from PHZ class column."""
+        return np.array([_phz_color_map.get(int(v), "#888") for v in df["phz"].values])
+
+    def _xgb_legend_colors(df):
+        """Per-point hex color: Star (#F2BDCE) vs Galaxy (#91D3F0) from model_pgal."""
+        mp = df["gal_prob"].values if "gal_prob" in df.columns else df["model_pgal"].values
+        return np.where(mp >= GAL_THRESH, "#91D3F0", "#F2BDCE")
+
+    def _ero_legend_colors(df):
+        """Per-point hex color from ERO 4-group classification."""
+        cs = df["class_star"].values
+        mp = df["model_pgal"].values if "model_pgal" in df.columns else df["gal_prob"].values
+        ero_star = cs > 0.5
+        xgb_gal  = mp >= GAL_THRESH
+        colors = np.full(len(df), "#888888", dtype=object)
+        colors[ ero_star & ~xgb_gal] = _ero_group_colors["agree_both_star"]
+        colors[~ero_star &  xgb_gal] = _ero_group_colors["agree_both_galaxy"]
+        colors[ ero_star &  xgb_gal] = _ero_group_colors["disagree_ero_star_q1_gal"]
+        colors[~ero_star & ~xgb_gal] = _ero_group_colors["disagree_ero_gal_q1_star"]
+        return colors
+
+    def _ero_desi_legend_colors(df):
+        """Per-point hex color from ERO-DESI cat_value or PHZ class (for Q1×DESI subset)."""
+        colors = np.full(len(df), "#888888", dtype=object)
+        if "cat_value" in df.columns:
+            for v, c in _ero_desi_colors.items():
+                colors[df["cat_value"].values == v] = c
+        # Q1×DESI rows have phz but no cat_value — use PHZ colors
+        if "phz" in df.columns:
+            has_phz = df["phz"].notna().values
+            no_cat  = ~df["cat_value"].notna().values if "cat_value" in df.columns else np.ones(len(df), dtype=bool)
+            q1_mask = has_phz & no_cat
+            if q1_mask.any():
+                phz_vals = df.loc[q1_mask, "phz"].values.astype(int)
+                for i, v in enumerate(phz_vals):
+                    idx = np.where(q1_mask)[0][i]
+                    colors[idx] = _phz_color_map.get(v, "#888")
+        return colors
+
+    dataset_base = {}
+
+    # allphz — color by PHZ class
+    p = PROJECTED_DIR / "q1_allphz_projected.csv"
+    if p.exists():
+        df = pd.read_csv(p, float_precision="round_trip")
+        if "cluster" not in df.columns:
+            df["cluster"] = assign_to_clusters(df[["umap1","umap2"]].values, q1_emb, q1_labels)
+        lc = _phz_legend_colors(df) if "phz" in df.columns else None
+        dataset_base["allphz"] = _entry_from_df(df, legend_colors=lc)
+        print(f"  allphz: {len(df):,} sources")
+
+    # gaia_random — color by XGB Star/Galaxy
+    p = PROJECTED_DIR / "gaia_random_projected.csv"
+    if p.exists():
+        df = pd.read_csv(p)
+        if "cluster" not in df.columns:
+            df["cluster"] = assign_to_clusters(df[["umap1","umap2"]].values, q1_emb, q1_labels)
+        lc = _xgb_legend_colors(df)
+        dataset_base["gaia_random"] = _entry_from_df(df, legend_colors=lc)
+        print(f"  gaia_random: {len(df):,} sources")
+
+    # gaia_hilat — color by XGB Star/Galaxy
+    p = PROJECTED_DIR / "gaia_hilat_projected.csv"
+    if p.exists():
+        df = pd.read_csv(p)
+        if "cluster" not in df.columns:
+            df["cluster"] = assign_to_clusters(df[["umap1","umap2"]].values, q1_emb, q1_labels)
+        lc = _xgb_legend_colors(df)
+        dataset_base["gaia_hilat"] = _entry_from_df(df, legend_colors=lc)
+        print(f"  gaia_hilat: {len(df):,} sources")
+
+    # gaia_lolat — color by XGB Star/Galaxy
+    p = PROJECTED_DIR / "gaia_lolat_projected.csv"
+    if p.exists():
+        df = pd.read_csv(p)
+        if "cluster" not in df.columns:
+            df["cluster"] = assign_to_clusters(df[["umap1","umap2"]].values, q1_emb, q1_labels)
+        lc = _xgb_legend_colors(df)
+        dataset_base["gaia_lolat"] = _entry_from_df(df, legend_colors=lc)
+        print(f"  gaia_lolat: {len(df):,} sources")
+
+    # ero_reg — color by ERO 4-group
+    p = PROJECTED_DIR / "ero_regular_projected.csv"
+    if p.exists():
+        df = pd.read_csv(p, float_precision="round_trip")
+        if "cluster" not in df.columns:
+            df["cluster"] = assign_to_clusters(df[["umap1","umap2"]].values, q1_emb, q1_labels)
+        lc = _ero_legend_colors(df) if "class_star" in df.columns else None
+        dataset_base["ero_reg"] = _entry_from_df(df, legend_colors=lc)
+        print(f"  ero_reg: {len(df):,} sources")
+
+    # ero_rebal — color by ERO 4-group
+    p = PROJECTED_DIR / "ero_rebal_projected.csv"
+    if p.exists():
+        df = pd.read_csv(p, float_precision="round_trip")
+        if "cluster" not in df.columns:
+            df["cluster"] = assign_to_clusters(df[["umap1","umap2"]].values, q1_emb, q1_labels)
+        lc = _ero_legend_colors(df) if "class_star" in df.columns else None
+        dataset_base["ero_rebal"] = _entry_from_df(df, legend_colors=lc)
+        print(f"  ero_rebal: {len(df):,} sources")
+
+    # euclid_desi (combined Q1×DESI + ERO×DESI)
+    parts = []
+    for fname in ("q1_desi_projected.csv", "ero_desi_projected.csv"):
+        p = PROJECTED_DIR / fname
+        if p.exists():
+            parts.append(pd.read_csv(p, float_precision="round_trip"))
+    if parts:
+        df = pd.concat(parts, ignore_index=True)
+        if "cluster" not in df.columns:
+            df["cluster"] = assign_to_clusters(df[["umap1","umap2"]].values, q1_emb, q1_labels)
+        lc = _ero_desi_legend_colors(df)
+        dataset_base["euclid_desi"] = _entry_from_df(df, legend_colors=lc)
+        print(f"  euclid_desi: {len(df):,} sources")
+
+    return dataset_base
+
+
 # ── ERO projection helper ─────────────────────────────────────────────────────
 
 def _project_ero(npz_path: Path, q1_mean, q1_std, reducer) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1024,16 +1230,23 @@ def plot_umap_3d_plotly(
     gaia_hilat_emb=None, gaia_hilat_gal_prob=None,
     gaia_hilat_sids=None, gaia_hilat_gmag=None,
     gaia_hilat_ra=None, gaia_hilat_dec=None,
+    # Gaia XGB low-latitude subset
+    gaia_lolat_emb=None, gaia_lolat_gal_prob=None,
+    gaia_lolat_sids=None, gaia_lolat_gmag=None,
+    gaia_lolat_ra=None, gaia_lolat_dec=None,
     density_hist_data=None,   # pre-built per-category histogram dict from _build_density_hists
     # Gaia features for z-axis (14 cols, aligned to source order)
     ero_reg_gaia_features=None, ero_rebal_gaia_features=None,
     gaia_xgb_gaia_features=None, gaia_hilat_gaia_features=None,
+    gaia_lolat_gaia_features=None,
     ero_desi_gaia_features=None,
     # Sky data (combined script additions)
     sky_datasets_json=None,
     sky_img_src=None,
     q1_fields_js=None,
     ero_fields_js=None,
+    # Per-dataset base data for JS restyle
+    dataset_base_json=None,
 ):
     try:
         import plotly.graph_objects as go
@@ -1100,6 +1313,7 @@ def plot_umap_3d_plotly(
     _ero_rebal_z_feat:  dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
     _gaia_z_feat:       dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
     _gaia_hilat_z_feat: dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
+    _gaia_lolat_z_feat: dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
     _ero_desi_z_feat:   dict[str, list] = {fn: [] for fn in SELECTED_GAIA_PARAMETERS}
 
     def _q1_z_model(mask):
@@ -1114,18 +1328,38 @@ def plot_umap_3d_plotly(
             return [round(float(x), 4) if np.isfinite(x) else None for x in v]
         return None
 
-    # ── Q1 base ───────────────────────────────────────────────────────────────
-    # Q1 base always sits flat at z=0 so overlays are visible above it.
-    # q1_gmag (from q1_indiv.npz) aligns with q1_emb/q1_labels — NOT phz_gmag.
-    _q1_base_gmag = q1_gmag if q1_gmag is not None else np.array([])
-    _q1_ht = "x: %{x:.4f}<br>y: %{y:.4f}<br>z: %{z:.4f}<extra>%{data.name}</extra>"
+    # ── Q1 bottom base (fixed cluster-colored reference) ─────────────────────
+    # Per-cluster traces at z=0, always in cluster colours. Serves as a
+    # reference map showing the Q1 training UMAP structure.
     noise_mask = q1_labels == -1
     if noise_mask.any():
-        z_noise = np.zeros(noise_mask.sum())
+        traces.append(go.Scatter3d(
+            x=q1_emb[noise_mask, 0], y=q1_emb[noise_mask, 1],
+            z=np.zeros(noise_mask.sum()),
+            mode="markers", marker=dict(size=1, color="#2a2a2a", opacity=0.15),
+            name="_q1bot noise", showlegend=False, hoverinfo="skip",
+        ))
+    for k in cluster_ids:
+        m = q1_labels == k
+        traces.append(go.Scatter3d(
+            x=q1_emb[m, 0], y=q1_emb[m, 1], z=np.zeros(m.sum()),
+            mode="markers",
+            marker=dict(size=1, color=CLUSTER_COLORS[k % len(CLUSTER_COLORS)], opacity=0.15),
+            name=f"_q1bot C{k}", showlegend=False, hoverinfo="skip",
+        ))
+    n_q1_bottom = (1 if noise_mask.any() else 0) + len(cluster_ids)
+
+    # ── Q1 top base (per-dataset, recolourable) ───────────────────────────────
+    # These traces get restyled by switchBaseDataset() when the dataset changes.
+    # Initially populated with allphz data (or Q1 training data as fallback).
+    _q1_base_gmag = q1_gmag if q1_gmag is not None else np.array([])
+    _q1_ht = "x: %{x:.4f}<br>y: %{y:.4f}<br>z: %{z:.4f}<extra>%{data.name}</extra>"
+    if noise_mask.any():
+        z_noise = np.full(noise_mask.sum(), 1.45)
         traces.append(go.Scatter3d(
             x=q1_emb[noise_mask, 0], y=q1_emb[noise_mask, 1], z=z_noise,
             mode="markers", marker=dict(size=1, color="#2a2a2a", opacity=0.5),
-            name="noise", customdata=_feat_cd(noise_mask),
+            name="_topbase_noise", customdata=_feat_cd(noise_mask),
             hovertemplate=_q1_ht, showlegend=False,
         ))
         _q1_z_gmag.append(z_noise.tolist())
@@ -1137,7 +1371,7 @@ def plot_umap_3d_plotly(
             _q1_z_feat[fn].append([1.45] * int(noise_mask.sum()))
     for k in cluster_ids:
         m   = q1_labels == k
-        z_k = np.zeros(m.sum())
+        z_k = np.full(m.sum(), 1.45)
         traces.append(go.Scatter3d(
             x=q1_emb[m, 0], y=q1_emb[m, 1], z=z_k,
             mode="markers",
@@ -1509,6 +1743,77 @@ def plot_umap_3d_plotly(
                         _gaia_hilat_z_feat[fn].append([None] * n_pts)
                 n_gaia_hilat_sub += 1
 
+    # ── Gaia XGB low-lat overlay (legend + sub-traces, same structure as hilat) ──
+    n_pre_gaia_lolat     = len(traces)
+    n_gaia_lolat_legend  = 0
+    _gaia_lolat_cl = (assign_to_clusters(gaia_lolat_emb, q1_emb, q1_labels)
+                      if gaia_lolat_emb is not None else None)
+    _gaia_lolat_cats: list[str] = []
+    _gaia_lolat_cat_data: list[tuple] = []
+    _gaia_lolat_z_gmag: list[list] = []
+    _gaia_lolat_z_model_pgal: list[list] = []
+    if gaia_lolat_emb is not None and gaia_lolat_gal_prob is not None:
+        m_gal_ll  = gaia_lolat_gal_prob >= GAL_THRESH
+        m_star_ll = ~m_gal_ll
+        lolat_pgal = gaia_lolat_gal_prob
+        for mask, short, lbl, color in [
+            (m_star_ll, "star", f"XGB Star  (P(gal) < {GAL_THRESH})", "#F2BDCE"),
+            (m_gal_ll,  "gal",  f"XGB Galaxy  (P(gal) ≥ {GAL_THRESH})",  "#91D3F0"),
+        ]:
+            if not mask.any():
+                continue
+            traces.append(go.Scatter3d(
+                x=[None], y=[None], z=[None], mode="markers",
+                marker=dict(size=_GAIA_MK_SIZE, color=color, opacity=0.7,
+                            line=dict(width=0)),
+                name=lbl, showlegend=True, visible=False,
+            ))
+            _gaia_lolat_cats.append(short)
+            _gaia_lolat_cat_data.append((mask, short, lbl, color))
+            n_gaia_lolat_legend += 1
+
+    # Low-lat sub-traces per category×cluster
+    n_pre_gaia_lolat_sub = len(traces)
+    n_gaia_lolat_sub     = 0
+    if gaia_lolat_emb is not None and gaia_lolat_gal_prob is not None:
+        lolat_pgal = gaia_lolat_gal_prob
+        for mask, short, lbl, color in _gaia_lolat_cat_data:
+            for k in _q1_cluster_ids:
+                mk = mask & (_gaia_lolat_cl == k) if _gaia_lolat_cl is not None else mask
+                if not mk.any():
+                    continue
+                n_pts   = int(mk.sum())
+                sids_m  = gaia_lolat_sids[mk] if gaia_lolat_sids is not None else np.array([""] * n_pts)
+                probs_m = gaia_lolat_gal_prob[mk]
+                z_g     = gaia_lolat_gmag[mk] if gaia_lolat_gmag is not None else np.zeros(n_pts)
+                ra_m    = gaia_lolat_ra[mk]  if gaia_lolat_ra  is not None else np.full(n_pts, np.nan)
+                dec_m   = gaia_lolat_dec[mk] if gaia_lolat_dec is not None else np.full(n_pts, np.nan)
+                gm_m    = gaia_lolat_gmag[mk] if gaia_lolat_gmag is not None else np.full(n_pts, np.nan)
+                cd = [[str(sids_m[i]), round(float(probs_m[i]), 4),
+                       round(float(ra_m[i]), 4)  if np.isfinite(ra_m[i])  else None,
+                       round(float(dec_m[i]), 4) if np.isfinite(dec_m[i]) else None,
+                       round(float(gm_m[i]), 2)  if np.isfinite(gm_m[i])  else None]
+                      for i in range(n_pts)]
+                traces.append(go.Scatter3d(
+                    x=gaia_lolat_emb[mk, 0], y=gaia_lolat_emb[mk, 1], z=z_g,
+                    mode="markers",
+                    marker=dict(size=_GAIA_MK_SIZE, color=color, opacity=0.7,
+                                line=dict(width=0)),
+                    name=f"gxll_{short} C{k}",
+                    hovertemplate=f"RA=%{{customdata[2]:.4f}}<br>Dec=%{{customdata[3]:+.4f}}<br>G=%{{customdata[4]:.2f}}<extra>{lbl.split('(')[0].strip()}</extra>",
+                    customdata=cd, showlegend=False, visible=False,
+                ))
+                _gaia_lolat_z_gmag.append(z_g.tolist())
+                _gaia_lolat_z_model_pgal.append([round(float(v), 4) for v in lolat_pgal[mk]])
+                for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
+                    if gaia_lolat_gaia_features is not None:
+                        vals = gaia_lolat_gaia_features[mk, fi]
+                        _gaia_lolat_z_feat[fn].append(
+                            [round(float(v), 4) if np.isfinite(v) else None for v in vals])
+                    else:
+                        _gaia_lolat_z_feat[fn].append([None] * n_pts)
+                n_gaia_lolat_sub += 1
+
     # ── ERO-DESI overlay (sub-traces per cluster, like PHZ) ──────────────────
     n_pre_ero_desi       = len(traces)
     n_ero_desi_legend    = 0   # number of legend traces
@@ -1701,6 +2006,11 @@ def plot_umap_3d_plotly(
     gaia_hilat_sub_start_json     = json.dumps(n_pre_gaia_hilat_sub)
     gaia_hilat_n_sub_json         = json.dumps(n_gaia_hilat_sub)
     gaia_hilat_cats_json          = json.dumps(_gaia_hilat_cats)
+    gaia_lolat_start_json         = json.dumps(n_pre_gaia_lolat)
+    gaia_lolat_n_legend_json      = json.dumps(n_gaia_lolat_legend)
+    gaia_lolat_sub_start_json     = json.dumps(n_pre_gaia_lolat_sub)
+    gaia_lolat_n_sub_json         = json.dumps(n_gaia_lolat_sub)
+    gaia_lolat_cats_json          = json.dumps(_gaia_lolat_cats)
     ero_desi_start_json           = json.dumps(n_pre_ero_desi)
     ero_desi_n_legend_json        = json.dumps(n_ero_desi_legend)
     ero_desi_sub_start_json       = json.dumps(n_pre_ero_desi_sub)
@@ -1710,11 +2020,13 @@ def plot_umap_3d_plotly(
     ero_desi_sheet_extra_json     = json.dumps(ero_desi_sheet_extra or {})
     ero_desi_cluster_coverage_json = json.dumps(_ero_desi_cluster_coverage)
     ero_desi_trace_cat_json        = json.dumps(_ero_desi_trace_cat)
-    n_base_traces            = (1 if noise_mask.any() else 0) + len(cluster_ids)
+    n_top_base  = (1 if noise_mask.any() else 0) + len(cluster_ids)
+    n_base_traces = n_q1_bottom + n_top_base
     # ── Normalise G-mag z arrays to [0, 1] so the z-axis stays fixed ────────
     _all_gmag_vals: list[float] = []
     for _zlist in (_phz_sub_z_gmag, _ero_reg_z_gmag, _ero_rebal_z_gmag,
-                   _gaia_z_gmag, _gaia_hilat_z_gmag, _ero_desi_z_gmag):
+                   _gaia_z_gmag, _gaia_hilat_z_gmag, _gaia_lolat_z_gmag,
+                   _ero_desi_z_gmag):
         for _arr in _zlist:
             _all_gmag_vals.extend(v for v in _arr if v is not None)
     if q1_gmag is not None:
@@ -1739,13 +2051,15 @@ def plot_umap_3d_plotly(
     _ero_rebal_z_gmag = _norm_gmag_z(_ero_rebal_z_gmag)
     _gaia_z_gmag      = _norm_gmag_z(_gaia_z_gmag)
     _gaia_hilat_z_gmag = _norm_gmag_z(_gaia_hilat_z_gmag)
+    _gaia_lolat_z_gmag = _norm_gmag_z(_gaia_lolat_z_gmag)
     _ero_desi_z_gmag  = _norm_gmag_z(_ero_desi_z_gmag)
     # Q1 base always at z=1.45 regardless of z-axis mode
     _q1_z_gmag = [[1.45] * len(arr) for arr in _q1_z_gmag]
 
     # ── Normalise Gaia feature z arrays to [0, 1] ────────────────────────────
     _overlay_feat_dicts = [_phz_sub_z_feat, _ero_reg_z_feat, _ero_rebal_z_feat,
-                           _gaia_z_feat, _gaia_hilat_z_feat, _ero_desi_z_feat]
+                           _gaia_z_feat, _gaia_hilat_z_feat, _gaia_lolat_z_feat,
+                           _ero_desi_z_feat]
     _feat_norm: dict[str, list[float]] = {}
     _feat_color_bounds: dict[str, list[float]] = {}  # 1st/99th percentile for color display
     for fi, fn in enumerate(SELECTED_GAIA_PARAMETERS):
@@ -1799,6 +2113,9 @@ def plot_umap_3d_plotly(
     _gaia_hilat_z_dict: dict = {"g_mag": _gaia_hilat_z_gmag, "model_pgal": _gaia_hilat_z_model_pgal}
     _gaia_hilat_z_dict.update(_gaia_hilat_z_feat)
     gaia_hilat_z_json = json.dumps(_gaia_hilat_z_dict)
+    _gaia_lolat_z_dict: dict = {"g_mag": _gaia_lolat_z_gmag, "model_pgal": _gaia_lolat_z_model_pgal}
+    _gaia_lolat_z_dict.update(_gaia_lolat_z_feat)
+    gaia_lolat_z_json = json.dumps(_gaia_lolat_z_dict)
 
     _ero_desi_z_dict: dict = {"g_mag": _ero_desi_z_gmag, "model_pgal": _ero_desi_z_model_pgal}
     _ero_desi_z_dict.update(_ero_desi_z_feat)
@@ -2091,6 +2408,7 @@ def plot_umap_3d_plotly(
       <select id="overlay-select">
         <option value="gaia_xgb">Gaia Random 50k</option>
         <option value="gaia_hilat">Gaia High-lat 50k</option>
+        <option value="gaia_lolat">Gaia Low-lat 50k</option>
         <option value="allphz">Q1</option>
         <option value="ero">ERO</option>
         <option value="ero_rebalanced">ERO Rebalanced</option>
@@ -2176,6 +2494,11 @@ var GAIA_HILAT_N_LEGEND    = {gaia_hilat_n_legend_json};
 var GAIA_HILAT_SUB_START   = {gaia_hilat_sub_start_json};
 var GAIA_HILAT_N_SUB       = {gaia_hilat_n_sub_json};
 var GAIA_HILAT_CATS        = {gaia_hilat_cats_json};
+var GAIA_LOLAT_START       = {gaia_lolat_start_json};
+var GAIA_LOLAT_N_LEGEND    = {gaia_lolat_n_legend_json};
+var GAIA_LOLAT_SUB_START   = {gaia_lolat_sub_start_json};
+var GAIA_LOLAT_N_SUB       = {gaia_lolat_n_sub_json};
+var GAIA_LOLAT_CATS        = {gaia_lolat_cats_json};
 var ERO_DESI_START         = {ero_desi_start_json};
 var ERO_DESI_N_LEGEND      = {ero_desi_n_legend_json};
 var ERO_DESI_SUB_START     = {ero_desi_sub_start_json};
@@ -2197,6 +2520,7 @@ var ERO_REG_Z   = {ero_reg_z_json};
 var ERO_REBAL_Z = {ero_rebal_z_json};
 var GAIA_XGB_Z  = {gaia_xgb_z_json};
 var GAIA_HILAT_Z = {gaia_hilat_z_json};
+var GAIA_LOLAT_Z = {gaia_lolat_z_json};
 var ERO_DESI_Z  = {ero_desi_z_json};
 var GMAG_NORM = {gmag_norm_json};  /* [min, max] for G-mag tick labels */
 var FEAT_NORM = {feat_norm_json};  /* {{feat_name: [min, max]}} for Gaia feature tick labels */
@@ -2251,7 +2575,10 @@ var eroFeatureNames  = {ero_feature_names_json};
 var eroFeatureRanges = {ero_feature_ranges_json};
 
 var CLUSTER_COLORS_JS = {cluster_colors_json};
+var N_Q1_BOTTOM       = {n_q1_bottom};
 var N_BASE_TRACES     = {n_base_traces};
+var DATASET_BASE      = {dataset_base_json or '{{}}'};
+var _activeBaseDS     = 'allphz';
 
 /* (removed old COLORSCALE_RDBU — using CSCALE_RdYlBu_r everywhere) */
 var COLORSCALE_BLUES = [
@@ -2275,7 +2602,7 @@ var CDELT_X = {IMG_CDELT[0]}, CDELT_Y = {IMG_CDELT[1]};
 
 /* Dataset-to-overlay mapping */
 var DATASET_TO_OVERLAY = {{
-  gaia_random: 'gaia_xgb', gaia_hilat: 'gaia_hilat',
+  gaia_random: 'gaia_xgb', gaia_hilat: 'gaia_hilat', gaia_lolat: 'gaia_lolat',
   q1: 'allphz', euclid_desi: 'euclid_desi',
   ero: 'ero', ero_rebal: 'ero_rebalanced'
 }};
@@ -2516,7 +2843,7 @@ function _drawCrosshair() {{
   var sp = gnomToScreen(gp.gx, gp.gy);
   if (!sp) return;
   var x = sp.x, y = sp.y;
-  var r = 3.5, tick = 3.5, gap = 1.5, cap = 1.5, lw = 1;
+  var r = 5, tick = 5, gap = 2, cap = 2, lw = 1.2;
   srcCtx.save();
   srcCtx.strokeStyle = '#F472B6';
   srcCtx.lineWidth = lw;
@@ -2524,11 +2851,6 @@ function _drawCrosshair() {{
   srcCtx.beginPath();
   srcCtx.arc(x, y, r, 0, 2 * Math.PI);
   srcCtx.stroke();
-  /* center dot */
-  srcCtx.fillStyle = '#F472B6';
-  srcCtx.beginPath();
-  srcCtx.arc(x, y, 1.2, 0, 2 * Math.PI);
-  srcCtx.fill();
   /* four tick lines with perpendicular caps */
   var o1 = r + gap, o2 = o1 + tick;
   srcCtx.beginPath();
@@ -2633,6 +2955,15 @@ function _skyPointVisible(i) {{
     var _catLeg = GAIA_HILAT_START + GAIA_HILAT_CATS.indexOf(cat);
     if (hiddenGaiaHilat[_catLeg]) return false;
 
+  }} else if (ov === 'gaia_lolat') {{
+    if (isolatedGaiaLolat !== null) {{
+      var _isoIdxL = isolatedGaiaLolat - GAIA_LOLAT_START;
+      var _isoCatL = (_isoIdxL >= 0 && _isoIdxL < GAIA_LOLAT_CATS.length) ? GAIA_LOLAT_CATS[_isoIdxL] : null;
+      return (cat === _isoCatL);
+    }}
+    var _catLegL = GAIA_LOLAT_START + GAIA_LOLAT_CATS.indexOf(cat);
+    if (hiddenGaiaLolat[_catLegL]) return false;
+
   }} else if (ov === 'ero' || ov === 'ero_rebalanced') {{
     /* ERO: cat is group name string e.g. "agree_star_star" */
     if (isolatedEROGroup !== null) return (cat === isolatedEROGroup);
@@ -2720,7 +3051,6 @@ function drawSources() {{
     if (useLegend && D.legend_color) return D.legend_color[i] || '#888';
     if (useDensity && D.u1 && D.u2) return densityToRGB(_densityAt(D.u1[i], D.u2[i]), 0, _skyDenVmax);
     if (!useLegend && !useDensity && D[colorMode] && D[colorMode][i] !== null) {{
-      if (colorMode === 'model_pgal') return valToRGB_inv(D[colorMode][i], mn, mx);
       return valToRGB(D[colorMode][i], mn, mx);
     }}
     return '#888';
@@ -3108,7 +3438,7 @@ function applySkySelectionTo3D() {{
     var origColor = _savedOverlayColors[si];
     /* Determine RA/Dec column indices */
     var ri = 1, di = 2;
-    if (/^gxgb_/.test(nm) || /^gxhl_/.test(nm)) {{ ri = 2; di = 3; }}
+    if (/^gxgb_/.test(nm) || /^gxhl_/.test(nm) || /^gxll_/.test(nm)) {{ ri = 2; di = 3; }}
     else if (/^ed_cat=/.test(nm)) {{ ri = 6; di = 7; }}
     var cols = new Array(cd.length);
     var szs  = new Array(cd.length);
@@ -3153,6 +3483,8 @@ var isolatedGaiaXgb  = null;
 var hiddenGaiaXgb    = {{}};
 var isolatedGaiaHilat = null;
 var hiddenGaiaHilat   = {{}};
+var isolatedGaiaLolat = null;
+var hiddenGaiaLolat   = {{}};
 var isolatedEroDesi  = null;
 var hiddenEroDesi    = {{}};
 var activeOverlay   = 'gaia_xgb';
@@ -3242,7 +3574,7 @@ function showEROSheets() {{
   sheetTitle.innerHTML = 'ERO contact sheets<br>' + total + ' sources';
   sheetImages.innerHTML = html; sheetView.style.display = 'block';
 }}
-var ERO_DESI_CAT_LABELS = {{'2': 'Disagree: ERO=star, DESI=gal', '3': 'Agree: ERO=gal, DESI=gal'}};
+var ERO_DESI_CAT_LABELS = {{'2': 'ERO Star', '3': 'ERO Galaxy'}};
 function _eroDesiIsolatedCat() {{
   if (isolatedEroDesi === null) return null;
   var idx = isolatedEroDesi - ERO_DESI_START;
@@ -3420,11 +3752,12 @@ sheetImages.addEventListener('click', function(e) {{
 var _IDX = {{}};  /* populated by _initIndices() */
 
 function _initIndices() {{
-  var q1 = [], phzSub = [], allERO = [];
+  var q1bot = [], q1 = [], phzSub = [], allERO = [];
   var eroReg = [], eroRegDummy = [], eroRebal = [], eroRebalDummy = [];
   var gaiaXgb = [], eroDesiLeg = [], eroDesiSub = [];
   plotDiv.data.forEach(function(tr,i) {{
-    if (/^Cluster \\d+$/.test(tr.name) || tr.name==='noise') q1.push(i);
+    if (/^_q1bot/.test(tr.name)) q1bot.push(i);
+    else if (/^Cluster \\d+$/.test(tr.name) || tr.name==='_topbase_noise') q1.push(i);
     if (/^phz=-?\\d+ C/.test(tr.name)) phzSub.push(i);
   }});
   var i;
@@ -3439,6 +3772,9 @@ function _initIndices() {{
   var gaiaHilatLeg = [], gaiaHilatSub = [], gaiaHilat = [];
   for (i = GAIA_HILAT_START; i < GAIA_HILAT_START + GAIA_HILAT_N_LEGEND; i++) gaiaHilatLeg.push(i);
   for (i = GAIA_HILAT_SUB_START; i < GAIA_HILAT_SUB_START + GAIA_HILAT_N_SUB; i++) {{ gaiaHilat.push(i); gaiaHilatSub.push(i); }}
+  var gaiaLolatLeg = [], gaiaLolatSub = [], gaiaLolat = [];
+  for (i = GAIA_LOLAT_START; i < GAIA_LOLAT_START + GAIA_LOLAT_N_LEGEND; i++) gaiaLolatLeg.push(i);
+  for (i = GAIA_LOLAT_SUB_START; i < GAIA_LOLAT_SUB_START + GAIA_LOLAT_N_SUB; i++) {{ gaiaLolat.push(i); gaiaLolatSub.push(i); }}
   for (i = ERO_DESI_START; i < ERO_DESI_START + ERO_DESI_N_LEGEND; i++) eroDesiLeg.push(i);
   for (i = ERO_DESI_SUB_START; i < ERO_DESI_SUB_START + ERO_DESI_N_SUB; i++) eroDesiSub.push(i);
 
@@ -3483,6 +3819,17 @@ function _initIndices() {{
     }}
   }});
 
+  /* Gaia low-lat sub-trace map: gaiaLolatSubMap[cat][cluster] = traceIdx */
+  var gaiaLolatSubMap = {{}};
+  gaiaLolatSub.forEach(function(idx) {{
+    var nm = plotDiv.data[idx].name;
+    var m  = nm.match(/^gxll_(\\w+) C(\\d+)$/);
+    if (m) {{
+      if (!gaiaLolatSubMap[m[1]]) gaiaLolatSubMap[m[1]] = {{}};
+      gaiaLolatSubMap[m[1]][m[2]] = idx;
+    }}
+  }});
+
   /* ERO sub-trace maps: eroRegSubMap[group][cluster] = traceIdx */
   var eroRegSubMap = {{}};
   eroReg.forEach(function(idx) {{
@@ -3515,11 +3862,12 @@ function _initIndices() {{
   }});
 
   _IDX = {{
-    q1: q1, phzSub: phzSub, allERO: allERO,
+    q1bot: q1bot, q1: q1, phzSub: phzSub, allERO: allERO,
     eroReg: eroReg, eroRegDummy: eroRegDummy, eroRegSubMap: eroRegSubMap,
     eroRebal: eroRebal, eroRebalDummy: eroRebalDummy, eroRebalSubMap: eroRebalSubMap,
     gaiaXgb: gaiaXgb, gaiaXgbLeg: gaiaXgbLeg, gaiaXgbSub: gaiaXgbSub, gaiaXgbSubMap: gaiaXgbSubMap,
     gaiaHilat: gaiaHilat, gaiaHilatLeg: gaiaHilatLeg, gaiaHilatSub: gaiaHilatSub, gaiaHilatSubMap: gaiaHilatSubMap,
+    gaiaLolat: gaiaLolat, gaiaLolatLeg: gaiaLolatLeg, gaiaLolatSub: gaiaLolatSub, gaiaLolatSubMap: gaiaLolatSubMap,
     eroDesiLeg: eroDesiLeg, eroDesiSub: eroDesiSub, eroDesiSubMap: eroDesiSubMap,
     baseCluster: baseCluster, phzLegend: phzLegend,
     phzSubMap: phzSubMap, desiLegend: desiLegend, desiSub: desiSub,
@@ -3541,6 +3889,9 @@ function _isGaiaXgbOverlay() {{
 }}
 function _isGaiaHilatOverlay() {{
   return activeOverlay === 'gaia_hilat';
+}}
+function _isGaiaLolatOverlay() {{
+  return activeOverlay === 'gaia_lolat';
 }}
 function _isEROOverlay() {{
   return (activeOverlay==='ero' || activeOverlay==='ero_rebalanced');
@@ -3565,6 +3916,7 @@ function _currentOverlaySubIndices() {{
   if (ov==='euclid_desi')     return (_IDX.phzSub || []).concat(_IDX.eroDesiSub || []);
   if (ov==='gaia_xgb')        return _IDX.gaiaXgbSub || [];
   if (ov==='gaia_hilat')      return _IDX.gaiaHilatSub || [];
+  if (ov==='gaia_lolat')      return _IDX.gaiaLolatSub || [];
   return [];
 }}
 
@@ -3575,6 +3927,7 @@ function _extractDensityCat(name) {{
   m = name.match(/^ero_(?:ero|eror)_grp=(.+) C\\d+$/); if (m) return m[1];
   m = name.match(/^gxgb_(\\w+) C\\d+$/);         if (m) return m[1].toLowerCase();
   m = name.match(/^gxhl_(\\w+) C\\d+$/);          if (m) return m[1].toLowerCase();
+  m = name.match(/^gxll_(\\w+) C\\d+$/);          if (m) return m[1].toLowerCase();
   m = name.match(/^ed_cat=(\\d+) C\\d+$/);         if (m) return m[1];
   return null;
 }}
@@ -3707,29 +4060,46 @@ function updatePhzHoverTemplate(feature) {{
 function recolorQ1Base(feature) {{
   var idxs = _q1BaseIndices(); if (!idxs.length) return;
   if (feature==='clusters') {{
-    var colors=[], opacities=[], showscales=[];
-    idxs.forEach(function(i) {{
-      var nm=plotDiv.data[i].name, mCl=nm.match(/^Cluster (\\d+)$/);
-      colors.push(mCl ? CLUSTER_COLORS_JS[parseInt(mCl[1])%CLUSTER_COLORS_JS.length] : '#2a2a2a');
-      opacities.push(mCl ? 0.15 : 0.5); showscales.push(false);
+    /* Color top base by pre-computed per-point legend colors (lc) from DATASET_BASE.
+       Each dataset stores the correct colors matching its overlay legend categories. */
+    var bd = DATASET_BASE[_activeBaseDS] || {{}};
+    var clusterKeys = ['-1'];
+    var nTop = N_BASE_TRACES - N_Q1_BOTTOM;
+    for (var ci=0; ci<nTop-1; ci++) clusterKeys.push(String(ci));
+    var colorArrays=[], _opA=[], _ssA=[];
+    idxs.forEach(function(i, ii) {{
+      var ck = clusterKeys[ii];
+      var entry = bd[ck] || {{}};
+      if (entry.lc && entry.lc.length) {{
+        colorArrays.push(entry.lc);
+      }} else {{
+        /* Fallback: flat cluster color */
+        var nm=plotDiv.data[i].name, mCl=nm.match(/^Cluster (\\d+)$/);
+        colorArrays.push(mCl ? CLUSTER_COLORS_JS[parseInt(mCl[1])%CLUSTER_COLORS_JS.length] : '#2a2a2a');
+      }}
+      _opA.push(0.5); _ssA.push(false);
     }});
-    Plotly.restyle(plotDiv, {{'marker.color':colors,'marker.opacity':opacities,'marker.showscale':showscales}}, idxs);
+    Plotly.restyle(plotDiv, {{'marker.color':colorArrays,'marker.opacity':_opA,'marker.showscale':_ssA}}, idxs);
   }} else if (feature==='umap_density') {{
     _recomputeDensityColor();
     return;
   }} else if (feature==='model_pgal' || feature==='phz_pgal' || feature==='g_mag') {{
-    /* These use Q1_BASE_Z arrays (not customdata) */
+    /* Read from DATASET_BASE for the active dataset */
     var cmin, cmax;
     if (feature === 'g_mag') {{ cmin = GMAG_NORM[0]; cmax = GMAG_NORM[1]; }}
     else {{ cmin = 0; cmax = 1; }}
+    var bd = DATASET_BASE[_activeBaseDS] || {{}};
+    var clusterKeys = ['-1'];
+    var nTop = N_BASE_TRACES - N_Q1_BOTTOM;
+    for (var ci=0; ci<nTop-1; ci++) clusterKeys.push(String(ci));
     var colorArrays=[], _csA=[], _cmiA=[], _cmaA=[], _opA=[];
     idxs.forEach(function(i,ii) {{
+      var ck = clusterKeys[ii];
+      var entry = bd[ck] || {{}};
       var vals;
-      if (feature === 'g_mag') {{
-        vals = Q1_BASE_COLOR_GMAG[ii] || [];
-      }} else {{
-        vals = (Q1_BASE_Z[feature] || [])[ii] || [];
-      }}
+      if (feature === 'g_mag') vals = entry.gmag || [];
+      else if (feature === 'model_pgal') vals = entry.model_pgal || [];
+      else vals = entry.phz_pgal || [];
       colorArrays.push(vals);
       var cs = (feature==='model_pgal') ? CSCALE_RdYlBu : CSCALE_RdYlBu_r;
       _csA.push(cs); _cmiA.push(cmin); _cmaA.push(cmax); _opA.push(0.5);
@@ -3881,6 +4251,7 @@ function _getOverlayZDict() {{
   if (ov==='ero_rebalanced') return ERO_REBAL_Z;
   if (ov==='gaia_xgb')       return GAIA_XGB_Z;
   if (ov==='gaia_hilat')     return GAIA_HILAT_Z;
+  if (ov==='gaia_lolat')     return GAIA_LOLAT_Z;
   if (ov==='ero_desi')       return ERO_DESI_Z;
   return null;
 }}
@@ -3994,6 +4365,11 @@ function restoreOverlayDefaultColors() {{
     if (mGh) {{
       col = (mGh[1] === 'gal') ? '#91D3F0' : '#F2BDCE';
     }}
+    /* Gaia Lolat sub-traces */
+    var mGl = nm.match(/^gxll_(\\w+)/);
+    if (mGl) {{
+      col = (mGl[1] === 'gal') ? '#91D3F0' : '#F2BDCE';
+    }}
     /* ERO-DESI sub-traces */
     var mEd = nm.match(/^ed_cat=(\\d+)/);
     if (mEd) {{
@@ -4083,6 +4459,14 @@ function _applyClusterVis(vis, map, coverageClusters) {{
         vis[map.baseCluster[k]] = 'legendonly';
     }});
   }}
+  /* Mirror cluster visibility to bottom Q1 reference traces */
+  _IDX.q1bot.forEach(function(bi, j) {{
+    /* q1bot[0] = noise (if exists), q1bot[1..] = C0,C1,... */
+    /* Match to top base: if top trace j is hidden, hide bottom j too */
+    var topIdx = _IDX.q1[j];
+    if (topIdx !== undefined && vis[topIdx] === 'legendonly') vis[bi] = 'legendonly';
+    else if (topIdx !== undefined && vis[topIdx] === false) vis[bi] = false;
+  }});
 }}
 
 /* ── Main visibility function ────────────────────────────────────── */
@@ -4097,6 +4481,8 @@ function applyVisibility() {{
   _IDX.gaiaXgbSub.forEach(function(i){{vis[i]=false;}});
   _IDX.gaiaHilatLeg.forEach(function(i){{vis[i]=false;}});
   _IDX.gaiaHilatSub.forEach(function(i){{vis[i]=false;}});
+  _IDX.gaiaLolatLeg.forEach(function(i){{vis[i]=false;}});
+  _IDX.gaiaLolatSub.forEach(function(i){{vis[i]=false;}});
   _IDX.eroDesiLeg.forEach(function(i){{vis[i]=false;}});
   _IDX.eroDesiSub.forEach(function(i){{vis[i]=false;}});
 
@@ -4107,21 +4493,42 @@ function applyVisibility() {{
     Object.keys(map.phzSub).forEach(function(v){{
       Object.keys(map.phzSub[v]).forEach(function(k){{vis[map.phzSub[v][k]]=false;}});
     }});
+    /* When one side is isolated, the other side is hidden entirely */
+    var _desiHiddenByEro = (isolatedEroDesi !== null);
+    var _eroHiddenByPhz  = (isolatedPhz !== null);
     /* Show DESI overlay legend + sub-traces */
-    Object.keys(map.desiLegend).forEach(function(v){{vis[map.desiLegend[v]]=true;}});
+    Object.keys(map.desiLegend).forEach(function(v){{
+      if (_desiHiddenByEro) {{
+        vis[map.desiLegend[v]] = 'legendonly';
+      }} else if (isolatedPhz !== null) {{
+        vis[map.desiLegend[v]] = (v === isolatedPhz) ? true : 'legendonly';
+      }} else {{
+        vis[map.desiLegend[v]] = hiddenPhz[v] ? 'legendonly' : true;
+      }}
+    }});
     Object.keys(map.desiSub).forEach(function(v){{
       Object.keys(map.desiSub[v]).forEach(function(k){{
-        vis[map.desiSub[v][k]] = hiddenPhz[v] ? 'legendonly' : (hiddenClusters[k] ? 'legendonly' : true);
+        if (_desiHiddenByEro) {{ vis[map.desiSub[v][k]] = 'legendonly'; return; }}
+        var phzHide = isolatedPhz !== null ? (v !== isolatedPhz) : !!hiddenPhz[v];
+        var clHide  = isolatedCluster !== null ? (k !== String(isolatedCluster)) : !!hiddenClusters[k];
+        vis[map.desiSub[v][k]] = (phzHide || clHide) ? 'legendonly' : true;
       }});
     }});
     /* Show ERO-DESI overlay legend + sub-traces */
-    _applyOverlayTraces(vis, _IDX.eroDesiLeg, isolatedEroDesi, hiddenEroDesi);
+    if (_eroHiddenByPhz) {{
+      _IDX.eroDesiLeg.forEach(function(i){{ vis[i] = 'legendonly'; }});
+    }} else {{
+      _applyOverlayTraces(vis, _IDX.eroDesiLeg, isolatedEroDesi, hiddenEroDesi);
+    }}
     var _edSubMap = _IDX.eroDesiSubMap;
     Object.keys(_edSubMap).forEach(function(cat) {{
       var catLegIdx = ERO_DESI_START + ERO_DESI_TRACE_CAT.indexOf(parseInt(cat));
-      var catHidden = hiddenEroDesi[catLegIdx];
+      var catHidden = _eroHiddenByPhz ? true
+        : (isolatedEroDesi !== null ? (catLegIdx !== isolatedEroDesi)
+        : !!hiddenEroDesi[catLegIdx]);
       Object.keys(_edSubMap[cat]).forEach(function(k) {{
-        vis[_edSubMap[cat][k]] = (catHidden || hiddenClusters[k]) ? 'legendonly' : true;
+        var clHide = isolatedCluster !== null ? (k !== String(isolatedCluster)) : !!hiddenClusters[k];
+        vis[_edSubMap[cat][k]] = (catHidden || clHide) ? 'legendonly' : true;
       }});
     }});
     _applyClusterVis(vis, map, null);
@@ -4248,6 +4655,44 @@ function applyVisibility() {{
       _applyClusterVis(vis, map, null);
     }}
 
+  }} else if (_isGaiaLolatOverlay()) {{
+    _hideAllPhzDesi(vis, map);
+    _applyOverlayTraces(vis, _IDX.gaiaLolatLeg, isolatedGaiaLolat, hiddenGaiaLolat);
+    var _glSubMap = _IDX.gaiaLolatSubMap;
+
+    if (isolatedCluster !== null) {{
+      var ck = String(isolatedCluster);
+      Object.keys(_glSubMap).forEach(function(cat) {{
+        var catLegIdx = GAIA_LOLAT_START + GAIA_LOLAT_CATS.indexOf(cat);
+        var catHidden = hiddenGaiaLolat[catLegIdx];
+        Object.keys(_glSubMap[cat]).forEach(function(k) {{
+          vis[_glSubMap[cat][k]] = (k !== ck || catHidden) ? 'legendonly' : true;
+        }});
+      }});
+      _applyClusterVis(vis, map, null);
+
+    }} else if (isolatedGaiaLolat !== null) {{
+      var _glTraceIdx = isolatedGaiaLolat - GAIA_LOLAT_START;
+      var _glCat = (_glTraceIdx >= 0 && _glTraceIdx < GAIA_LOLAT_CATS.length)
+                   ? GAIA_LOLAT_CATS[_glTraceIdx] : null;
+      Object.keys(_glSubMap).forEach(function(cat) {{
+        Object.keys(_glSubMap[cat]).forEach(function(k) {{
+          vis[_glSubMap[cat][k]] = (cat !== _glCat || hiddenClusters[k]) ? 'legendonly' : true;
+        }});
+      }});
+      _applyClusterVis(vis, map, null);
+
+    }} else {{
+      Object.keys(_glSubMap).forEach(function(cat) {{
+        var catLegIdx = GAIA_LOLAT_START + GAIA_LOLAT_CATS.indexOf(cat);
+        var catHidden = hiddenGaiaLolat[catLegIdx];
+        Object.keys(_glSubMap[cat]).forEach(function(k) {{
+          vis[_glSubMap[cat][k]] = (catHidden || hiddenClusters[k]) ? 'legendonly' : true;
+        }});
+      }});
+      _applyClusterVis(vis, map, null);
+    }}
+
   }} else if (_isEROOverlay()) {{
     _hideAllPhzDesi(vis, map);
     var _isRebal  = _isERORebal();
@@ -4344,7 +4789,7 @@ function applyVisibility() {{
 
   /* In non-PHZ/DESI overlays, disable Q1 base hover detection so overlay
      points (ERO, Gaia XGB, ERO-DESI) are reachable for hover/click/pin */
-  var skipQ1 = (_isEROOverlay() || _isGaiaXgbOverlay() || _isGaiaHilatOverlay() || _isEroDesiOverlay() || _isEuclidDesiOverlay());
+  var skipQ1 = (_isEROOverlay() || _isGaiaXgbOverlay() || _isGaiaHilatOverlay() || _isGaiaLolatOverlay() || _isEroDesiOverlay() || _isEuclidDesiOverlay());
   var q1Hi   = _q1BaseIndices();
   var hoverArr = new Array(n);
   for (var _h = 0; _h < n; _h++) hoverArr[_h] = 'all';
@@ -4391,6 +4836,17 @@ function applyZAxis(opt) {{
   var q1Idx = _q1BaseIndices();
 
   function _q1FlatZ(zVal) {{
+    /* Build flat z arrays from DATASET_BASE or fall back to Q1_BASE_Z */
+    var nTop = N_BASE_TRACES - N_Q1_BOTTOM;
+    var bd = DATASET_BASE[_activeBaseDS];
+    if (bd) {{
+      var clusterKeys = ['-1'];
+      for (var ci=0; ci<nTop-1; ci++) clusterKeys.push(String(ci));
+      return clusterKeys.map(function(ck) {{
+        var n = (bd[ck] && bd[ck].x) ? bd[ck].x.length : 0;
+        var arr = []; for(var j=0;j<n;j++) arr.push(zVal); return arr;
+      }});
+    }}
     var ref = Q1_BASE_Z['g_mag'] || Q1_BASE_Z['model_pgal'] || Q1_BASE_Z['phz_pgal'];
     if (!ref || q1Idx.length !== ref.length) return null;
     return ref.map(function(a) {{ return a.map(function() {{ return zVal; }}); }});
@@ -4398,7 +4854,12 @@ function applyZAxis(opt) {{
 
   var rIdx = [], rZ = [];
 
-  /* Q1 base always at z=1.45 regardless of z-axis mode */
+  /* Bottom Q1 reference traces always at z=0 */
+  _IDX.q1bot.forEach(function(i) {{
+    rIdx.push(i);
+    rZ.push(plotDiv.data[i].x.map(function(){{return 0;}}));
+  }});
+  /* Top per-dataset base always at z=1.45 */
   var q1Z = _q1FlatZ(1.45);
   if (q1Z && q1Idx.length === q1Z.length) {{
     q1Idx.forEach(function(i,j) {{ rIdx.push(i); rZ.push(q1Z[j]); }});
@@ -4443,7 +4904,16 @@ function applyZAxis(opt) {{
         rZ.push(GAIA_HILAT_Z[ghKey][j]);
       }});
     }}
-  }} else if (_isEroDesiOverlay()) {{
+  }} else if (_isGaiaLolatOverlay()) {{
+    var glIdx = _IDX.gaiaLolatSub;
+    var glKey = GAIA_LOLAT_Z[opt] ? opt : 'g_mag';
+    if (glIdx.length && glIdx.length === GAIA_LOLAT_Z[glKey].length) {{
+      glIdx.forEach(function(i,j) {{
+        rIdx.push(i);
+        rZ.push(GAIA_LOLAT_Z[glKey][j]);
+      }});
+    }}
+  }} else if (_isEroDesiOverlay() || _isEuclidDesiOverlay()) {{
     var edIdx = _IDX.eroDesiSub;
     var edKey = ERO_DESI_Z[opt] ? opt : 'g_mag';
     if (edIdx.length && edIdx.length === ERO_DESI_Z[edKey].length) {{
@@ -4507,7 +4977,7 @@ function _updateZOptions() {{
   var sel    = document.getElementById('z-select');
   var phzOpt = sel.querySelector('option[value="phz_pgal"]');
   if (!phzOpt) return;
-  var noPhz = _isEROOverlay() || _isGaiaXgbOverlay() || _isGaiaHilatOverlay() || _isEroDesiOverlay();
+  var noPhz = _isEROOverlay() || _isGaiaXgbOverlay() || _isGaiaHilatOverlay() || _isGaiaLolatOverlay() || _isEroDesiOverlay() || _isEuclidDesiOverlay();
   phzOpt.disabled = noPhz;
   phzOpt.style.color = noPhz ? '#555' : '';
   /* Auto-switch if the user was on PHZ P(gal) and switched to an unsupported overlay */
@@ -4517,6 +4987,45 @@ function _updateZOptions() {{
   }}
 }}
 
+/* ── Per-dataset base restyle ─────────────────────────────────────────── */
+var OVERLAY_TO_BASE = {{
+  allphz:'allphz', desi:'allphz',
+  gaia_xgb:'gaia_random', gaia_hilat:'gaia_hilat', gaia_lolat:'gaia_lolat',
+  ero:'ero_reg', ero_rebalanced:'ero_rebal',
+  euclid_desi:'euclid_desi',
+}};
+
+function switchBaseDataset(dsKey) {{
+  if (!DATASET_BASE[dsKey] || dsKey === _activeBaseDS) return;
+  _activeBaseDS = dsKey;
+  var bd = DATASET_BASE[dsKey];
+  /* Top base traces start after the bottom Q1 traces */
+  var nTop = N_BASE_TRACES - N_Q1_BOTTOM;
+  var clusterKeys = ['-1'];
+  for (var ci=0; ci<nTop-1; ci++) clusterKeys.push(String(ci));
+  /* Restyle only top base traces (indices N_Q1_BOTTOM .. N_BASE_TRACES-1) */
+  var traceIndices = [];
+  var xArr=[], yArr=[], zArr=[], cdArr=[];
+  for (var ti=0; ti<nTop; ti++) {{
+    var ck = clusterKeys[ti];
+    var entry = bd[ck] || {{x:[],y:[],gmag:[],model_pgal:[],cd:[]}};
+    traceIndices.push(N_Q1_BOTTOM + ti);
+    xArr.push(entry.x); yArr.push(entry.y);
+    zArr.push(entry.x.map(function(){{return 1.45;}}));
+    cdArr.push(entry.cd.length ? entry.cd : null);
+  }}
+  var _p = Plotly.restyle(plotDiv, {{x:xArr, y:yArr, z:zArr, customdata:cdArr}}, traceIndices);
+  /* Update q1BaseCoords for density computation */
+  q1BaseCoords = [];
+  for (var ti=0; ti<nTop; ti++) {{
+    var ck = clusterKeys[ti];
+    var entry = bd[ck] || {{x:[],y:[]}};
+    q1BaseCoords.push({{x:entry.x, y:entry.y}});
+  }}
+  _densityCache = null;
+  return _p;
+}}
+
 function switchOverlay(name) {{
   activeOverlay = name;
   _densityCache = null;  /* invalidate density lookup on overlay switch */
@@ -4524,10 +5033,14 @@ function switchOverlay(name) {{
   isolatedCluster=null; isolatedPhz=null; hiddenClusters={{}}; hiddenPhz={{}};
   isolatedEROGroup=null; hiddenEROGroups={{}}; isolatedGaiaXgb=null; hiddenGaiaXgb={{}};
   isolatedGaiaHilat=null; hiddenGaiaHilat={{}};
+  isolatedGaiaLolat=null; hiddenGaiaLolat={{}};
   isolatedEroDesi=null; hiddenEroDesi={{}};
   clearSheetMode();
   _updateEROOptgroup();
   _updateZOptions();
+  /* Switch per-dataset base before recoloring */
+  var baseKey = OVERLAY_TO_BASE[name] || 'allphz';
+  switchBaseDataset(baseKey);
   applyVisibility();
   recolorQ1Base(_selectedFeature());
   recolorOverlayTraces(_selectedFeature());
@@ -4553,6 +5066,7 @@ function restoreAll() {{
   isolatedPhz=null; isolatedCluster=null; hiddenClusters={{}}; hiddenPhz={{}};
   isolatedEROGroup=null; hiddenEROGroups={{}}; isolatedGaiaXgb=null; hiddenGaiaXgb={{}};
   isolatedGaiaHilat=null; hiddenGaiaHilat={{}};
+  isolatedGaiaLolat=null; hiddenGaiaLolat={{}};
   isolatedEroDesi=null; hiddenEroDesi={{}};
   applyVisibility();
 }}
@@ -4656,6 +5170,17 @@ plotDiv.on('plotly_legendclick', function(data) {{
     }}
     applyVisibility(); return false;
   }}
+  if (traceIdx >= GAIA_LOLAT_START && traceIdx < GAIA_LOLAT_START + GAIA_LOLAT_N_LEGEND) {{
+    var cmd = data.event && (data.event.metaKey || data.event.ctrlKey);
+    if (cmd) {{
+      hiddenClusters = {{}}; hiddenGaiaLolat = {{}};
+      isolatedGaiaLolat = (isolatedGaiaLolat === traceIdx) ? null : traceIdx;
+    }} else {{
+      isolatedGaiaLolat = null;
+      hiddenGaiaLolat[traceIdx] = !hiddenGaiaLolat[traceIdx];
+    }}
+    applyVisibility(); return false;
+  }}
   if (traceIdx >= ERO_REGULAR_START && traceIdx < GAIA_XGB_START) {{
     var cmd = data.event && (data.event.metaKey || data.event.ctrlKey);
     /* Dummy legend traces come first: [setStart .. setStart+nDummy) */
@@ -4724,7 +5249,7 @@ document.addEventListener('keydown', function(e) {{
 }});
 plotDiv.addEventListener('dblclick', function(e) {{
   var anyHidden=Object.values(hiddenClusters).some(Boolean)||Object.values(hiddenPhz).some(Boolean)||Object.values(hiddenEROGroups).some(Boolean);
-  if(isolatedPhz===null&&isolatedCluster===null&&isolatedEROGroup===null&&isolatedGaiaXgb===null&&isolatedGaiaHilat===null&&isolatedEroDesi===null&&!anyHidden) return;
+  if(isolatedPhz===null&&isolatedCluster===null&&isolatedEROGroup===null&&isolatedGaiaXgb===null&&isolatedGaiaHilat===null&&isolatedGaiaLolat===null&&isolatedEroDesi===null&&!anyHidden) return;
   var node=e.target;
   while(node){{if(node.classList&&node.classList.contains('legend'))return;node=node.parentNode;}}
   restoreAll(); clearSheetMode();
@@ -4743,13 +5268,15 @@ function showPoint(sid, info) {{
 function showPointFromPt(pt) {{
   var nm=pt.data.name;
   var ci=pt.curveNumber;
-  var isQ1       = /^Cluster \\d+$/.test(nm) || nm==='noise';
+  var isQ1       = /^Cluster \\d+$/.test(nm) || nm==='_topbase_noise';
   var isEroDesi  = (ci >= ERO_DESI_START && ci < ERO_DESI_START + ERO_DESI_N_LEGEND) ||
                    (ci >= ERO_DESI_SUB_START && ci < ERO_DESI_SUB_START + ERO_DESI_N_SUB);
   var isGaiaXgb  = (ci >= GAIA_XGB_START && ci < GAIA_XGB_START + GAIA_XGB_N_LEGEND) ||
                    (ci >= GAIA_XGB_SUB_START && ci < GAIA_XGB_SUB_START + GAIA_XGB_N_SUB);
   var isGaiaHilat = (ci >= GAIA_HILAT_START && ci < GAIA_HILAT_START + GAIA_HILAT_N_LEGEND) ||
                     (ci >= GAIA_HILAT_SUB_START && ci < GAIA_HILAT_SUB_START + GAIA_HILAT_N_SUB);
+  var isGaiaLolat = (ci >= GAIA_LOLAT_START && ci < GAIA_LOLAT_START + GAIA_LOLAT_N_LEGEND) ||
+                    (ci >= GAIA_LOLAT_SUB_START && ci < GAIA_LOLAT_SUB_START + GAIA_LOLAT_N_SUB);
   var isERO      = (ci >= ERO_REGULAR_START && ci < GAIA_XGB_START);
   if (isEroDesi) {{
     var cd = pt.customdata || [];
@@ -4765,7 +5292,7 @@ function showPointFromPt(pt) {{
     var _edLabel = nm.replace(/\\s+\\(n=.*\\)/, '');
     if (_edM) {{
       var _edCat = _edM[1];
-      var _edNames = {{'2':'Disagree: ERO=star, DESI=gal','3':'Agree: ERO=gal, DESI=gal'}};
+      var _edNames = {{'2':'ERO Star','3':'ERO Galaxy'}};
       _edLabel = (_edNames[_edCat] || 'ERO DESI cat=' + _edCat) + '  C' + _edM[2];
     }}
     var lines = [_edLabel];
@@ -4814,6 +5341,27 @@ function showPointFromPt(pt) {{
       _ghLabel = (_ghM[1]==='star' ? 'Gaia XGB HL Star' : 'Gaia XGB HL Galaxy') + '  C' + _ghM[2];
     }}
     var lines = [_ghLabel];
+    if (ra !== null && dec !== null)
+      lines.push('RA=' + parseFloat(ra).toFixed(4) + '  Dec=' + (dec>=0?'+':'') + parseFloat(dec).toFixed(4));
+    if (gm !== null && isFinite(gm)) lines.push('G=' + parseFloat(gm).toFixed(2));
+    if (prob !== null && prob !== undefined && isFinite(prob))
+      lines.push('XGB P(gal)=' + parseFloat(prob).toPrecision(4));
+    if (sid) lines.push('id=' + sid);
+    showPoint(sid, lines.join('\\n'));
+    showSkyCrosshair(ra, dec);
+  }} else if (isGaiaLolat) {{
+    var cd  = pt.customdata || [];
+    var sid  = cd[0] ? String(cd[0]) : '';
+    var prob = (cd[1] !== undefined && cd[1] !== null) ? cd[1] : null;
+    var ra   = (cd[2] !== undefined && cd[2] !== null) ? cd[2] : null;
+    var dec  = (cd[3] !== undefined && cd[3] !== null) ? cd[3] : null;
+    var gm   = (cd[4] !== undefined && cd[4] !== null) ? cd[4] : null;
+    var _glM = nm.match(/^gxll_(star|gal) C(\\d+)$/);
+    var _glLabel = nm.replace(/\\s+\\(n=.*\\)/, '');
+    if (_glM) {{
+      _glLabel = (_glM[1]==='star' ? 'Gaia XGB LL Star' : 'Gaia XGB LL Galaxy') + '  C' + _glM[2];
+    }}
+    var lines = [_glLabel];
     if (ra !== null && dec !== null)
       lines.push('RA=' + parseFloat(ra).toFixed(4) + '  Dec=' + (dec>=0?'+':'') + parseFloat(dec).toFixed(4));
     if (gm !== null && isFinite(gm)) lines.push('G=' + parseFloat(gm).toFixed(2));
@@ -4911,7 +5459,7 @@ window.addEventListener('load', resizeAll);
 window.addEventListener('resize', resizeAll);
 function scaleLegendMarkers() {{
   var s=0.7, lt=plotDiv.querySelectorAll('.legend .traces');
-  for (var i=0;i<Math.min(N_BASE_TRACES,lt.length);i++) {{
+  for (var i=0;i<Math.min(N_BASE_TRACES - N_Q1_BOTTOM,lt.length);i++) {{
     var pts=lt[i].querySelector('.legendpoints path'); if(!pts)continue;
     var t=(pts.getAttribute('transform')||'').replace(/\\s*scale\\([^)]*\\)/g,'');
     pts.setAttribute('transform',t+' scale('+s+')');
@@ -4978,8 +5526,8 @@ _initIndices();
 _updateEROOptgroup();
 _updateZOptions();
 switchOverlay('gaia_xgb');
-/* Initial state: base UMAP in cluster colors, overlay+sky in XGB P(gal) */
-recolorQ1Base('clusters');
+/* Initial state: base + overlay in XGB P(gal) */
+recolorQ1Base('model_pgal');
 /* Force camera to center after overlay traces become visible */
 Plotly.relayout(plotDiv, {{'scene.camera': {{
   eye:{{x:1.25,y:1.25,z:1.25}}, up:{{x:0,y:0,z:1}}, center:{{x:0,y:0,z:0}}
@@ -5193,50 +5741,55 @@ def _nn_map_ero_features_onto_q1(
 
 # ── Z-axis helpers ────────────────────────────────────────────────────────────
 
-def _compute_q1_model_pgal(q1_X_raw: np.ndarray) -> np.ndarray:
-    """Run the Q1 XGBoost seed ensemble on Q1 raw features → mean P(galaxy)."""
-    import xgboost as xgb
-    seed_paths = sorted(Q1_SEED_MODELS_DIR.glob("xgb_classifier_q1_seed*.json"))
-    if not seed_paths:
-        print(f"  WARNING: no seed models in {Q1_SEED_MODELS_DIR} — model_pgal unavailable")
-        return np.full(len(q1_X_raw), np.nan)
-    X = q1_X_raw.astype(np.float32).copy()
-    for c in range(X.shape[1]):
-        bad = ~np.isfinite(X[:, c])
-        if bad.any():
-            X[bad, c] = np.nanmedian(X[:, c])
-    all_probs = []
-    for p in seed_paths:
-        m = xgb.XGBClassifier()
-        m.load_model(str(p))
-        all_probs.append(m.predict_proba(X)[:, 1])
-    pgal = np.mean(all_probs, axis=0)
-    print(f"  Q1 ensemble ({len(seed_paths)} seeds) → P(gal) range "
-          f"[{pgal.min():.3f}, {pgal.max():.3f}]")
-    return pgal
-
-
-def _load_phz_gal_prob(source_ids: np.ndarray) -> np.ndarray:
-    """Load phz_gal_prob from q1_indiv.npz for Q1 source_ids.  Returns NaN where missing."""
-    data = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
-    if "phz_gal_prob" not in data:
-        print("  phz_gal_prob not found in q1_indiv.npz — returning NaN")
-        return np.full(len(source_ids), np.nan)
-    npz_sids  = data["source_ids"].astype(str)
-    npz_pgal  = data["phz_gal_prob"].astype(float)
-    lookup    = dict(zip(npz_sids, npz_pgal))
-    arr       = np.array([lookup.get(str(s), np.nan) for s in source_ids], dtype=float)
-    n_ok      = np.isfinite(arr).sum()
-    print(f"  PHZ gal_prob: {n_ok:,} / {len(source_ids):,} sources matched (from q1_indiv.npz)")
-    return arr
-
-
 def _load_q1_z_arrays(q1_sids: np.ndarray, q1_X_raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return (model_pgal, phz_pgal) arrays aligned to q1_sids."""
-    print("  Computing Q1 model P(gal) via ensemble...")
-    model_pgal = _compute_q1_model_pgal(q1_X_raw)
-    print("  Loading PHZ gal_prob from q1_indiv.npz...")
-    phz_pgal = _load_phz_gal_prob(q1_sids)
+    """Return (model_pgal, phz_pgal) arrays aligned to q1_sids.
+
+    Loads pre-computed model_pgal from q1_indiv.npz (produced by query_umap_q1_50k.py).
+    Falls back to XGBoost ensemble if not present in npz.
+    """
+    data = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
+    npz_sids = data["source_ids"].astype(str)
+
+    # model_pgal — from npz (pre-computed upstream)
+    if "model_pgal" in data:
+        npz_pgal = data["model_pgal"].astype(float)
+        lookup = dict(zip(npz_sids, npz_pgal))
+        model_pgal = np.array([lookup.get(str(s), np.nan) for s in q1_sids], dtype=float)
+        n_ok = np.isfinite(model_pgal).sum()
+        print(f"  model_pgal: {n_ok:,} / {len(q1_sids):,} matched (from q1_indiv.npz)")
+    else:
+        print("  WARNING: model_pgal not in q1_indiv.npz — computing via XGB ensemble...")
+        import xgboost as xgb
+        seed_paths = sorted(Q1_SEED_MODELS_DIR.glob("xgb_classifier_q1_seed*.json"))
+        if not seed_paths:
+            print(f"  WARNING: no seed models in {Q1_SEED_MODELS_DIR}")
+            model_pgal = np.full(len(q1_sids), np.nan)
+        else:
+            X = q1_X_raw.astype(np.float32).copy()
+            for c in range(X.shape[1]):
+                bad = ~np.isfinite(X[:, c])
+                if bad.any():
+                    X[bad, c] = np.nanmedian(X[:, c])
+            all_probs = []
+            for p in seed_paths:
+                m = xgb.XGBClassifier()
+                m.load_model(str(p))
+                all_probs.append(m.predict_proba(X)[:, 1])
+            model_pgal = np.mean(all_probs, axis=0)
+            print(f"  Q1 ensemble ({len(seed_paths)} seeds) → P(gal) range "
+                  f"[{model_pgal.min():.3f}, {model_pgal.max():.3f}]")
+
+    # phz_pgal — from npz
+    if "phz_gal_prob" in data:
+        npz_phz = data["phz_gal_prob"].astype(float)
+        lookup2 = dict(zip(npz_sids, npz_phz))
+        phz_pgal = np.array([lookup2.get(str(s), np.nan) for s in q1_sids], dtype=float)
+        n_ok2 = np.isfinite(phz_pgal).sum()
+        print(f"  PHZ gal_prob: {n_ok2:,} / {len(q1_sids):,} matched (from q1_indiv.npz)")
+    else:
+        print("  phz_gal_prob not in q1_indiv.npz — returning NaN")
+        phz_pgal = np.full(len(q1_sids), np.nan)
+
     return model_pgal, phz_pgal
 
 
@@ -5420,8 +5973,8 @@ def build_combined_html(
     ero_rebal_emb   = ero_rebal_y   = ero_rebal_gmag   = ero_rebal_features   = None
     ero_reg_sids = ero_rebal_sids = None
     ero_feature_names = []
-    ero_npz_regular = ARRAYS_DIR / "ero_indiv.npz"
-    ero_npz_rebal   = ARRAYS_DIR / "ero_indiv_rebalanced.npz"
+    ero_npz_regular = ARRAYS_DIR / "ero_regular.npz"
+    ero_npz_rebal   = ARRAYS_DIR / "ero_rebal.npz"
     _fn_rebal: list[str] = []
 
     for tag, npz_path, csv_path in [
@@ -5491,9 +6044,9 @@ def build_combined_html(
     print("\n[4d] Loading ERO groups + extra data...")
     sid_to_group = load_ero_group_map()
     ero_reg_extra = load_ero_extra_data_from_npz(
-        ARRAYS_DIR / "ero_indiv.npz", ero_reg_sids) if ero_reg_sids is not None else {}
+        ARRAYS_DIR / "ero_regular.npz", ero_reg_sids) if ero_reg_sids is not None else {}
     ero_rebal_extra = load_ero_extra_data_from_npz(
-        ARRAYS_DIR / "ero_indiv_rebalanced.npz", ero_rebal_sids) if ero_rebal_sids is not None else {}
+        ARRAYS_DIR / "ero_rebal.npz", ero_rebal_sids) if ero_rebal_sids is not None else {}
 
     # ── Step F: ERO-DESI ──────────────────────────────────────────────────────
     print("\n[4e] Loading ERO-DESI data...")
@@ -5655,6 +6208,42 @@ def build_combined_html(
         _gaia_hilat_full_emb = _gaia_hilat_full_gprob = None
         print("  High-lat: no sources pass latitude cuts or CSV not found.")
 
+    # ── Step H2: Gaia lolat ───────────────────────────────────────────────────
+    gaia_lolat_emb = gaia_lolat_gal_prob = gaia_lolat_sids = gaia_lolat_gmag = None
+    gaia_lolat_ra = gaia_lolat_dec = None
+    if GAIA_LOLAT_CSV.exists():
+        df_lolat = pd.read_csv(GAIA_LOLAT_CSV)
+    else:
+        df_lolat = None
+    if df_lolat is not None and len(df_lolat) > 0:
+        gaia_lolat_emb       = df_lolat[["umap1", "umap2"]].values
+        gaia_lolat_gal_prob = df_lolat["gal_prob"].values.astype(float)
+        gaia_lolat_sids      = df_lolat["source_id"].astype(str).values
+        gaia_lolat_gmag      = df_lolat["phot_g_mean_mag"].values.astype(float) \
+                               if "phot_g_mean_mag" in df_lolat.columns else None
+        gaia_lolat_ra        = df_lolat["ra"].values.astype(float) \
+                               if "ra" in df_lolat.columns else None
+        gaia_lolat_dec       = df_lolat["dec"].values.astype(float) \
+                               if "dec" in df_lolat.columns else None
+        _gaia_lolat_full_emb   = gaia_lolat_emb.copy()
+        _gaia_lolat_full_gprob = gaia_lolat_gal_prob.copy()
+        _gll_cap = 50_000
+        if len(gaia_lolat_emb) > _gll_cap:
+            _gli = _random_subsample_idx(len(gaia_lolat_emb), _gll_cap, seed)
+            gaia_lolat_emb       = gaia_lolat_emb[_gli]
+            gaia_lolat_gal_prob = gaia_lolat_gal_prob[_gli]
+            gaia_lolat_sids      = gaia_lolat_sids[_gli]
+            if gaia_lolat_gmag is not None: gaia_lolat_gmag = gaia_lolat_gmag[_gli]
+            if gaia_lolat_ra   is not None: gaia_lolat_ra   = gaia_lolat_ra[_gli]
+            if gaia_lolat_dec  is not None: gaia_lolat_dec  = gaia_lolat_dec[_gli]
+            print(f"  Low-lat: subsampled to {_gll_cap:,}")
+        print(f"  Low-lat: {len(gaia_lolat_emb):,} sources  "
+              f"(galaxies={(gaia_lolat_gal_prob >= GAL_THRESH).sum():,}  "
+              f"stars={(gaia_lolat_gal_prob < GAL_THRESH).sum():,})")
+    else:
+        _gaia_lolat_full_emb = _gaia_lolat_full_gprob = None
+        print("  Low-lat: CSV not found — Gaia lo-lat overlay disabled.")
+
     # ── Step I: Cutouts ───────────────────────────────────────────────────────
     print("\n[5a] Loading cutout thumbnails and contact sheets...")
     cutout_cache  = load_cutout_cache(CUTOUTS_DIR)
@@ -5715,7 +6304,7 @@ def build_combined_html(
     if ero_rebal_sids is not None and ero_npz_rebal.exists():
         ero_rebal_gaia_feats = _load_gaia_features_from_npz(ero_npz_rebal, ero_rebal_sids)
 
-    gaia_xgb_gaia_feats = gaia_hilat_gaia_feats = None
+    gaia_xgb_gaia_feats = gaia_hilat_gaia_feats = gaia_lolat_gaia_feats = None
     if gaia_xgb_emb is not None:
         _gxgb_feat_cols = [c for c in SELECTED_GAIA_PARAMETERS if c in df_gxgb.columns]
         if len(_gxgb_feat_cols) == len(SELECTED_GAIA_PARAMETERS):
@@ -5730,6 +6319,13 @@ def build_combined_html(
             if len(gaia_hilat_gaia_feats) > _ghl_cap:
                 gaia_hilat_gaia_feats = gaia_hilat_gaia_feats[_ghi]
             print(f"  Gaia hilat features: {len(gaia_hilat_gaia_feats):,} sources, {len(SELECTED_GAIA_PARAMETERS)} features")
+    if gaia_lolat_emb is not None and df_lolat is not None:
+        _gll_feat_cols = [c for c in SELECTED_GAIA_PARAMETERS if c in df_lolat.columns]
+        if len(_gll_feat_cols) == len(SELECTED_GAIA_PARAMETERS):
+            gaia_lolat_gaia_feats = df_lolat[list(SELECTED_GAIA_PARAMETERS)].values.astype(float)
+            if len(gaia_lolat_gaia_feats) > _gll_cap:
+                gaia_lolat_gaia_feats = gaia_lolat_gaia_feats[_gli]
+            print(f"  Gaia lolat features: {len(gaia_lolat_gaia_feats):,} sources, {len(SELECTED_GAIA_PARAMETERS)} features")
 
     ero_desi_gaia_feats = None
     if ero_desi_emb is not None and ero_desi_npz.exists():
@@ -5764,11 +6360,19 @@ def build_combined_html(
             _fill_col(df_allphz, "phz_pgal", sid_to_phz_pgal)
             _fill_col(df_desi,   "phz_pgal", sid_to_phz_pgal)
 
-    # XGB inference on all PHZ/DESI sources for 100% model_pgal coverage
-    print("\n[5c] Computing XGB P(gal) for all overlay sources...")
-    if df_allphz is not None:
+    # model_pgal — already in projected CSVs from query_umap_q1_projections.py
+    print("\n[5c] Loading model P(gal) from projected CSVs...")
+    if df_allphz is not None and "model_pgal" in df_allphz.columns:
+        n_ok = df_allphz["model_pgal"].notna().sum()
+        print(f"  allphz model_pgal: {n_ok:,} / {len(df_allphz):,} (from CSV)")
+    elif df_allphz is not None:
+        print("  WARNING: model_pgal not in allphz CSV — computing via XGB...")
         df_allphz["model_pgal"] = _compute_model_pgal_for_df(df_allphz)
-    if df_desi is not None:
+    if df_desi is not None and "model_pgal" in df_desi.columns:
+        n_ok = df_desi["model_pgal"].notna().sum()
+        print(f"  DESI model_pgal: {n_ok:,} / {len(df_desi):,} (from CSV)")
+    elif df_desi is not None:
+        print("  WARNING: model_pgal not in DESI CSV — computing via XGB...")
         df_desi["model_pgal"] = _compute_model_pgal_for_df(df_desi)
 
     print("\n[5d] Loading ERO model P(gal)...")
@@ -5787,6 +6391,13 @@ def build_combined_html(
         ero_desi_emb=ero_desi_emb, ero_desi_cat=ero_desi_cat,
         gal_thresh=GAL_THRESH,
     )
+
+    # ── Step N: Per-dataset base data for JS restyle ────────────────────────────
+    print("\n[5f] Building per-dataset base data (DATASET_BASE)...")
+    _dataset_base = _build_dataset_base(q1_emb, q1_labels, cluster_ids)
+    dataset_base_json = json.dumps(_dataset_base)
+    print(f"  DATASET_BASE: {len(dataset_base_json)/1e6:.1f} MB  "
+          f"({list(_dataset_base.keys())})")
 
     # ── Step O: Sky image + sky data per dataset ───────────────────────────────
     print("\n[6] Loading sky image and preparing sky data...")
@@ -5852,6 +6463,25 @@ def build_combined_html(
             clusters=_hilat_cl,
         )
         print(f"  Gaia Hilat: {len(df_sky_hilat):,} sources")
+
+    # [b2] Gaia Low-lat 50k
+    if GAIA_LOLAT_CSV.exists():
+        df_sky_lolat = pd.read_csv(GAIA_LOLAT_CSV)
+        _g_prob_ll = df_sky_lolat["gal_prob"].values.astype(float)
+        legend_c_ll = [("#91D3F0" if p >= GAL_THRESH else "#F2BDCE") for p in _g_prob_ll]
+        _lolat_cats = [("gal" if p >= GAL_THRESH else "star") for p in _g_prob_ll]
+        _lolat_cl = assign_to_clusters(
+            df_sky_lolat[["umap1", "umap2"]].values, q1_emb, q1_labels)
+        sky_datasets["gaia_lolat"] = _prepare_sky_data(
+            df_sky_lolat["ra"].values, df_sky_lolat["dec"].values,
+            df_sky_lolat["umap1"].values, df_sky_lolat["umap2"].values,
+            df_sky_lolat["source_id"].astype(str).values,
+            feature_cols=_feat_cols_from_df(df_sky_lolat),
+            legend_colors=legend_c_ll,
+            categories=_lolat_cats,
+            clusters=_lolat_cl,
+        )
+        print(f"  Gaia Lolat: {len(df_sky_lolat):,} sources")
 
     # [c] Q1 (All PHZ)
     if df_allphz is not None and "ra" in df_allphz.columns:
@@ -6029,17 +6659,22 @@ def build_combined_html(
         gaia_hilat_emb=gaia_hilat_emb, gaia_hilat_gal_prob=gaia_hilat_gal_prob,
         gaia_hilat_sids=gaia_hilat_sids, gaia_hilat_gmag=gaia_hilat_gmag,
         gaia_hilat_ra=gaia_hilat_ra, gaia_hilat_dec=gaia_hilat_dec,
+        gaia_lolat_emb=gaia_lolat_emb, gaia_lolat_gal_prob=gaia_lolat_gal_prob,
+        gaia_lolat_sids=gaia_lolat_sids, gaia_lolat_gmag=gaia_lolat_gmag,
+        gaia_lolat_ra=gaia_lolat_ra, gaia_lolat_dec=gaia_lolat_dec,
         density_hist_data=_density_hist,
         ero_reg_gaia_features=ero_reg_gaia_feats,
         ero_rebal_gaia_features=ero_rebal_gaia_feats,
         gaia_xgb_gaia_features=gaia_xgb_gaia_feats,
         gaia_hilat_gaia_features=gaia_hilat_gaia_feats,
+        gaia_lolat_gaia_features=gaia_lolat_gaia_feats,
         ero_desi_gaia_features=ero_desi_gaia_feats,
         # Sky data
         sky_datasets_json=sky_datasets_json,
         sky_img_src=sky_img_src,
         q1_fields_js=q1_fields_js,
         ero_fields_js=ero_fields_js,
+        dataset_base_json=dataset_base_json,
     )
 
     if write_output:

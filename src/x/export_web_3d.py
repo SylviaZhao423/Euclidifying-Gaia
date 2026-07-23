@@ -5,7 +5,7 @@ Post-process umap_3d.html: externalize embedded image data for web deployment.
 Reads the monolithic umap_3d.html (~430 MB, mostly base64 cutout/contact-sheet
 images) and produces a deployable directory:
 
-    output/umap/q1_individual/web_3d/
+    output/umap/web/web_3d/
         index.html          (~17 MB — plot data + JS code)
         data/
             cutouts.json
@@ -17,7 +17,7 @@ served from any static host (GitHub Pages, Netlify, Cloudflare Pages, etc.).
 
 Usage:
     python src/export_web_3d.py
-    # then:  cd output/umap/q1_individual/web_3d && python -m http.server 8100
+    # then:  cd output/umap/web/web_3d && python -m http.server 8100
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ import sys
 import time
 from pathlib import Path
 
-INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "umap_3d.html"
-OUTDIR = Path(__file__).resolve().parents[1] / "output" / "umap" / "q1_individual" / "web_3d"
+INPUT  = Path(__file__).resolve().parents[1] / "output" / "umap" / "web" / "umap_3d.html"
+OUTDIR = Path(__file__).resolve().parents[1] / "output" / "umap" / "web" / "web_3d"
 
 # Loaded at startup (contact sheets for transposition + cutouts for hover).
 # Plot initialises only after all of these arrive.

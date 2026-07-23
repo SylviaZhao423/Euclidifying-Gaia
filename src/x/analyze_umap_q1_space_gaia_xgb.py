@@ -18,15 +18,17 @@ Pipeline:
 Reads:
   output/umap/arrays/q1_indiv.npz
   output/umap/arrays/q1_cluster_labels.npy
-  output/umap/arrays/xgb_gaia_projected.csv       (from query_umap_q1_projections.py)
-  output/umap/arrays/xgb_gaia_hilat_projected.csv  (with --hilat)
+  output/umap/arrays/projected/gaia_random_projected.csv  (always)
+  output/umap/arrays/projected/gaia_hilat_projected.csv   (unless --no-hilat)
+  output/umap/arrays/projected/gaia_lolat_projected.csv   (unless --no-lolat)
 
 Writes:
-  output/umap/q1_individual/q1_space_gaia_xgb.png
+  output/umap/q1_individual/q1_space_gaia_xgb{,_hilat,_lolat}.png
 
 Usage:
   python src/analyze_umap_q1_space_gaia_xgb.py
-  python src/analyze_umap_q1_space_gaia_xgb.py --hilat
+  python src/analyze_umap_q1_space_gaia_xgb.py --no-hilat
+  python src/analyze_umap_q1_space_gaia_xgb.py --no-lolat
 """
 
 from __future__ import annotations
@@ -39,8 +41,9 @@ import numpy as np
 import pandas as pd
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-ARRAYS_DIR  = PROJECT_DIR / "output" / "umap" / "arrays"
-OUTPUT_DIR  = PROJECT_DIR / "output" / "umap" / "q1_individual"
+ARRAYS_DIR    = PROJECT_DIR / "output" / "umap" / "arrays"
+PROJECTED_DIR = ARRAYS_DIR / "projected"
+OUTPUT_DIR    = PROJECT_DIR / "output" / "umap" / "q1_individual"
 
 MAG_CUT   = 17
 
@@ -56,7 +59,7 @@ GAL_THRESH = 0.5   # XGBoost galaxy probability threshold
 # ── Plot ──────────────────────────────────────────────────────────────────────
 
 def plot(q1_emb, q1_labels, gaia_emb, gal_prob, output_dir, n_gaia,
-         suffix="", title_extra=""):
+         suffix="", title_extra="", dens_vmax=None):
     cluster_ids = sorted(set(q1_labels[q1_labels >= 0]))
 
     # Shared axis limits
@@ -95,7 +98,7 @@ def plot(q1_emb, q1_labels, gaia_emb, gal_prob, output_dir, n_gaia,
     H = np.where(H > 0, H, np.nan)
     from matplotlib.colors import LogNorm
     sc0 = ax.pcolormesh(x_edges, y_edges, H.T,
-                        cmap="Blues", norm=LogNorm(vmin=1, vmax=np.nanmax(H)),
+                        cmap="Blues", norm=LogNorm(vmin=1, vmax=dens_vmax if dens_vmax else np.nanmax(H)),
                         rasterized=True)
     fig.colorbar(sc0, ax=ax, pad=0.02, fraction=0.046,
                  label="Count (log)").ax.tick_params(labelsize=7)
@@ -165,6 +168,8 @@ def main() -> int:
     )
     parser.add_argument("--no-hilat", action="store_true",
                         help="Skip high-latitude subset.")
+    parser.add_argument("--no-lolat", action="store_true",
+                        help="Skip low-latitude subset.")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -183,15 +188,37 @@ def main() -> int:
 
     # ── 2. Variants to run ───────────────────────────────────────────────────
     variants = [
-        ("xgb_gaia_projected.csv", "", ""),
+        ("gaia_random_projected.csv", "", ""),
     ]
     if not args.no_hilat:
         variants.append(
-            ("xgb_gaia_hilat_projected.csv", "_hilat", "  |  |b|>10, |ecl_lat|>45"),
+            ("gaia_hilat_projected.csv", "_hilat", "  |  |b|>10, |ecl_lat|>45"),
+        )
+    if not args.no_lolat:
+        variants.append(
+            ("gaia_lolat_projected.csv", "_lolat", "  |  low galactic latitude"),
         )
 
+    # ── Pre-compute shared density vmax across all variants ─────────────────
+    from matplotlib.colors import LogNorm
+    n_bins = 180
+    x_lo = q1_emb[:, 0].min() - 1; x_hi = q1_emb[:, 0].max() + 1
+    y_lo = q1_emb[:, 1].min() - 1; y_hi = q1_emb[:, 1].max() + 1
+    x_edges = np.linspace(x_lo, x_hi, n_bins + 1)
+    y_edges = np.linspace(y_lo, y_hi, n_bins + 1)
+
+    shared_vmax = 1
+    for csv_name, _, _ in variants:
+        csv_path = PROJECTED_DIR / csv_name
+        if csv_path.exists():
+            df_tmp = pd.read_csv(csv_path)
+            H_tmp, _, _ = np.histogram2d(df_tmp["umap1"], df_tmp["umap2"],
+                                          bins=[x_edges, y_edges])
+            shared_vmax = max(shared_vmax, H_tmp.max())
+    print(f"  Shared density vmax: {shared_vmax}")
+
     for csv_name, suffix, title_extra in variants:
-        csv_path = ARRAYS_DIR / csv_name
+        csv_path = PROJECTED_DIR / csv_name
         if not csv_path.exists():
             print(f"ERROR: {csv_path} not found.")
             print("  Run first:  python src/query_umap_q1_projections.py")
@@ -207,7 +234,7 @@ def main() -> int:
 
         print(f"\n[3] Plotting{suffix}...")
         plot(q1_emb, q1_labels, gaia_emb, gal_prob, OUTPUT_DIR, n_gaia=len(df),
-             suffix=suffix, title_extra=title_extra)
+             suffix=suffix, title_extra=title_extra, dens_vmax=shared_vmax)
 
     return 0
 
