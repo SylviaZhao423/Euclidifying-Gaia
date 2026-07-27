@@ -450,7 +450,9 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
                    nisp_j_url: str | None = None,
                    nisp_h_url: str | None = None,
                    draw_crosshair: bool = True,
-                   companions: list | None = None) -> np.ndarray:
+                   companions: list | None = None,
+                   crosshair_color: str | None = None,
+                   companion_color: str = "#00e5ff") -> np.ndarray:
     """Render a cutout stamp to a numpy array using log stretch.
 
     Accepts either a URL (uses HTTP range requests, ~3–5 MB per stamp) or a
@@ -537,8 +539,11 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
     norm = ImageNormalize(img_s, interval=ManualInterval(vmin_s, vmax_s),
                           stretch=LogStretch())
 
-    # Crosshair colour: coolwarm_r by P(gal) [0,1] (red=star, blue=galaxy)
-    if c_star is not None and np.isfinite(c_star):
+    # Crosshair colour: explicit override (e.g. red to mark the Euclid position) wins;
+    # else coolwarm_r by P(gal) [0,1] (red=star, blue=galaxy); else white.
+    if crosshair_color is not None:
+        pass
+    elif c_star is not None and np.isfinite(c_star):
         crosshair_color = plt.cm.coolwarm_r(float(np.clip(c_star, 0, 1)))
     else:
         crosshair_color = "white"
@@ -555,15 +560,15 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
     gap = n * 0.10
     cx  = cy = n / 2
     if draw_crosshair:
-        kw  = dict(color=crosshair_color, lw=1.0, alpha=0.8, solid_capstyle="butt")
+        kw  = dict(color=crosshair_color, lw=1.0, alpha=0.55, solid_capstyle="butt")
         ax.plot([0,        cx - gap], [cy, cy],      **kw)
         ax.plot([cx + gap, n - 1],   [cy, cy],       **kw)
         ax.plot([cx, cx],  [0,        cy - gap],     **kw)
         ax.plot([cx, cx],  [cy + gap, n - 1],        **kw)
-    # Overlay deblended MER companions [(ra, dec, label), ...] as cyan circles; each
-    # label (the Euclid MER object id) is parked at the stamp corner matching the
-    # detection's own quadrant — clear of the source — exactly like the Gaia-blend
-    # source_id corner labels. Multiple labels sharing a corner stack outward.
+    # Overlay companion detections [(ra, dec, label), ...] as small rings in companion_color
+    # (cyan = deblended Euclid MER objects; blue = Gaia sources). A non-empty label is parked
+    # at the stamp corner matching the detection's own quadrant — clear of the source, exactly
+    # like the Gaia-blend source_id corner labels; label=None draws the ring only.
     if companions:
         import matplotlib.patheffects as _pe
         from astropy.coordinates import SkyCoord
@@ -577,8 +582,9 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
                 continue
             if not (0 <= px < n and 0 <= py < n):
                 continue
-            ax.add_patch(plt.Circle((px, py), n * 0.05, fill=False, ec="#00e5ff",
-                                    lw=1.0, zorder=6))
+            rpx = 0.35 * n / size_arcsec        # ring radius = fixed 0.35" locator (not the PSF)
+            ax.add_patch(plt.Circle((px, py), rpx, fill=False, ec=companion_color,
+                                    lw=1.1, alpha=0.7, zorder=6))
             if not clabel:
                 continue
             right = px >= cx                                   # image x quadrant
@@ -589,7 +595,7 @@ def _render_cutout(tile_url_or_path: str | Path, ra: float, dec: float,
             yt = (n - m) if upper else m
             k = used.get((ha, va), 0); used[(ha, va)] = k + 1  # stack same-corner labels
             yt += (-1 if upper else 1) * k * n * 0.10          # grow inward, away from corner
-            t = ax.text(xt, yt, str(clabel), color="#00e5ff", fontsize=11,  # <- label size knob
+            t = ax.text(xt, yt, str(clabel), color=companion_color, fontsize=11,  # <- label size knob
                         ha=ha, va=va, zorder=7)
             t.set_path_effects([_pe.Stroke(linewidth=2.4, foreground="black"), _pe.Normal()])
     _add_scale_bar(ax, n, size_arcsec, VIS_PIXEL_SCALE, "white")

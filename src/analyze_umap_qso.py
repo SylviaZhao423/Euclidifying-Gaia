@@ -41,14 +41,13 @@ Reads:
   output/umap/arrays/q1_indiv_reducer.joblib
   output/xgboost_q1/seed_models/xgb_classifier_q1_seed*.json   (model_pgal)
 
-Writes:
-  output/umap/qso/arrays/qso_gaia_matches.csv     (per-QSO: ids, features, umap, cluster, model_pgal)
-  output/umap/qso/arrays/qso_gaia_umap.npz
-  output/umap/qso/umap_qso_overlay.png
+Writes (per catalog with an OVERLAY_TAG; TWO figures each):
+  output/umap/qso/arrays/qso_gaia_matches{suffix}.csv   (ids, features, umap, cluster, model_pgal)
+  output/umap/qso/umap_qso_{tag}_clusters.png           (aps | cluster | streams)
+  output/umap/qso/umap_qso_{tag}.png                    (blend flag | XGB P(gal))
 
 Usage:
   python src/analyze_umap_qso.py                 # default: desisdss (DESI+SDSS) + euclidwise
-  python src/analyze_umap_qso.py --catalog all   # also adds quaia
   python src/analyze_umap_qso.py --catalog sdss  # a single catalog only
   python src/analyze_umap_qso.py --replot        # fast: just redraw overlay(s) from saved CSV(s)
 """
@@ -74,7 +73,7 @@ from selected_parameters_list import SELECTED_GAIA_PARAMETERS  # noqa: E402
 ARRAYS_DIR      = PROJECT_DIR / "output" / "umap" / "arrays"
 SEED_MODELS_DIR = PROJECT_DIR / "output" / "xgboost_q1" / "seed_models"
 OUTPUT_DIR      = PROJECT_DIR / "output" / "umap" / "qso"      # overlay PNGs
-QSO_ARRAYS      = OUTPUT_DIR / "arrays"                        # projected CSVs + NPZs
+QSO_ARRAYS      = OUTPUT_DIR / "arrays"                        # projected CSVs
 
 WSDB_HOST = "wsdb.ast.cam.ac.uk"
 WSDB_DB   = "wsdb"
@@ -83,6 +82,8 @@ WSDB_USER = "siwei_zhao_2025"
 MATCH_RADIUS_ARCSEC = 1.0
 
 CLUSTER_COLOURS = {0: "#e6194b", 1: "#4363d8", 2: "#f58231", 3: "#3cb44b", 4: "#911eb4"}
+# Sequential colormap per cluster, hue-matched to CLUSTER_COLOURS (for per-cluster density).
+CLUSTER_CMAPS = {0: "Reds", 1: "Blues", 2: "Oranges", 3: "Greens", 4: "Purples"}
 
 # Inter-cluster "bridges"/streams: single source of truth in umap_streams.py, shared
 # with analyze_umap_nsa.py and download_ds_g_bridges_cutouts.py. Edit corridors there.
@@ -99,19 +100,14 @@ CATALOG_TABLES = {
     "sdss": "crossmatch_qso_sdss_dr16_gaia",
     "desi": "crossmatch_qso_desi_dr1_gaia",
     "euclidwise": "crossmatch_qso_euclid_wise_gaia",   # Euclid+WISE (W1-W2>=0.8) photometric QSOs
-    "euclidwise_all": "crossmatch_euclid_wise_gaia",   # ALL Euclid×Gaia with a WISE match (no colour cut)
-    "quaia": "crossmatch_quaia_gaia",                  # Quaia Gaia-native quasar catalogue
 }
 # Per-catalog projected-CSV suffix (sdss keeps the original bare name for back-compat).
-CSV_SUFFIX = {"sdss": "", "desi": "_desi", "both": "_desisdss",
-              "euclidwise": "_euclidwise", "euclidwise_all": "_euclidwise_all", "quaia": "_quaia"}
+CSV_SUFFIX = {"sdss": "", "desi": "_desi", "both": "_desisdss", "euclidwise": "_euclidwise"}
 
-# Overlay-figure filename tag per catalog. sdss / desi build their CSVs but get NO
-# standalone overlay — use --catalog both for the single combined DESI+SDSS figure
-# (umap_qso_overlay_desisdss.png). None => don't draw an individual overlay.
-OVERLAY_TAG = {"sdss": None, "desi": None, "both": "desisdss",
-               "euclidwise": "euclidwise", "euclidwise_all": "euclidwise_all",
-               "quaia": None}   # quaia: CSV only, no overlay (for now)
+# Overlay-figure filename tag per catalog. sdss / desi build their CSVs but get NO standalone
+# overlay — use --catalog both for the combined DESI+SDSS figures
+# (umap_qso_desisdss.png + umap_qso_desisdss_clusters.png). None => no overlay.
+OVERLAY_TAG = {"sdss": None, "desi": None, "both": "desisdss", "euclidwise": "euclidwise"}
 
 
 def _csv_for(catalog: str) -> Path:
@@ -123,14 +119,12 @@ def _read_one_table(user: str, table_name: str) -> pd.DataFrame | None:
     import psycopg2
     table = f"{user}.{table_name}"
     feat_cols = ", ".join(f"g_{c} AS {c}" for c in SELECTED_GAIA_PARAMETERS)
-    # Both Euclid×WISE tables carry the WISE colour (w1/w2/w1_w2 — for the W1-W2 panel) and
-    # the 'euclid' Q1/ERO tag. Only the QSO subset (crossmatch_qso_euclid_wise_gaia) also has
-    # the Euclid-deblend flag n_euclid_within_1arcsec; the uncut base does not.
+    # The Euclid×WISE QSO table carries the WISE colour (w1/w2/w1_w2), the 'euclid' Q1/ERO tag
+    # (used by euclid_release for the cutouts) and the Euclid-deblend flag
+    # n_euclid_within_1arcsec (the blend-flag panel).
     euclid_blend = ""
     if "euclid_wise" in table_name:
-        euclid_blend = ", w1, w2, w1_w2, euclid"
-        if "qso_euclid_wise" in table_name:
-            euclid_blend += ", n_euclid_within_1arcsec"
+        euclid_blend = ", w1, w2, w1_w2, euclid, n_euclid_within_1arcsec"
     sql = f"""
         SELECT qso_catalog, qso_id, qso_ra, qso_dec, qso_z,
                g_source_id                 AS gaia_source_id,
@@ -291,6 +285,67 @@ def report(df: pd.DataFrame) -> None:
           f"of QSO-Gaia matches land in Cluster 0.")
 
 
+def aps_density_panel(fig, ax, df, xlim, ylim, noun="QSOs") -> None:
+    """The 'by astrometric_params_solved' panel drawn as per-class 2D DENSITY: each class
+    (2/5/6-param) is hexbinned in its OWN sequential colormap (Purples / Greens / YlOrBr),
+    so the denser a bin is in that class, the darker its hue — with a stacked 3-segment
+    colorbar (one light→dark ramp per class, labelled 2 / 5 / 6). The classes are largely
+    spatially segregated on the manifold, so the three layers don't muddy each other.
+    (Caller still adds the centroid labels via its own _clusters(ax).)"""
+    aps_cmaps = {3: "Purples", 31: "Greens", 95: "Blues"}   # 2 / 5 / 6-param
+    ext = [xlim[0], xlim[1], ylim[0], ylim[1]]
+    for aps in (95, 31, 3):          # draw 2-param last (compact + dense) → sits on top
+        s = df[df["astrometric_params_solved"] == aps]
+        if len(s):
+            ax.hexbin(s["umap1"], s["umap2"], gridsize=120, cmap=aps_cmaps[aps],
+                      bins="log", mincnt=1, alpha=0.9, extent=ext, zorder=2)
+    ax.set_title(f"by astrometric_params_solved  (per-class density)",
+                 fontsize=13, fontweight="bold")
+    # stacked colorbar: three thin light→dark ramps to the right of the panel (6 / 5 / 2 top→bottom)
+    pos = ax.get_position()
+    order = [95, 31, 3]; lab = {3: "2", 31: "5", 95: "6"}
+    gap, w = 0.004, 0.010
+    h = (pos.height - (len(order) - 1) * gap) / len(order)
+    x0 = pos.x1 + 0.006
+    for i, aps in enumerate(order):
+        cax = fig.add_axes([x0, pos.y1 - (i + 1) * h - i * gap, w, h])
+        sm = mpl.cm.ScalarMappable(cmap=aps_cmaps[aps], norm=mpl.colors.Normalize(0, 1))
+        sm.set_array([])
+        cb = fig.colorbar(sm, cax=cax); cb.set_ticks([])
+        cax.set_ylabel(lab[aps], rotation=0, fontsize=9, labelpad=8, va="center", ha="right")
+    fig.text(x0 + w + 0.01, pos.y0 + pos.height / 2, "# params (shade = density)",
+             rotation=90, va="center", ha="left", fontsize=7.5)
+
+
+def cluster_density_panel(fig, ax, df, xlim, ylim, cluster_ids, noun="QSOs") -> None:
+    """The 'by assigned UMAP cluster' panel drawn as per-cluster 2D DENSITY: each cluster
+    is hexbinned in its OWN hue-matched sequential colormap (C0 Reds / C1 Blues / C2 Oranges
+    / C3 Greens / C4 Purples — same hues as CLUSTER_COLOURS), so the denser a bin is in that
+    cluster, the darker its hue. Adds a stacked colorbar (one light→dark ramp per cluster,
+    labelled C0..C4). Caller still adds the centroid labels + fraction box."""
+    ext = [xlim[0], xlim[1], ylim[0], ylim[1]]
+    for c in cluster_ids:
+        s = df[df["cluster"] == c]
+        if len(s):
+            ax.hexbin(s["umap1"], s["umap2"], gridsize=120, cmap=CLUSTER_CMAPS.get(c, "Greys"),
+                      bins="log", mincnt=1, alpha=0.9, extent=ext, zorder=2)
+    ax.set_title(f"by assigned UMAP cluster  (per-cluster density)",
+                 fontsize=13, fontweight="bold")
+    pos = ax.get_position()
+    order = list(cluster_ids)
+    gap, w = 0.003, 0.010
+    h = (pos.height - (len(order) - 1) * gap) / len(order)
+    x0 = pos.x1 + 0.006
+    for i, c in enumerate(order):
+        cax = fig.add_axes([x0, pos.y1 - (i + 1) * h - i * gap, w, h])
+        sm = mpl.cm.ScalarMappable(cmap=CLUSTER_CMAPS.get(c, "Greys"), norm=mpl.colors.Normalize(0, 1))
+        sm.set_array([])
+        cb = fig.colorbar(sm, cax=cax); cb.set_ticks([])
+        cax.set_ylabel(f"C{c}", rotation=0, fontsize=9, labelpad=15, va="center", ha="right")
+    fig.text(x0 + w + 0.014, pos.y0 + pos.height / 2, "cluster (shade = density)",
+             rotation=90, va="center", ha="left", fontsize=7.5)
+
+
 def plot_overlay(df: pd.DataFrame, tag: str = "sdss") -> None:
     q1     = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
     labels = np.load(ARRAYS_DIR / "q1_cluster_labels.npy")
@@ -329,147 +384,29 @@ def plot_overlay(df: pd.DataFrame, tag: str = "sdss") -> None:
                 va="top", ha="left", zorder=8,
                 bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.92))
 
-    fig = plt.figure(figsize=(26, 12.5))
-    gs = fig.add_gridspec(2, 4, left=0.03, right=0.965, top=0.9, bottom=0.03,
-                          wspace=0.17, hspace=0.14)
-    # Row 1 (astrometry): all-QSO params-solved  +  the three per-class density facets.
-    # Row 2 (assignments): P(gal) | blend | cluster | inter-cluster streams.
-    aax = fig.add_subplot(gs[0, 0])       # all QSOs by astrometric_params_solved (row1 col1)
-    dax = [fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[0, 2]), fig.add_subplot(gs[0, 3])]
-    pax = fig.add_subplot(gs[1, 0])       # XGB P(gal)
-    bax = fig.add_subplot(gs[1, 1])       # blend flag
-    kax = fig.add_subplot(gs[1, 2])       # assigned cluster
-    sax = fig.add_subplot(gs[1, 3])       # inter-cluster streams
+    DISPLAY = {"desisdss": "DESI+SDSS", "euclidwise": "Euclid⨯WISE"}
+    cats = DISPLAY.get(tag, "+".join(sorted(t.split("_")[0] for t in df["qso_catalog"].unique())))
+    suptitle = f"{len(df):,} QSO–Gaia matches ({cats}) projected onto the Q1 UMAP"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Row 1: density facets by astrometric_params_solved (SHARED log colour scale) ──
-    hbs = []
-    for ax, aps in zip(dax, (3, 31, 95)):
-        _base(ax)
-        sub = df[df["astrometric_params_solved"] == aps]
-        if len(sub):
-            hb = ax.hexbin(sub["umap1"], sub["umap2"], gridsize=150, cmap="viridis",
-                           mincnt=1, alpha=0.7,
-                           extent=[xlim[0], xlim[1], ylim[0], ylim[1]], zorder=2)
-            hbs.append(hb)
-        ax.set_title(f"{APS_LABEL[aps]}  density", fontsize=13, fontweight="bold")
-        # centroid labels show THIS panel's cluster fractions (% of this class in each cluster)
-        for c in cluster_ids:
-            cx, cy = centroids[c]
-            p = 100 * (sub["cluster"] == c).mean() if len(sub) else 0.0
-            t = ax.text(cx, cy, f"C{c}\n{p:.0f}%", fontsize=8.5, fontweight="bold",
-                        ha="center", va="center", color=CLUSTER_COLOURS[c], zorder=7)
-            t.set_path_effects([pe.Stroke(linewidth=2, foreground="white"), pe.Normal()])
-    # one shared log norm across all three facets → directly comparable densities
-    if hbs:
-        vmax = max(h.get_array().max() for h in hbs)
-        shared = mpl.colors.LogNorm(vmin=1, vmax=vmax)
-        for h in hbs:
-            h.set_norm(shared)
-        cb = fig.colorbar(hbs[-1], ax=dax, fraction=0.025, pad=0.02)
-        cb.set_label("QSO count (log, shared scale)", fontsize=9)
-        cb.ax.tick_params(labelsize=8)
+    # ===================== Figure 1: umap_qso_{tag}_clusters.png =====================
+    # Row-1 panels: astrometric_params_solved | assigned UMAP cluster | inter-cluster streams
+    fig = plt.figure(figsize=(19.5, 7))
+    gs = fig.add_gridspec(1, 3, left=0.03, right=0.965, top=0.86, bottom=0.05, wspace=0.17)
+    aax = fig.add_subplot(gs[0, 0]); kax = fig.add_subplot(gs[0, 1]); sax = fig.add_subplot(gs[0, 2])
 
-    # ── Row 2a: XGB P(gal) ──
-    ax = pax; _base(ax)
-    sc = ax.scatter(df["umap1"], df["umap2"], s=4, c=df["model_pgal"], cmap="RdYlBu_r",
-                    vmin=0, vmax=1, alpha=0.5, linewidths=0, rasterized=True, zorder=2)
-    cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
-    cb.set_label("XGB P(gal)", fontsize=8); cb.ax.tick_params(labelsize=7)
-    ax.set_title("XGB P(gal)", fontsize=13, fontweight="bold"); _clusters(ax)
-    # per-cluster fraction the model calls galaxy (P(gal) ≥ 0.5)
-    lines = ["QSOs with P(gal) ≥ 0.5:"]
-    for c in cluster_ids:
-        sub = df[df["cluster"] == c]
-        frac = 100 * (sub["model_pgal"] >= 0.5).mean() if len(sub) else 0.0
-        lines.append(f"  C{c}: {frac:>3.0f}%   (N={len(sub):,})")
-    ax.text(0.03, 0.97, "\n".join(lines), transform=ax.transAxes, fontsize=8.5,
-            va="top", ha="left", zorder=8,
-            bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.92))
-
-    # ── Row 2b: blend flag, else the Euclid+WISE W1-W2 colour map ──
-    # Panel routing by catalog, keyed on which columns the projection carries:
-    #   euclidwise      (QSO cut, has n_euclid_within_1arcsec) -> EUCLID-DEBLEND blend flag
-    #                    (n_gaia is trivially 1 here; the meaningful blend is one Gaia source
-    #                     that Euclid splits into >1 MER object — the euclid_wise_g_blend set),
-    #                    drawn in the same single/multi star layout as the desisdss panel.
-    #   euclidwise_all  (all WISE matches, has w1_w2 but no n_euclid) -> W1-W2 colour map.
-    #   desisdss/sdss/…  (neither) -> the Gaia blend flag n_gaia_within_1arcsec.
-    ax = bax; _base(ax)
-    if "n_euclid_within_1arcsec" in df.columns:
-        bcol = "n_euclid_within_1arcsec"
-        single = df[df[bcol] == 1]
-        multi  = df[df[bcol] > 1]
-        ax.scatter(single["umap1"], single["umap2"], s=4, c="#9ecae1", alpha=0.3,
-                   linewidths=0, rasterized=True, zorder=2,
-                   label=f"single Euclid MER ({len(single):,})")
-        ax.scatter(multi["umap1"], multi["umap2"], s=60, c="#e6194b", marker="*",
-                   edgecolors="k", linewidths=0.4, zorder=5,
-                   label=f"Euclid deblend: >1 within 1\" ({len(multi):,})")
-        ax.legend(loc="upper left", fontsize=8.5, framealpha=0.92)
-        ax.set_title("blend flag (# Euclid MER detections within 1\")",
-                     fontsize=12, fontweight="bold")
-        _clusters(ax)
-    elif "w1_w2" in df.columns and df["w1_w2"].notna().any():
-        import matplotlib.colors as mcolors
-        w = df["w1_w2"].to_numpy(dtype=float)
-        lo, hi = np.nanpercentile(w, [1, 99])
-        lo = min(lo, 0.79); hi = max(hi, 0.81)          # keep the 0.8 cut inside the diverging norm
-        norm = mcolors.TwoSlopeNorm(vmin=lo, vcenter=0.8, vmax=hi)   # white = 0.8 = Stern+12 AGN cut
-        sc = ax.scatter(df["umap1"], df["umap2"], s=4, c=w, cmap="RdBu_r", norm=norm,
-                        alpha=0.5, linewidths=0, rasterized=True, zorder=2)
-        cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
-        cb.set_label("W1 - W2 (Vega)", fontsize=8); cb.ax.tick_params(labelsize=7)
-        ax.set_title("Euclid+WISE colour  W1 - W2  (white = 0.8 AGN cut)",
-                     fontsize=12, fontweight="bold")
-        _clusters(ax)
-        n_fin = int(np.isfinite(w).sum()); n_agn = int(np.nansum(w >= 0.8))
-        ax.text(0.03, 0.97, f"W1-W2 ≥ 0.8 (AGN wedge): {n_agn:,}/{n_fin:,}",
-                transform=ax.transAxes, fontsize=9, va="top", ha="left", zorder=8,
-                bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.92))
-    else:
-        bcol = "n_gaia_within_1arcsec"
-        single = df[df[bcol] == 1]
-        multi  = df[df[bcol] > 1]
-        ax.scatter(single["umap1"], single["umap2"], s=4, c="#9ecae1", alpha=0.3,
-                   linewidths=0, rasterized=True, zorder=2,
-                   label=f"single Gaia match ({len(single):,})")
-        ax.scatter(multi["umap1"], multi["umap2"], s=60, c="#e6194b", marker="*",
-                   edgecolors="k", linewidths=0.4, zorder=5,
-                   label=f"blend: >1 within 1\" ({len(multi):,})")
-        ax.legend(loc="upper left", fontsize=8.5, framealpha=0.92)
-        ax.set_title("blend flag (# Gaia detections within 1\")", fontsize=12, fontweight="bold")
-        _clusters(ax)
-
-    # ── Row 2c: all QSOs coloured by astrometric_params_solved (viridis + discrete cbar) ──
+    # ── all QSOs by astrometric_params_solved — per-class 2D density (denser = darker) ──
     ax = aax; _base(ax)
-    cmap3 = plt.get_cmap("viridis", 3)          # 3 = 2-param, 31 = 5-param, 95 = 6-param
-    aps_color = {3: cmap3(0), 31: cmap3(1), 95: cmap3(2)}
-    for aps in (95, 31, 3):  # draw 2-param last so it sits on top
-        s = df[df["astrometric_params_solved"] == aps]
-        ax.scatter(s["umap1"], s["umap2"], s=4, color=aps_color[aps], alpha=0.5,
-                   linewidths=0, rasterized=True, zorder=2)
-    ax.set_title("all QSOs by astrometric_params_solved", fontsize=13, fontweight="bold")
+    aps_density_panel(fig, ax, df, xlim, ylim, noun="QSOs")
     _clusters(ax)
-    # discrete colorbar, 3 segments labelled by # solved params (2 / 5 / 6)
-    sm = mpl.cm.ScalarMappable(cmap=cmap3, norm=mpl.colors.BoundaryNorm([0, 1, 2, 3], 3))
-    sm.set_array([])
-    cb = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.02, ticks=[0.5, 1.5, 2.5])
-    cb.set_ticklabels(["2", "5", "6"])
-    cb.set_label("# astrometric params solved", fontsize=8)
-    cb.ax.tick_params(labelsize=8)
 
-    # ── Row 2d: QSOs coloured by their assigned UMAP cluster (C0–C4) ──
+    # ── QSOs by assigned UMAP cluster — per-cluster 2D density (denser = darker) ──
     ax = kax; _base(ax)
-    for c in cluster_ids:
-        s = df[df["cluster"] == c]
-        if len(s):
-            ax.scatter(s["umap1"], s["umap2"], s=4, color=CLUSTER_COLOURS[c],
-                       alpha=0.55, linewidths=0, rasterized=True, zorder=2)
-    ax.set_title("QSOs by assigned UMAP cluster", fontsize=13, fontweight="bold")
+    cluster_density_panel(fig, ax, df, xlim, ylim, cluster_ids, noun="QSOs")
     _clusters(ax)
     _frac_box(ax, df)   # N + per-cluster membership fractions (≥0.5%)
 
-    # ── Row 2e: OUTSIDE QSOs relabelled into named inter-cluster streams ──
+    # ── OUTSIDE QSOs relabelled into named inter-cluster streams ──
     ax = sax; _base(ax)
     pts = df[["umap1", "umap2"]].to_numpy()
     outside = outside_mask(pts, q1_emb)
@@ -488,41 +425,79 @@ def plot_overlay(df: pd.DataFrame, tag: str = "sdss") -> None:
                  fontsize=12, fontweight="bold")
     _clusters(ax)
 
-    cats = "+".join(sorted(t.split("_")[0] for t in df["qso_catalog"].unique()))
-    n2 = int((df["astrometric_params_solved"] == 3).sum())
-    n2c1 = int(((df["astrometric_params_solved"] == 3) & (df["cluster"] == 1)).sum())
-    fig.suptitle(
-        f"{len(df):,} QSO–Gaia matches ({cats}) projected onto the Q1 14-feature UMAP",
-        fontsize=16, fontweight="bold", x=0.5, y=0.96)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUTPUT_DIR / f"umap_qso_overlay_{tag}.png"
-    plt.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  -> {out}")
+    fig.suptitle(suptitle, fontsize=16, fontweight="bold", x=0.5, y=0.97)
+    out1 = OUTPUT_DIR / f"umap_qso_{tag}_clusters.png"
+    plt.savefig(out1, dpi=150, bbox_inches="tight"); plt.close(); print(f"  -> {out1}")
+
+    # ===================== Figure 2: umap_qso_{tag}.png =====================
+    # Row-2 panels, swapped order: blend flag | XGB P(gal)
+    fig = plt.figure(figsize=(13, 6.8))
+    gs = fig.add_gridspec(1, 2, left=0.04, right=0.955, top=0.86, bottom=0.05, wspace=0.17)
+    bax = fig.add_subplot(gs[0, 0]); pax = fig.add_subplot(gs[0, 1])
+
+    # ── blend flag — 2D density (log) background + blend stars on top ──
+    # euclidwise QSO cut: the meaningful blend is the EUCLID deblend (one Gaia source Euclid
+    # splits into >1 MER object; n_gaia is trivially 1 there). Everything else uses the Gaia
+    # blend flag n_gaia_within_1arcsec.
+    ax = bax; _base(ax)
+    if "n_euclid_within_1arcsec" in df.columns:
+        bcol, blabel, noun = "n_euclid_within_1arcsec", "Euclid deblend", "Euclid MER detections"
+    else:
+        bcol, blabel, noun = "n_gaia_within_1arcsec", "blend", "Gaia detections"
+    multi = df[df[bcol] > 1]
+    hb = ax.hexbin(df["umap1"], df["umap2"], gridsize=120, cmap="viridis", bins="log", alpha=0.6,
+                   mincnt=1, extent=[xlim[0], xlim[1], ylim[0], ylim[1]], zorder=2)
+    cb = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.02)
+    cb.set_label("QSO count (log)", fontsize=8); cb.ax.tick_params(labelsize=7)
+    ax.scatter(multi["umap1"], multi["umap2"], s=14, c="red", marker="*", alpha=0.7,
+               edgecolors="w", linewidths=0.4, zorder=5,
+               label=f"{blabel}: >1 within 1\" ({len(multi):,})")
+    ax.legend(loc="lower left", fontsize=8.5, framealpha=0.92)   # lower-left: clears the frac box
+    ax.set_title(f"blend flag (# {noun} within 1\")", fontsize=12, fontweight="bold")
+    _clusters(ax)
+    _frac_box(ax, df)   # N + per-cluster fractions (same box as the cluster panel)
+
+    # ── XGB P(gal) ──
+    ax = pax; _base(ax)
+    sc = ax.scatter(df["umap1"], df["umap2"], s=4, c=df["model_pgal"], cmap="RdYlBu_r",
+                    vmin=0, vmax=1, alpha=0.5, linewidths=0, rasterized=True, zorder=2)
+    cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+    cb.set_label("XGB P(gal)", fontsize=8); cb.ax.tick_params(labelsize=7)
+    ax.set_title("XGB P(gal)", fontsize=13, fontweight="bold"); _clusters(ax)
+    lines = ["QSOs with P(gal) ≥ 0.5:"]
+    for c in cluster_ids:
+        sub = df[df["cluster"] == c]
+        frac = 100 * (sub["model_pgal"] >= 0.5).mean() if len(sub) else 0.0
+        lines.append(f"  C{c}: {frac:>3.0f}%   (N={len(sub):,})")
+    ax.text(0.03, 0.97, "\n".join(lines), transform=ax.transAxes, fontsize=8.5,
+            va="top", ha="left", zorder=8,
+            bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.92))
+
+    fig.suptitle(suptitle, fontsize=16, fontweight="bold", x=0.5, y=0.97)
+    out2 = OUTPUT_DIR / f"umap_qso_{tag}.png"
+    plt.savefig(out2, dpi=150, bbox_inches="tight"); plt.close(); print(f"  -> {out2}")
 
 
-# Named catalog SETS. Bare `analyze_umap_qso.py` (default) compiles the DESI+SDSS combo,
-# the Euclid+WISE QSO cut, AND the full WISE-matched base; 'all' also adds Quaia.
-CATALOG_SETS = {"default": ["both", "euclidwise", "euclidwise_all"],
-                "all":     ["both", "euclidwise", "euclidwise_all", "quaia"]}
+# Named catalog set. Bare `analyze_umap_qso.py` (default) draws the two catalogs we keep:
+# desisdss (DESI+SDSS) and euclidwise (W1-W2>=0.8 QSO cut), two figures each.
+CATALOG_SETS = {"default": ["both", "euclidwise"]}
 
 
 def _write_and_plot(df: pd.DataFrame, catalog: str) -> None:
+    """Save the projected CSV, then draw the overlay if this catalog has one.
+    (The old per-catalog qso_gaia_umap*.npz mirror was dropped — nothing read it; the CSV
+    is the single source of truth for the projection.)"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     QSO_ARRAYS.mkdir(parents=True, exist_ok=True)
     csv = _csv_for(catalog)
     df.to_csv(csv, index=False)
     print(f"  -> {csv}")
-    np.savez_compressed(
-        QSO_ARRAYS / f"qso_gaia_umap{CSV_SUFFIX[catalog]}.npz",
-        source_ids=df["gaia_source_id"].astype(str).values,
-        qso_catalog=df["qso_catalog"].values,
-        umap=df[["umap1", "umap2"]].values,
-        cluster=df["cluster"].values,
-        astrometric_params_solved=df["astrometric_params_solved"].values,
-        model_pgal=df["model_pgal"].values,
-        n_gaia_within_1arcsec=df["n_gaia_within_1arcsec"].values,
-    )
+    _maybe_plot(df, catalog)
+
+
+def _maybe_plot(df: pd.DataFrame, catalog: str) -> None:
+    """Draw the overlay for this catalog, or note that it's CSV-only. Shared by the full
+    run and --replot so the 'has an overlay?' decision lives in exactly one place."""
     tag = OVERLAY_TAG[catalog]
     if tag:
         plot_overlay(df, tag)
@@ -548,23 +523,17 @@ def _run_replot(catalog: str) -> int:
         print(f"  {csv.name} not found — run a full projection first (no --replot)."); return 1
     df = pd.read_csv(csv)
     print(f"Replotting {catalog} from {csv.name} ({len(df):,} rows)...")
-    tag = OVERLAY_TAG[catalog]
-    if tag:
-        plot_overlay(df, tag)
-    else:
-        print(f"  (no overlay for {catalog} — CSV only)")
+    _maybe_plot(df, catalog)
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Project QSO×Gaia matches onto the UMAP")
     ap.add_argument("--catalog",
-                    choices=["sdss", "desi", "both", "euclidwise", "euclidwise_all",
-                             "quaia", "default", "all"],
+                    choices=["sdss", "desi", "both", "euclidwise", "default"],
                     default="default",
-                    help="'default' = both (DESI+SDSS → desisdss) + euclidwise; "
-                         "'euclidwise_all' = every WISE-matched Euclid×Gaia source (no colour "
-                         "cut, ~439k); 'all' also adds quaia; or a single catalog. (default: default)")
+                    help="'default' = both (DESI+SDSS → desisdss) + euclidwise (the two "
+                         "overlays); or a single catalog. (default: default)")
     ap.add_argument("--replot", action="store_true",
                     help="Skip WSDB + projection; just redraw the overlay(s) from the saved CSV(s).")
     args = ap.parse_args()

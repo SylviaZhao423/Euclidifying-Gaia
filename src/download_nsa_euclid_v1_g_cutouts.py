@@ -61,7 +61,7 @@ def render_to_array(row: pd.Series, arr, dpi: int = 100) -> np.ndarray:
     lmt = f"{lm:.2f}" if pd.notna(lm) else "?"
     title = (f"NSA nucleus  Euclid {euclid_release(row)}  Cluster {int(row['cluster'])}  ({apsl})\n"
              f"RA={float(row['gal_ra']):.4f}  Dec={float(row['gal_dec']):+.4f}  P(gal)={pt}\n"
-             f"G={gt}  logM={lmt}  nsaid={int(row['nsaid'])}")
+             f"G={gt}  logM={lmt}  id={row['sid_str']}")
     fig, ax = plt.subplots(figsize=(3.4, 3.4), dpi=dpi)
     if arr is not None:
         ax.imshow(np.clip(arr, 0, 1))
@@ -117,7 +117,7 @@ def contact_sheet(items: list, out: Path, cluster: int) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--size", type=float, default=6.0, help="cutout FOV arcsec (default 6)")
+    ap.add_argument("--size", type=float, default=12.0, help="cutout FOV arcsec (default 6)")
     ap.add_argument("--limit", type=int, default=None, help="only the top-N nuclei by P(gal)")
     args = ap.parse_args()
     df = load_nuclei(args.limit)

@@ -67,7 +67,8 @@ def ero_field_for(ra: float, dec: float) -> Path | None:
 
 def render_ero_cutout(ra: float, dec: float, size_arcsec: float,
                       c_star: float | None = None, draw_crosshair: bool = True,
-                      companions: list | None = None):
+                      companions: list | None = None,
+                      crosshair_color: str | None = None, companion_color: str = "#00e5ff"):
     """Rendered ERO stamp (numpy array) via the shared _render_cutout — a VIS+NISP LRGB
     colour composite where the field's NISP-H/J FITS are cached (grayscale VIS otherwise).
     Returns None if the position isn't in any cached ERO field / the cutout fails."""
@@ -85,6 +86,7 @@ def render_ero_cutout(ra: float, dec: float, size_arcsec: float,
     try:
         return _render_cutout(vis, ra, dec, size_arcsec, "", c_star=c_star,
                               nisp_j_url=nj, nisp_h_url=nh, draw_crosshair=draw_crosshair,
-                              companions=companions)
+                              companions=companions, crosshair_color=crosshair_color,
+                              companion_color=companion_color)
     except Exception:
         return None

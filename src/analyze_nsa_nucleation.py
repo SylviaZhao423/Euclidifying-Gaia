@@ -51,6 +51,10 @@ CSV = NSA_DIR / "arrays" / "nsa_gaia_matches.csv"
 ENV_CACHE = NSA_DIR / "arrays" / "nsa_env_sigma5.csv"
 BINNED_CSV = NSA_DIR / "arrays" / "nsa_nucleation_binned.csv"
 OUT_PNG = NSA_DIR / "nsa_nucleation_fractions.png"
+UMAP_PNG = NSA_DIR / "nsa_nucleation_umap.png"
+UMAP_BINNED_PNG = NSA_DIR / "nsa_nucleation_umap_binned.png"
+ARRAYS_DIR = PROJECT_DIR / "output" / "umap" / "arrays"   # q1 reference embedding + labels
+CLUSTER_COLOURS = {0: "#e6194b", 1: "#4363d8", 2: "#f58231", 3: "#3cb44b", 4: "#911eb4"}
 
 C_KMS = 299_792.458   # speed of light, km/s
 
@@ -276,6 +280,162 @@ def make_figure(df, vl, envcol, nbins):
         print(f"  -> {BINNED_CSV}")
 
 
+def make_umap_figure(df, envcol):
+    """Companion to the fraction curves: the SAME three axes (mass / morphology /
+    environment) plus the blend flag, but painted onto the UMAP so you can see WHERE in
+    the star/galaxy manifold the trends live. Only the detected nuclei (has_gaia → a UMAP
+    position) are plotted, over the grey Q1 reference embedding with C0–C4 labels — same
+    style as umap_nsa_overlay_v1.png."""
+    det = df.dropna(subset=["umap1", "umap2"]).copy()
+    if det.empty:
+        print("  (no detected nuclei with UMAP positions — skipping UMAP figure)"); return
+    q1 = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
+    emb = q1["embedding"]
+    labels = np.load(ARRAYS_DIR / "q1_cluster_labels.npy")
+    ids = sorted(int(c) for c in set(labels[labels >= 0]))
+    centroids = {c: (emb[labels == c, 0].mean(), emb[labels == c, 1].mean()) for c in ids}
+    xlim = (emb[:, 0].min() - 1, emb[:, 0].max() + 1)
+    ylim = (emb[:, 1].min() - 1, emb[:, 1].max() + 1)
+    import matplotlib.patheffects as pe
+
+    def base(ax):
+        ax.scatter(emb[:, 0], emb[:, 1], s=2, c="0.85", linewidths=0, rasterized=True, zorder=1)
+        ax.set_xlim(*xlim); ax.set_ylim(*ylim); ax.set_xticks([]); ax.set_yticks([])
+        for c in ids:
+            cx, cy = centroids[c]
+            t = ax.text(cx, cy, f"C{c}", fontsize=12, fontweight="bold",
+                        ha="center", va="center", color=CLUSTER_COLOURS[c], zorder=7)
+            t.set_path_effects([pe.Stroke(linewidth=2.5, foreground="white"), pe.Normal()])
+
+    def paint(ax, vals, title, cmap, vlo=None, vhi=None, logv=False):
+        v = vals.to_numpy(float)
+        if logv:
+            v = np.where(v > 0, np.log10(v), np.nan)
+        m = np.isfinite(v)
+        base(ax)
+        lo = np.nanpercentile(v[m], 2) if vlo is None else vlo
+        hi = np.nanpercentile(v[m], 98) if vhi is None else vhi
+        sc = ax.scatter(det["umap1"][m], det["umap2"][m], s=5, c=v[m], cmap=cmap,
+                        vmin=lo, vmax=hi, alpha=0.55, linewidths=0, rasterized=True, zorder=3)
+        cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02); cb.ax.tick_params(labelsize=8)
+        ax.set_title(title, fontsize=12, fontweight="bold")
+
+    fig, axes = plt.subplots(2, 3, figsize=(21, 13))
+    paint(axes[0, 0], det["gal_log_mass"], "stellar mass  log₁₀ M⋆", "viridis")
+    paint(axes[0, 1], det["gal_sersic_n"], "morphology  Sérsic index n  (late<2.5<early)",
+          "Spectral_r", vlo=0.5, vhi=6.0)
+    paint(axes[0, 2], det["gal_conc"], "morphology  concentration R90/R50",
+          "Spectral_r", vlo=1.8, vhi=3.4)
+    paint(axes[1, 0], det[envcol],
+          f"environment  {envcol.replace('sigma','Σ_')}  (log gal/Mpc²)", "viridis", logv=True)
+    # blend-flag panel — single vs blend (n_gaia_within_1arcsec > 1), star markers like the overlay
+    ax = axes[1, 1]; base(ax)
+    if "n_gaia_within_1arcsec" in det.columns:
+        single = det[det["n_gaia_within_1arcsec"] == 1]
+        multi = det[det["n_gaia_within_1arcsec"] > 1]
+        ax.scatter(single["umap1"], single["umap2"], s=4, c="#9ecae1", alpha=0.3,
+                   linewidths=0, rasterized=True, zorder=2,
+                   label=f"single Gaia nucleus ({len(single):,})")
+        ax.scatter(multi["umap1"], multi["umap2"], s=55, c="#e6194b", marker="*",
+                   edgecolors="k", linewidths=0.4, zorder=5,
+                   label=f"blend: >1 Gaia within 1\" ({len(multi):,})")
+        ax.legend(loc="upper left", fontsize=9, framealpha=0.92)
+    ax.set_title("blend flag  (# Gaia detections within 1\")", fontsize=12, fontweight="bold")
+    # local BLEND fraction — of the DETECTED nuclei in each UMAP cell, fraction with >1 Gaia.
+    # (The nucleation fraction ≥1/total is NOT spatial — non-detected galaxies have no UMAP
+    #  position — so only the blend fraction, whose denominator is the detected nuclei, maps here.)
+    ax = axes[1, 2]; base(ax)
+    if "n_gaia_within_1arcsec" in det.columns:
+        isblend = (det["n_gaia_within_1arcsec"] > 1).astype(float).to_numpy()
+        hb = ax.hexbin(det["umap1"], det["umap2"], C=isblend, gridsize=70,
+                       reduce_C_function=np.mean, mincnt=8, cmap="viridis",
+                       extent=[xlim[0], xlim[1], ylim[0], ylim[1]], zorder=3)
+        cb = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.02); cb.ax.tick_params(labelsize=8)
+        cb.set_label("blend fraction  (>1 Gaia / detected)", fontsize=8)
+    ax.set_title("local blend fraction  (>1 Gaia within 1\" ÷ detected nuclei)",
+                 fontsize=11, fontweight="bold")
+
+    fig.suptitle("NSA v1 detected nuclei on the UMAP — mass / morphology / environment / blend",
+                 fontsize=15, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    UMAP_PNG.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(UMAP_PNG, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> {UMAP_PNG}")
+
+
+def make_umap_binned_figure(df, envcol):
+    """Same axes as nsa_nucleation_umap.png but every panel is a 2D BINNED-MEAN map
+    (hexbin with reduce_C_function=mean): each UMAP cell is coloured by the MEAN of the
+    quantity over the detected nuclei inside it — smoother than the per-point scatter, so
+    spatial gradients are easier to read. `mincnt` drops sparse cells to the grey base."""
+    det = df.dropna(subset=["umap1", "umap2"]).copy()
+    if det.empty:
+        print("  (no detected nuclei with UMAP positions — skipping binned UMAP figure)"); return
+    q1 = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
+    emb = q1["embedding"]
+    labels = np.load(ARRAYS_DIR / "q1_cluster_labels.npy")
+    ids = sorted(int(c) for c in set(labels[labels >= 0]))
+    centroids = {c: (emb[labels == c, 0].mean(), emb[labels == c, 1].mean()) for c in ids}
+    xlim = (emb[:, 0].min() - 1, emb[:, 0].max() + 1)
+    ylim = (emb[:, 1].min() - 1, emb[:, 1].max() + 1)
+    import matplotlib.patheffects as pe
+
+    def base(ax):
+        ax.scatter(emb[:, 0], emb[:, 1], s=2, c="0.9", linewidths=0, rasterized=True, zorder=1)
+        ax.set_xlim(*xlim); ax.set_ylim(*ylim); ax.set_xticks([]); ax.set_yticks([])
+        for c in ids:
+            cx, cy = centroids[c]
+            t = ax.text(cx, cy, f"C{c}", fontsize=12, fontweight="bold",
+                        ha="center", va="center", color=CLUSTER_COLOURS[c], zorder=7)
+            t.set_path_effects([pe.Stroke(linewidth=2.5, foreground="white"), pe.Normal()])
+
+    def hexmean(ax, vals, title, cmap, logv=False, vlo=None, vhi=None,
+                gridsize=100, mincnt=6, clabel=None):
+        v = vals.to_numpy(float)
+        if logv:
+            v = np.where(v > 0, np.log10(v), np.nan)
+        m = np.isfinite(v)
+        base(ax)
+        lo = np.nanpercentile(v[m], 2) if vlo is None else vlo
+        hi = np.nanpercentile(v[m], 98) if vhi is None else vhi
+        hb = ax.hexbin(det["umap1"][m], det["umap2"][m], C=v[m], gridsize=gridsize,
+                       reduce_C_function=np.mean, mincnt=mincnt, cmap=cmap, vmin=lo, vmax=hi,
+                       extent=[xlim[0], xlim[1], ylim[0], ylim[1]], zorder=3)
+        cb = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.02); cb.ax.tick_params(labelsize=8)
+        if clabel:
+            cb.set_label(clabel, fontsize=8)
+        ax.set_title(title, fontsize=12, fontweight="bold")
+
+    fig, axes = plt.subplots(2, 3, figsize=(21, 13))
+    hexmean(axes[0, 0], det["gal_log_mass"], "stellar mass  log₁₀ M⋆  (binned mean)", "viridis")
+    hexmean(axes[0, 1], det["gal_sersic_n"], "Sérsic index n  (binned mean)",
+            "Spectral_r", vlo=0.5, vhi=6.0)
+    hexmean(axes[0, 2], det["gal_conc"], "concentration R90/R50  (binned mean)",
+            "Spectral_r", vlo=1.8, vhi=3.4)
+    hexmean(axes[1, 0], det[envcol],
+            f"environment {envcol.replace('sigma','Σ_')}  (binned mean, log)", "viridis", logv=True)
+    hexmean(axes[1, 1], det["gal_ba"], "axis ratio b/a  (binned mean)", "viridis")
+    # local blend fraction — binned mean of the (>1 Gaia) flag
+    ax = axes[1, 2]; base(ax)
+    if "n_gaia_within_1arcsec" in det.columns:
+        isblend = (det["n_gaia_within_1arcsec"] > 1).astype(float).to_numpy()
+        hb = ax.hexbin(det["umap1"], det["umap2"], C=isblend, gridsize=100,
+                       reduce_C_function=np.mean, mincnt=8, cmap="magma",
+                       extent=[xlim[0], xlim[1], ylim[0], ylim[1]], zorder=3)
+        cb = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.02); cb.ax.tick_params(labelsize=8)
+        cb.set_label("blend fraction  (>1 Gaia / detected)", fontsize=8)
+    ax.set_title("local blend fraction  (>1 Gaia ÷ detected)", fontsize=11, fontweight="bold")
+
+    fig.suptitle("NSA v1 detected nuclei — UMAP 2D binned-mean maps "
+                 "(mass / morphology / environment / blend)", fontsize=15, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    UMAP_BINNED_PNG.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(UMAP_BINNED_PNG, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> {UMAP_BINNED_PNG}")
+
+
 # --------------------------------------------------------------------------- #
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -308,6 +468,8 @@ def main() -> int:
           f"(central Gaia fraction {vl['has_gaia'].mean():.3f})")
 
     make_figure(df, vl, envcol, args.nbins)
+    make_umap_figure(df, envcol)
+    make_umap_binned_figure(df, envcol)
     print("Done.")
     return 0
 

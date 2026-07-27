@@ -70,7 +70,7 @@ def render_to_array(row: pd.Series, img, size_arcsec: float, dpi: int = 100) -> 
     lmt = f"{lm:.2f}" if pd.notna(lm) else "?"
     title = (f"NSA nucleus  Euclid {euclid_release(row)}  Cluster {int(row['cluster'])}  ({apsl})\n"
              f"RA={float(row['gal_ra']):.4f}  Dec={float(row['gal_dec']):+.4f}  P(gal)={pt}\n"
-             f"G={gt}  logM={lmt}  nsaid={int(row['nsaid'])}")
+             f"G={gt}  logM={lmt}  id={row['sid_str']}")
     ax.set_title(title, fontsize=8, color="black", pad=10)
     ax.set_xlim(half, -half); ax.set_ylim(-half, half); ax.set_xticks([]); ax.set_yticks([])
     for sp in ax.spines.values():

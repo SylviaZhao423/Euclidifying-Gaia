@@ -4,9 +4,8 @@ Project the NSA-galaxy × Gaia central cross-match onto the Q1 14-feature UMAP
 (galaxy-nucleation project). The QSO analogue is analyze_umap_qso.py — this mirrors
 it exactly so the two projects share one workflow.
 
-Reads the per-catalog WSDB tables built by the crossmatch scripts:
+Reads the WSDB table built by the crossmatch script:
     {PGUSER}.crossmatch_nsa_v1_gaia   (v1_0_1, PRIMARY)
-    {PGUSER}.crossmatch_nsa_v0_gaia   (v0_1_2, cross-check)
     PGUSER=siwei_zhao_2025 python src/crossmatch_nsa_v1_gaia.py    # build once (needs grant)
 
 Science
@@ -32,15 +31,13 @@ Reads:
   output/umap/arrays/q1_indiv.npz, q1_cluster_labels.npy, q1_indiv_reducer.joblib
   output/xgboost_q1/seed_models/xgb_classifier_q1_seed*.json   (model_pgal)
 
-Writes (CSV + NPZ in an arrays/ subfolder, like analyze_umap_qso.py):
+Writes (CSV in an arrays/ subfolder, like analyze_umap_qso.py; TWO overlay figures):
   output/umap/nsa/arrays/nsa_gaia_matches.csv   (all galaxies; umap/cluster set for nuclei)
-  output/umap/nsa/arrays/nsa_gaia_umap.npz
-  output/umap/nsa/umap_nsa_overlay_<catalog>.png
+  output/umap/nsa/umap_nsa_v1_clusters.png      (aps | cluster | streams)
+  output/umap/nsa/umap_nsa_v1.png               (blend flag | XGB P(gal))
 
 Usage:
   python src/analyze_umap_nsa.py                 # v1 (full: WSDB + project + plot)
-  python src/analyze_umap_nsa.py --catalog v0    # v0 cross-check
-  python src/analyze_umap_nsa.py --catalog both  # v1 + v0
   python src/analyze_umap_nsa.py --replot        # fast: redraw from the saved CSV
 """
 from __future__ import annotations
@@ -60,7 +57,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from selected_parameters_list import SELECTED_GAIA_PARAMETERS  # noqa: E402
 # Reuse the QSO projection + XGB machinery verbatim (identical 14-feature pipeline).
 from analyze_umap_qso import (project_and_assign, WSDB_HOST, WSDB_DB, WSDB_USER,  # noqa: E402
-                            CLUSTER_COLOURS, APS_LABEL)
+                            CLUSTER_COLOURS, APS_LABEL, aps_density_panel,
+                            cluster_density_panel)
 from umap_streams import outside_mask, stream_labels, STREAM_PAIRS  # noqa: E402
 
 ARRAYS_DIR = PROJECT_DIR / "output" / "umap" / "arrays"
@@ -70,9 +68,8 @@ NSA_ARRAYS = OUTPUT_DIR / "arrays"                        # projected CSVs + NPZ
 # NSA galaxy-property columns carried by the crossmatch tables (version-agnostic aliases).
 GAL_PROPS = ["gal_log_mass", "gal_sersic_n", "gal_re_arcsec", "gal_ba", "gal_conc", "gal_zdist"]
 
-CATALOG_TABLES = {"v1": "crossmatch_nsa_v1_gaia", "v0": "crossmatch_nsa_v0_gaia",
-                  "v1_euclid": "crossmatch_nsa_v1_gaia_euclid"}  # v1 nuclei that also have Euclid
-CSV_SUFFIX = {"v1": "", "v0": "_v0", "both": "_both", "v1_euclid": "_v1_euclid"}
+CATALOG_TABLES = {"v1": "crossmatch_nsa_v1_gaia"}
+CSV_SUFFIX = {"v1": ""}
 
 
 def _csv_for(catalog: str) -> Path:
@@ -85,9 +82,8 @@ def _read_one_table(user: str, table_name: str) -> pd.DataFrame | None:
     table = f"{user}.{table_name}"
     feat_cols = ", ".join(f"g_{c} AS {c}" for c in SELECTED_GAIA_PARAMETERS)
     props = ", ".join(GAL_PROPS)
-    euclid_tag = ", euclid" if "euclid" in table_name else ""   # Q1/ERO for the v1_euclid table
     sql = f"""
-        SELECT nsa_catalog, nsaid, iauname, gal_ra, gal_dec, {props}{euclid_tag},
+        SELECT nsa_catalog, nsaid, iauname, gal_ra, gal_dec, {props},
                has_gaia, n_gaia_within_1arcsec, gaia_sep_arcsec,
                g_source_id                 AS gaia_source_id,
                g_astrometric_params_solved AS astrometric_params_solved,
@@ -113,15 +109,12 @@ def _read_one_table(user: str, table_name: str) -> pd.DataFrame | None:
 def load_matches_from_table(catalog: str = "v1") -> pd.DataFrame | None:
     import os
     user = os.getenv("PGUSER", WSDB_USER)
-    which = ["v1", "v0"] if catalog == "both" else [catalog]
-    frames = [d for d in (_read_one_table(user, CATALOG_TABLES[k]) for k in which)
-              if d is not None and len(d)]
-    if not frames:
-        print("  No NSA crossmatch tables found. Build them with "
-              "crossmatch_nsa_v1_gaia.py / crossmatch_nsa_v0_gaia.py "
+    df = _read_one_table(user, CATALOG_TABLES[catalog])
+    if df is None or not len(df):
+        print("  No NSA crossmatch table found. Build it with crossmatch_nsa_v1_gaia.py "
               "(needs VPN + a GRANT on the NSA table).")
         return None
-    return pd.concat(frames, ignore_index=True)
+    return df
 
 
 def project_nuclei(df: pd.DataFrame) -> pd.DataFrame:
@@ -174,10 +167,9 @@ def report(df: pd.DataFrame) -> None:
 
 
 def plot_overlay(df: pd.DataFrame, tag: str = "v1") -> None:
-    """Eight-panel overlay in the SAME format as umap_qso_overlay_desisdss/euclidwise
-    (2x4 grid), for the detected nuclei:
-      Row 1: nuclei by astrometric_params_solved  +  the three per-class density facets
-      Row 2: XGB P(gal) | blend flag | assigned cluster | inter-cluster streams"""
+    """Two overlay figures (SAME format as the QSO ones), for the detected nuclei:
+      umap_nsa_{tag}_clusters.png : astrometric_params_solved | assigned cluster | streams
+      umap_nsa_{tag}.png          : blend flag | XGB P(gal)"""
     det = df.dropna(subset=["umap1", "umap2"])
     q1     = np.load(ARRAYS_DIR / "q1_indiv.npz", allow_pickle=True)
     labels = np.load(ARRAYS_DIR / "q1_cluster_labels.npy")
@@ -214,96 +206,29 @@ def plot_overlay(df: pd.DataFrame, tag: str = "v1") -> None:
                 va="top", ha="left", zorder=8,
                 bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.92))
 
-    fig = plt.figure(figsize=(26, 12.5))
-    gs = fig.add_gridspec(2, 4, left=0.03, right=0.965, top=0.9, bottom=0.03,
-                          wspace=0.17, hspace=0.14)
-    aax = fig.add_subplot(gs[0, 0])       # all nuclei by astrometric_params_solved
-    dax = [fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[0, 2]), fig.add_subplot(gs[0, 3])]
-    pax = fig.add_subplot(gs[1, 0])       # XGB P(gal)
-    bax = fig.add_subplot(gs[1, 1])       # blend flag
-    kax = fig.add_subplot(gs[1, 2])       # assigned cluster
-    sax = fig.add_subplot(gs[1, 3])       # inter-cluster streams
+    cats = "+".join(sorted(det["nsa_catalog"].astype(str).unique())) if len(det) else tag
+    nd, n = len(det), len(df)
+    suptitle = (f"{nd:,} central Gaia nuclei ({cats}) of {n:,} NSA galaxies "
+                f"projected onto the Q1 UMAP")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Row 1: density facets by astrometric_params_solved (SHARED log colour scale) ──
-    hbs = []
-    for ax, aps in zip(dax, (3, 31, 95)):
-        _base(ax)
-        sub = det[det["astrometric_params_solved"] == aps]
-        if len(sub):
-            hbs.append(ax.hexbin(sub["umap1"], sub["umap2"], gridsize=150, cmap="viridis",
-                                 mincnt=1, alpha=0.7,
-                                 extent=[xlim[0], xlim[1], ylim[0], ylim[1]], zorder=2))
-        ax.set_title(f"{APS_LABEL[aps]}  density", fontsize=13, fontweight="bold")
-        for c in cluster_ids:
-            cx, cy = centroids[c]
-            p = 100 * (sub["cluster"] == c).mean() if len(sub) else 0.0
-            t = ax.text(cx, cy, f"C{c}\n{p:.0f}%", fontsize=8.5, fontweight="bold",
-                        ha="center", va="center", color=CLUSTER_COLOURS[c], zorder=7)
-            t.set_path_effects([pe.Stroke(linewidth=2, foreground="white"), pe.Normal()])
-    if hbs:
-        vmax = max(h.get_array().max() for h in hbs)
-        shared = mpl.colors.LogNorm(vmin=1, vmax=vmax)
-        for h in hbs:
-            h.set_norm(shared)
-        cb = fig.colorbar(hbs[-1], ax=dax, fraction=0.025, pad=0.02)
-        cb.set_label("nucleus count (log, shared scale)", fontsize=9); cb.ax.tick_params(labelsize=8)
+    # ===================== Figure 1: umap_nsa_{tag}_clusters.png =====================
+    # Row-1 panels: astrometric_params_solved | assigned UMAP cluster | inter-cluster streams
+    fig = plt.figure(figsize=(19.5, 7))
+    gs = fig.add_gridspec(1, 3, left=0.03, right=0.965, top=0.86, bottom=0.05, wspace=0.17)
+    aax = fig.add_subplot(gs[0, 0]); kax = fig.add_subplot(gs[0, 1]); sax = fig.add_subplot(gs[0, 2])
 
-    # ── Row 1 col 0: all nuclei coloured by astrometric_params_solved (discrete cbar) ──
+    # ── all nuclei by astrometric_params_solved — per-class 2D density (denser = darker) ──
     ax = aax; _base(ax)
-    cmap3 = plt.get_cmap("viridis", 3)          # 3 = 2-param, 31 = 5-param, 95 = 6-param
-    aps_color = {3: cmap3(0), 31: cmap3(1), 95: cmap3(2)}
-    for aps in (95, 31, 3):   # draw 2-param last so it sits on top
-        s = det[det["astrometric_params_solved"] == aps]
-        ax.scatter(s["umap1"], s["umap2"], s=6, color=aps_color[aps], alpha=0.6,
-                   linewidths=0, rasterized=True, zorder=2)
-    ax.set_title("all nuclei by astrometric_params_solved", fontsize=13, fontweight="bold")
-    _clusters(ax)
-    sm = mpl.cm.ScalarMappable(cmap=cmap3, norm=mpl.colors.BoundaryNorm([0, 1, 2, 3], 3))
-    sm.set_array([])
-    cb = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.02, ticks=[0.5, 1.5, 2.5])
-    cb.set_ticklabels(["2", "5", "6"]); cb.set_label("# astrometric params solved", fontsize=8)
-    cb.ax.tick_params(labelsize=8)
-
-    # ── Row 2a: XGB P(gal) ──
-    ax = pax; _base(ax)
-    sc = ax.scatter(det["umap1"], det["umap2"], s=6, c=det["model_pgal"], cmap="RdYlBu_r",
-                    vmin=0, vmax=1, alpha=0.6, linewidths=0, rasterized=True, zorder=2)
-    cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
-    cb.set_label("XGB P(gal)", fontsize=8); cb.ax.tick_params(labelsize=7)
-    ax.set_title("XGB P(gal)", fontsize=13, fontweight="bold"); _clusters(ax)
-    lines = ["nuclei with P(gal) ≥ 0.5:"]
-    for c in cluster_ids:
-        sub = det[det["cluster"] == c]
-        frac = 100 * (sub["model_pgal"] >= 0.5).mean() if len(sub) else 0.0
-        lines.append(f"  C{c}: {frac:>3.0f}%   (N={len(sub):,})")
-    ax.text(0.03, 0.97, "\n".join(lines), transform=ax.transAxes, fontsize=8.5, va="top",
-            ha="left", zorder=8, bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.92))
-
-    # ── Row 2b: blend flag (# Gaia detections within 1" of the galaxy centre) ──
-    ax = bax; _base(ax)
-    single = det[det["n_gaia_within_1arcsec"] == 1]
-    multi  = det[det["n_gaia_within_1arcsec"] > 1]
-    ax.scatter(single["umap1"], single["umap2"], s=6, c="#9ecae1", alpha=0.35,
-               linewidths=0, rasterized=True, zorder=2,
-               label=f"single Gaia nucleus ({len(single):,})")
-    ax.scatter(multi["umap1"], multi["umap2"], s=60, c="#e6194b", marker="*",
-               edgecolors="k", linewidths=0.4, zorder=5,
-               label=f"blend: >1 Gaia within 1\" ({len(multi):,})")
-    ax.legend(loc="upper left", fontsize=8.5, framealpha=0.92)
-    ax.set_title("blend flag (# Gaia detections within 1\")", fontsize=12, fontweight="bold")
+    aps_density_panel(fig, ax, det, xlim, ylim, noun="nuclei")
     _clusters(ax)
 
-    # ── Row 2c: nuclei coloured by their assigned UMAP cluster (C0–C4) ──
+    # ── nuclei by assigned UMAP cluster — per-cluster 2D density (denser = darker) ──
     ax = kax; _base(ax)
-    for c in cluster_ids:
-        s = det[det["cluster"] == c]
-        if len(s):
-            ax.scatter(s["umap1"], s["umap2"], s=6, color=CLUSTER_COLOURS[c],
-                       alpha=0.6, linewidths=0, rasterized=True, zorder=2)
-    ax.set_title("nuclei by assigned UMAP cluster", fontsize=13, fontweight="bold")
+    cluster_density_panel(fig, ax, det, xlim, ylim, cluster_ids, noun="nuclei")
     _clusters(ax); _frac_box(ax, det)
 
-    # ── Row 2d: OUTSIDE nuclei relabelled into named inter-cluster streams ──
+    # ── OUTSIDE nuclei relabelled into named inter-cluster streams ──
     ax = sax; _base(ax)
     pts = det[["umap1", "umap2"]].to_numpy()
     outside = outside_mask(pts, q1_emb)
@@ -322,48 +247,74 @@ def plot_overlay(df: pd.DataFrame, tag: str = "v1") -> None:
                  fontsize=12, fontweight="bold")
     _clusters(ax)
 
-    cats = "+".join(sorted(det["nsa_catalog"].astype(str).unique())) if len(det) else tag
-    nd, n = len(det), len(df)
-    fig.suptitle(
-        f"{nd:,} central Gaia nuclei ({cats}) of {n:,} NSA galaxies "
-        f"projected onto the Q1 14-feature UMAP  ·  nucleation {100*nd/max(n,1):.1f}%",
-        fontsize=16, fontweight="bold", x=0.5, y=0.96)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUTPUT_DIR / f"umap_nsa_overlay_{tag}.png"
-    plt.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  -> {out}")
+    fig.suptitle(suptitle, fontsize=16, fontweight="bold", x=0.5, y=0.97)
+    out1 = OUTPUT_DIR / f"umap_nsa_{tag}_clusters.png"
+    plt.savefig(out1, dpi=150, bbox_inches="tight"); plt.close(); print(f"  -> {out1}")
+
+    # ===================== Figure 2: umap_nsa_{tag}.png =====================
+    # Row-2 panels, swapped order: blend flag | XGB P(gal)
+    fig = plt.figure(figsize=(13, 6.8))
+    gs = fig.add_gridspec(1, 2, left=0.04, right=0.955, top=0.86, bottom=0.05, wspace=0.17)
+    bax = fig.add_subplot(gs[0, 0]); pax = fig.add_subplot(gs[0, 1])
+
+    # ── blend flag (# Gaia detections within 1" of the galaxy centre) ──
+    # background = 2D density (log) of the detected nuclei; blends starred on top
+    ax = bax; _base(ax)
+    multi = det[det["n_gaia_within_1arcsec"] > 1]
+    hb = ax.hexbin(det["umap1"], det["umap2"], gridsize=120, cmap="viridis", bins="log", alpha=0.6,
+                   mincnt=1, extent=[xlim[0], xlim[1], ylim[0], ylim[1]], zorder=2)
+    cb = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.02)
+    cb.set_label("nucleus count (log)", fontsize=8); cb.ax.tick_params(labelsize=7)
+    ax.scatter(multi["umap1"], multi["umap2"], s=14, c="red", marker="*", alpha=0.7,
+               edgecolors="w", linewidths=0.4, zorder=5,
+               label=f"blend: >1 Gaia within 1\" ({len(multi):,})")
+    ax.legend(loc="lower left", fontsize=8.5, framealpha=0.92)   # lower-left: clears the frac box
+    ax.set_title("blend flag (# Gaia detections within 1\")", fontsize=12, fontweight="bold")
+    _clusters(ax)
+    _frac_box(ax, det)   # N + per-cluster fractions (same box as the cluster panel)
+
+    # ── XGB P(gal) ──
+    ax = pax; _base(ax)
+    sc = ax.scatter(det["umap1"], det["umap2"], s=6, c=det["model_pgal"], cmap="RdYlBu_r",
+                    vmin=0, vmax=1, alpha=0.6, linewidths=0, rasterized=True, zorder=2)
+    cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+    cb.set_label("XGB P(gal)", fontsize=8); cb.ax.tick_params(labelsize=7)
+    ax.set_title("XGB P(gal)", fontsize=13, fontweight="bold"); _clusters(ax)
+    lines = ["nuclei with P(gal) ≥ 0.5:"]
+    for c in cluster_ids:
+        sub = det[det["cluster"] == c]
+        frac = 100 * (sub["model_pgal"] >= 0.5).mean() if len(sub) else 0.0
+        lines.append(f"  C{c}: {frac:>3.0f}%   (N={len(sub):,})")
+    ax.text(0.03, 0.97, "\n".join(lines), transform=ax.transAxes, fontsize=8.5, va="top",
+            ha="left", zorder=8, bbox=dict(boxstyle="round", fc="white", ec="0.6", alpha=0.92))
+
+    fig.suptitle(suptitle, fontsize=16, fontweight="bold", x=0.5, y=0.97)
+    out2 = OUTPUT_DIR / f"umap_nsa_{tag}.png"
+    plt.savefig(out2, dpi=150, bbox_inches="tight"); plt.close(); print(f"  -> {out2}")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Project NSA nuclei × Gaia onto the UMAP")
-    ap.add_argument("--catalog", choices=["v1", "v0", "both", "v1_euclid"], default="v1",
-                    help="'v1_euclid' = only the v1 nuclei that also have Euclid imaging (151)")
+    ap.add_argument("--catalog", choices=["v1"], default="v1",
+                    help="NSA v1 nuclei × Gaia (the only catalog kept).")
     ap.add_argument("--replot", action="store_true",
-                    help="Skip WSDB + projection; redraw umap_nsa_overlay_<catalog>.png "
-                         "from the saved CSV. --catalog both concatenates saved v1+v0 CSVs.")
+                    help="Skip WSDB + projection; redraw the umap_nsa_v1 figures from the saved CSV.")
     args = ap.parse_args()
 
     if args.replot:
-        if args.catalog == "both":
-            parts = [pd.read_csv(_csv_for(c)) for c in ("v1", "v0") if _csv_for(c).exists()]
-            if not parts:
-                print("No saved NSA CSVs to combine — run a projection first."); return 1
-            df = pd.concat(parts, ignore_index=True)
-        else:
-            csv = _csv_for(args.catalog)
-            if not csv.exists():
-                print(f"{csv} not found — run a full projection first (no --replot)."); return 1
-            df = pd.read_csv(csv)
+        csv = _csv_for(args.catalog)
+        if not csv.exists():
+            print(f"{csv} not found — run a full projection first (no --replot)."); return 1
+        df = pd.read_csv(csv)
         print(f"Replotting {args.catalog} ({len(df):,} galaxies)...")
         plot_overlay(df, args.catalog)
         return 0
 
-    print(f"Loading NSA-Gaia matches ({args.catalog}) from the per-catalog tables...")
+    print(f"Loading NSA-Gaia matches ({args.catalog}) from the crossmatch table...")
     df = load_matches_from_table(args.catalog)
     if df is None or not len(df):
-        print("No NSA matches loaded. Build the tables first (needs a GRANT on the NSA table): "
-              "crossmatch_nsa_v1_gaia.py / crossmatch_nsa_v0_gaia.py.")
+        print("No NSA matches loaded. Build the table first (needs a GRANT on the NSA table): "
+              "crossmatch_nsa_v1_gaia.py.")
         return 1
 
     print("\nProjecting the detected nuclei onto the Q1 UMAP...")
@@ -375,14 +326,6 @@ def main() -> int:
     csv = _csv_for(args.catalog)
     df.to_csv(csv, index=False)
     print(f"\n  -> {csv}")
-    det = df.dropna(subset=["umap1", "umap2"])
-    np.savez_compressed(
-        NSA_ARRAYS / f"nsa_gaia_umap{CSV_SUFFIX[args.catalog]}.npz",
-        nsaid=det["nsaid"].values, source_ids=det["gaia_source_id"].astype("Int64").astype(str).values,
-        nsa_catalog=det["nsa_catalog"].values, umap=det[["umap1", "umap2"]].values,
-        cluster=det["cluster"].values, astrometric_params_solved=det["astrometric_params_solved"].values,
-        model_pgal=det["model_pgal"].values, gal_log_mass=det["gal_log_mass"].values,
-    )
     plot_overlay(df, args.catalog)
     print("\nDone.")
     return 0
