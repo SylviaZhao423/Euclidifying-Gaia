@@ -25,7 +25,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from nsa_gaia_crossmatch_builder import build_table  # noqa: E402
+from builder_nsa_gaia_crossmatch import build_table  # noqa: E402
 
 CFG = dict(
     tag="NSA_v0",

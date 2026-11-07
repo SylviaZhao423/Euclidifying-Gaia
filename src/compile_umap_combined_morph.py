@@ -27,8 +27,8 @@ Writes:
   output/umap/web/umap_combined.html
 
 Usage:
-  python src/compile_umap_combined_morph.py                 # lite build (default)
-  python src/compile_umap_combined_morph.py --no-lite        # full build (embed cutouts)
+  python src/compile_umap_combined_morph.py                 # full build -> umap_combined_morph.html
+  python src/compile_umap_combined_morph.py --lite           # lightweight web build -> umap_combined_morph_lite.html
   python src/compile_umap_combined_morph.py --reproject
   python src/compile_umap_combined_morph.py --max-points 2000
 """
@@ -2642,6 +2642,7 @@ def plot_umap_3d_plotly(
       <div id="sidebar-header">
         <div id="sidebar-eyebrow">Sky + UMAP Explorer</div>
         <div id="sidebar-hint">hover a point · double-click to pin</div>
+        <div id="sidebar-link" style="font-size:11px; margin-top:7px;"><a href="https://qsos-umap.netlify.app" target="_blank" rel="noopener" style="color:#5a9bd5; text-decoration:none;">↗ Companion explorer: dual-quasar candidates</a></div>
       </div>
     <div class="ctrl-bar">
       <span class="ctrl-label">Dataset</span>
@@ -2651,7 +2652,7 @@ def plot_umap_3d_plotly(
         <option value="gaia_lolat">Gaia Low-lat 50k</option>
         <option value="allphz">Q1</option>
         <option value="ero">ERO</option>
-        <option value="ero_rebalanced">ERO Rebalanced</option>
+        <!-- [lite] ERO Rebalanced temporarily hidden; uncomment to restore: <option value="ero_rebalanced">ERO Rebalanced</option> -->
         <option value="euclid_desi">Euclid x DESI</option>
       </select>
     </div>
@@ -3828,7 +3829,7 @@ function showContactSheets(v) {{
     sheetTitle.innerHTML = '<span style="color:' + _pc + '">' + _prefix + 'phz=' + v + ' ' + _lbl + '</span> — no sheets cached';
     sheetImages.innerHTML = ''; sheetView.style.display = 'block'; return;
   }}
-  var keys = Object.keys(clusters).map(Number).sort(function(a,b){{return a-b;}});
+  var keys = Object.keys(clusters).map(Number).filter(function(k){{return !isNaN(k);}}).sort(function(a,b){{return a-b;}});
   var catCounts = counts[v] || {{}};
   var total = _countTotal(catCounts), html = '';
   var _pc = PHZ_COLORS[String(v)] || '#aaa';
@@ -3856,7 +3857,7 @@ function showEROSheets() {{
     var config   = ERO_GROUP_CONFIGS_JS[grp] || {{}};
     var label    = config.label || ERO_GROUP_LABELS[grp] || grp;
     var col      = config.color || '#6a9fd8';
-    var keys = Object.keys(clusters).map(Number).sort(function(a,b){{return a-b;}});
+    var keys = Object.keys(clusters).map(Number).filter(function(k){{return !isNaN(k);}}).sort(function(a,b){{return a-b;}});
     if (!keys.length) return;
     html += '<div class="sheet-cluster-label" style="color:' + col + ';margin-top:10px">' + label + '</div>';
     keys.forEach(function(k) {{
@@ -3887,7 +3888,7 @@ function showEroDesiSheets(catFilter) {{
     if (!clusters) return;
     var counts   = ero_desi_sheet_counts[v] || {{}};
     var label    = ERO_DESI_CAT_LABELS[v] || ('cat=' + v);
-    var keys = Object.keys(clusters).map(Number).sort(function(a,b){{return a-b;}});
+    var keys = Object.keys(clusters).map(Number).filter(function(k){{return !isNaN(k);}}).sort(function(a,b){{return a-b;}});
     if (!keys.length) return;
     var col = ERO_DESI_COLORS[v] || '#CE93D8';
     /* Only show category sub-header when showing multiple categories */
@@ -5381,7 +5382,7 @@ function showEROGroupSheets(group) {{
     sheetTitle.innerHTML = '<span style="color:' + col + '">' + label + '</span> — no sheets cached';
     sheetImages.innerHTML = ''; sheetView.style.display = 'block'; return;
   }}
-  var keys = Object.keys(clusters).map(Number).sort(function(a,b){{return a-b;}});
+  var keys = Object.keys(clusters).map(Number).filter(function(k){{return !isNaN(k);}}).sort(function(a,b){{return a-b;}});
   var total = 0, html = '';
   keys.forEach(function(k) {{
     var n = counts[String(k)] !== undefined ? counts[String(k)] : '?';
@@ -6484,7 +6485,7 @@ def _compute_model_pgal_for_df(df: pd.DataFrame) -> np.ndarray:
 
 def build_combined_html(
     reproject: bool = False,
-    max_points: int = 50000,
+    max_points: int = None,    # [lite]->15000, full->50000 (resolved below)
     seed: int = 42,
     write_output: bool = True,
     lite: bool = False,
@@ -6492,6 +6493,9 @@ def build_combined_html(
     """Load all data and build the 3D UMAP HTML. Returns the HTML string.
     If write_output=True, also writes umap_3d.html to OUTPUT_DIR."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # [lite] point budget: small for the lightweight web build (--lite), full otherwise.
+    if max_points is None:
+        max_points = 15000 if lite else 50000
 
     # ── 1. Load Q1 UMAP ───────────────────────────────────────────────────────
     print("[1] Loading Q1 UMAP embedding...")
@@ -6510,6 +6514,20 @@ def build_combined_html(
             f"{labels_path} not found. Run analyze_umap_q1_clusters.py first."
         )
     q1_labels   = np.load(labels_path)
+
+    # ── LITE: subsample the Q1 background cloud so the inline 3D figure stays small.
+    # Indexes every parallel Q1 array together BEFORE the Euclid features load (which aligns to
+    # q1_sids). DATASET_BASE (full toggle data, read from CSVs) is untouched, so toggles keep all data.
+    if max_points is not None and len(q1_emb) > max_points:
+        _bg_n0 = len(q1_emb)
+        _bgi = _random_subsample_idx(_bg_n0, max_points, seed)
+        q1_emb    = q1_emb[_bgi]
+        q1_labels = q1_labels[_bgi]
+        if q1_gmag is not None:          q1_gmag = q1_gmag[_bgi]
+        if q1_features_base is not None: q1_features_base = q1_features_base[_bgi]
+        if q1_sids is not None:          q1_sids = q1_sids[_bgi]
+        print(f"  [lite] Q1 background subsampled to {len(_bgi):,} (was {_bg_n0:,})")
+
     cluster_ids = sorted(set(q1_labels[q1_labels >= 0]))
     print(f"  Clusters: " + "  ".join(f"C{k}={(q1_labels==k).sum():,}" for k in cluster_ids))
 
@@ -6792,7 +6810,7 @@ def build_combined_html(
         _gaia_xgb_full_emb  = gaia_xgb_emb.copy()
         _gaia_xgb_full_gprob = gaia_xgb_gal_prob.copy()
         # Use all 50k Gaia XGB sources (data is small relative to image blobs)
-        _gxgb_cap = 50_000
+        _gxgb_cap = max_points
         if len(gaia_xgb_emb) > _gxgb_cap:
             _gi = _random_subsample_idx(len(gaia_xgb_emb), _gxgb_cap, seed)
             gaia_xgb_emb       = gaia_xgb_emb[_gi]
@@ -6828,7 +6846,7 @@ def build_combined_html(
                                if "dec" in df_hilat.columns else None
         _gaia_hilat_full_emb   = gaia_hilat_emb.copy()
         _gaia_hilat_full_gprob = gaia_hilat_gal_prob.copy()
-        _ghl_cap = 50_000
+        _ghl_cap = max_points
         if len(gaia_hilat_emb) > _ghl_cap:
             _ghi = _random_subsample_idx(len(gaia_hilat_emb), _ghl_cap, seed)
             gaia_hilat_emb       = gaia_hilat_emb[_ghi]
@@ -6865,7 +6883,7 @@ def build_combined_html(
                                if "dec" in df_lolat.columns else None
         _gaia_lolat_full_emb   = gaia_lolat_emb.copy()
         _gaia_lolat_full_gprob = gaia_lolat_gal_prob.copy()
-        _gll_cap = 50_000
+        _gll_cap = max_points
         if len(gaia_lolat_emb) > _gll_cap:
             _gli = _random_subsample_idx(len(gaia_lolat_emb), _gll_cap, seed)
             gaia_lolat_emb       = gaia_lolat_emb[_gli]
@@ -6929,7 +6947,7 @@ def build_combined_html(
             max_total=max_points, floor=500, seed=seed)
 
     # Subsample ERO overlays (no cap — show all available sources)
-    _ero_cap = 999_999
+    _ero_cap = max_points
     if ero_regular_emb is not None and len(ero_regular_emb) > _ero_cap:
         _ei = _random_subsample_idx(len(ero_regular_emb), _ero_cap, seed)
         ero_regular_emb = ero_regular_emb[_ei]
@@ -7366,14 +7384,15 @@ def main() -> int:
     )
     parser.add_argument("--reproject", action="store_true",
                         help="Force re-projection from raw npz files even if projected CSVs exist.")
-    parser.add_argument("--max-points", type=int, default=50000,
-                        help="Max total overlay points for All PHZ (default: 50000). "
-                             "Classes with <500 sources are kept in full; "
-                             "remaining budget is split proportionally.")
+    parser.add_argument("--max-points", type=int, default=None,
+                        help="Per-layer point budget. Default: 50000 (full) or 15000 with --lite. "
+                             "Classes with <500 sources are kept in full.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--lite", action=argparse.BooleanOptionalAction, default=True,
-                        help="Skip loading cutouts/contact-sheets (fast structure preview). "
-                             "Default: lite. Use --no-lite to embed all cutouts (full build).")
+    parser.add_argument("--lite", action="store_true", default=False,
+                        help="Skip loading cutouts/contact-sheets (structure-only) -> "
+                             "umap_combined_morph_lite.html. Point density is controlled "
+                             "separately by --max-points (e.g. --max-points 15000 for a light "
+                             "build that STILL has cutouts -> umap_combined_morph.html).")
     args = parser.parse_args()
     try:
         build_combined_html(

@@ -22,7 +22,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from qso_gaia_crossmatch_builder import WSDB_HOST, WSDB_DB  # noqa: E402
+from builder_qso_gaia_crossmatch import WSDB_HOST, WSDB_DB  # noqa: E402
 
 NSA = "crossmatch_nsa_v1_gaia"
 Q1  = "crossmatch_q1_mer_phz_vis_gaia_sep"

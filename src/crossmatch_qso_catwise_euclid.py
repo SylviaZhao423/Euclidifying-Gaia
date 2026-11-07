@@ -5,7 +5,7 @@ CatWISE 2020 × Euclid cross-match  →  {schema}.crossmatch_qso_catwise_euclid
 Spatial (q3c) cross-match of catwise_202003.main (W1−W2 >= 0.8 AGN candidates)
 against the combined Euclid footprint (Q1 + ERO) within 1". Closest Euclid source
 per CatWISE source, blend flags, and key Euclid photometry/morphology columns.
-See euclid_crossmatch_builder.py for the mechanism.
+See builder_qso_euclid_crossmatch.py for the mechanism.
 
 CatWISE source filter
 ---------------------
@@ -38,7 +38,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from euclid_crossmatch_builder import build_table, build_table_chunked  # noqa: E402
+from builder_qso_euclid_crossmatch import build_table, build_table_chunked  # noqa: E402
 
 CFG = dict(
     tag="CATWISE2020",

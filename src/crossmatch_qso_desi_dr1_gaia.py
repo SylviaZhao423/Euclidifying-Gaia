@@ -4,7 +4,7 @@ DESI DR1 QSO × Gaia DR3 cross-match  →  {schema}.crossmatch_qso_desi_dr1_gaia
 
 Spatial (q3c) cross-match of the DESI DR1 QSO sample with Gaia DR3 within 1";
 closest Gaia source per QSO, n_gaia_within_1arcsec blend flag, 14 g_<feature>
-columns. See qso_gaia_crossmatch_builder.py for the mechanism.
+columns. See builder_qso_gaia_crossmatch.py for the mechanism.
 
 DESI source table
 -----------------
@@ -20,7 +20,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from qso_gaia_crossmatch_builder import build_table  # noqa: E402
+from builder_qso_gaia_crossmatch import build_table  # noqa: E402
 
 CFG = dict(
     tag="DESI_DR1Q",

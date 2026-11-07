@@ -4,7 +4,7 @@ NSA v1_0_1 galaxies × Gaia DR3 central cross-match (PRIMARY nucleation sample)
     →  {schema}.crossmatch_nsa_v1_gaia
 
 LEFT join (all galaxies kept), closest Gaia source within 1" of the photometric
-centre = nucleus candidate. See nsa_gaia_crossmatch_builder.py for the mechanism
+centre = nucleus candidate. See builder_nsa_gaia_crossmatch.py for the mechanism
 and how this differs from the QSO cross-match.
 
 Galaxy-property columns are normalized to version-agnostic aliases
@@ -27,7 +27,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from nsa_gaia_crossmatch_builder import build_table  # noqa: E402
+from builder_nsa_gaia_crossmatch import build_table  # noqa: E402
 
 CFG = dict(
     tag="NSA_v1",
